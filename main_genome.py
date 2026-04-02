@@ -5,6 +5,10 @@
 
 import os
 import torch
+# PyTorch 2.6+ defaults to weights_only=True, but PyTorch Lightning checkpoints
+# contain argparse.Namespace and numpy objects that fail safe unpickling.
+_original_torch_load = torch.load
+torch.load = lambda *args, **kwargs: _original_torch_load(*args, **{**kwargs, 'weights_only': False})
 import random
 import csv
 import json

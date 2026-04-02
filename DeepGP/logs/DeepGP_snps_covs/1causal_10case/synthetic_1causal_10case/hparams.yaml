@@ -1,0 +1,412 @@
+configs: !!python/object:argparse.Namespace
+  SNP_len: 50
+  activation: gelu
+  batch_size: 16
+  bi_direct: false
+  c_out: 1
+  cont_pheno: false
+  cov_dim: 8
+  d_model: 16
+  data_dir: pukb/genes
+  dm: snps_covs
+  dropout: 0.2
+  dropout_rate: 0.2
+  e_layers: 1
+  enc_in: 1
+  enc_len: 100
+  enc_len_chr:
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 5
+  - 4
+  - 4
+  - 4
+  - 4
+  - 4
+  - 4
+  - 4
+  - 4
+  - 4
+  - 4
+  exp_name: synthetic_1causal_10case
+  final_pool: atten
+  fused_add_norm: true
+  gpus: 1
+  keep: true
+  l2: 0.0001
+  label: 1causal_10case
+  loss_name: null
+  lr: 0.0007
+  max_epoch: 100
+  mn: DeepGP
+  n_fcn: 2
+  n_heads: 4
+  non_add: false
+  num_workers: 4
+  output_attention: false
+  patience: 10
+  pos:
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - &id001 !!python/name:numpy.ndarray ''
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - &id002 !!python/object/apply:numpy.dtype
+      args:
+      - i8
+      - false
+      - true
+      state: !!python/tuple
+      - 3
+      - <
+      - null
+      - null
+      - null
+      - -1
+      - -1
+      - 0
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 5
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAA==
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  - !!python/object/apply:numpy.core.multiarray._reconstruct
+    args:
+    - *id001
+    - !!python/tuple
+      - 0
+    - !!binary |
+      Yg==
+    state: !!python/tuple
+    - 1
+    - !!python/tuple
+      - 4
+    - *id002
+    - false
+    - !!binary |
+      AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAAwAAAAAAAAA=
+  rd_mode: ld_all
+  save_log: true
+  save_results: true
+  scaling: true
+  show: true
+  shuffle: false
+  snp_embed: cov
+  threshold: 0.5
+  use_cov: true
+  use_pcs: true
+  use_sim: ''
+  ve: null

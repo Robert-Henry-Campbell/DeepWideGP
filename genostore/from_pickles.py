@@ -5,6 +5,11 @@
     python main_genome.py --label <label> --rd_mode store ...      # now trains through the store
 
 Writes <dst>/genostore/ (the genotypes), <dst>/samples_{train,test}.tsv and <dst>/store.json.
+
+Labels may be one column, as in the published format, or a matrix [n, n_labels] for the
+multi-disease model. A matrix is written as named columns (names from <src>/label_names.json
+when present, else y0, y1, ...), covariates are named too (<src>/covar_names.json, else cov0,
+cov1, ...), and store.json lists both, which is what switches the loader to named columns.
 """
 import argparse
 import json
@@ -43,14 +48,32 @@ def convert(src, dst, store_name="genostore", block_variants=gf.BLOCK_VARIANTS):
             worst = max(worst, float(np.abs(q[ok] / gf.DOSAGE_SCALE - x[ok]).max()))
         lines = (f"{c + 1}\t{j}\t{genes[c][j]}\tN\tN" for j in range(x.shape[1]))
         gf.write_chrom_from_array(store, str(c + 1), q, lines, block_variants, pos=np.asarray(pos[c]))
+    multi = lab["train"].ndim == 2
+    spec = {"store": store_name, "pos_mode": "pos"}
+    cov_names = _names(src, "covar_names.json", "cov", cov["train"].shape[1])
+    label_names = _names(src, "label_names.json", "y", lab["train"].shape[1]) if multi else ["label"]
+    if multi:
+        spec.update(labels=label_names, covariates=cov_names)
     for s in ("train", "test"):
         with open(os.path.join(dst, f"samples_{s}.tsv"), "w") as f:
-            f.write("\t".join(["IID", "label"] + [f"cov{k}" for k in range(cov[s].shape[1])]) + "\n")
+            f.write("\t".join(["IID"] + label_names + cov_names) + "\n")
             for i in range(n[s]):
-                f.write("\t".join([ids[s][i], repr(lab[s][i].item())] + [repr(float(v)) for v in cov[s][i]]) + "\n")
+                y = [repr(v.item()) for v in np.atleast_1d(lab[s][i])]
+                f.write("\t".join([ids[s][i]] + y + [repr(float(v)) for v in cov[s][i]]) + "\n")
     with open(os.path.join(dst, "store.json"), "w") as f:
-        json.dump({"store": store_name, "pos_mode": "pos"}, f, indent=1)
+        json.dump(spec, f, indent=1)
     return worst
+
+
+def _names(src, fname, prefix, k):
+    path = os.path.join(src, fname)
+    if os.path.exists(path):
+        with open(path) as f:
+            names = list(json.load(f))
+        if len(names) != k:
+            raise ValueError(f"{path} has {len(names)} names for {k} columns")
+        return names
+    return [f"{prefix}{i}" for i in range(k)]
 
 
 def main(argv=None):

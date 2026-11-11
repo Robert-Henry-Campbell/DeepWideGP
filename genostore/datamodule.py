@@ -13,6 +13,13 @@ Dataset directory (same place the legacy pickles live, so --label/--rd_mode stil
     <data_dir>/<label>/<rd_mode>/samples_test.tsv
     <data_dir>/<label>/<rd_mode>/samples_<ve>.tsv    optional external cohorts (--ve)
 
+Many diseases at once (the widened model): store.json names the columns to use,
+    {"store": ..., "labels": ["I10", "E11", ...], "covariates": ["birth_year", "sex", "pc1", ...]}
+Then y is [B, n_labels] (0, 1, or NaN where a label does not apply), every column that is not
+named is ignored, and samples_val.tsv, when present, is the validation set (otherwise 15% of
+the training table is split off at random). Without a "labels" key nothing changes: one "label"
+column, every other column a covariate, stratified split.
+
 "regions" defines the input sequences. Default: one sequence per chromosome in the store.
 Otherwise a list with one entry per sequence, each a list of [chrom, start, stop] segments
 (variant indices, stop exclusive) that are concatenated -- this is how sub-chromosome blocks,
@@ -84,6 +91,9 @@ class StoreBatchDataset(Dataset):
     def __getitem__(self, batch_idx):
         if self._gs is None:                       # one reader per (worker) process
             self._gs = GenoStore(self.store_dir)
+        target = None
+        if isinstance(batch_idx, tuple):           # a sampler that balances on one label says which
+            target, batch_idx = batch_idx
         bi = np.asarray(batch_idx, dtype=np.int64).reshape(-1)
         rows = self.rows[bi]
         geno = []
@@ -99,6 +109,8 @@ class StoreBatchDataset(Dataset):
         out = {"geno": geno, "y": torch.from_numpy(self.y[bi])}
         if self.cov is not None:
             out["cov"] = torch.from_numpy(self.cov[bi])
+        if target is not None:
+            out["target"] = torch.tensor(int(target))
         return out
 
 
@@ -129,6 +141,29 @@ class SNPStoreDataModule(pl.LightningDataModule):
         regions = regions or getattr(configs, "geno_regions", None) or spec.get("regions") or default_regions(self.store)
         self.regions = [[[str(c), int(v0), int(v1)] for c, v0, v1 in seq] for seq in regions]
         self.pos_mode = getattr(configs, "pos_mode", None) or spec.get("pos_mode", "index")
+        # Named columns (multi-disease datasets). ``configs.labels`` may pick a subset, e.g. one
+        # disease for a single-disease model trained on the same dataset.
+        self.label_names = list(spec["labels"]) if spec.get("labels") else None
+        self.cov_names = list(spec["covariates"]) if spec.get("covariates") is not None else None
+        self.multilabel = self.label_names is not None
+        pick = getattr(configs, "labels", None)
+        if pick:
+            pick = [p for p in (pick.split(",") if isinstance(pick, str) else list(pick)) if p]
+            if not self.multilabel:
+                raise ValueError("--labels needs a dataset whose store.json names its label columns")
+            unknown = [p for p in pick if p not in self.label_names]
+            if unknown:
+                raise KeyError(f"--labels: {unknown} are not labels of this dataset ({self.label_names})")
+            self.label_names = pick
+        if self.multilabel:
+            if self.cont:
+                raise ValueError("continuous phenotypes are not supported with named label columns")
+            if self.cov_names is None:
+                raise ValueError('store.json names "labels" but not "covariates"; name both (covariates may be [])')
+            both = sorted(set(self.label_names) & set(self.cov_names))
+            if both:
+                raise ValueError(f"columns named as both label and covariate: {both}")
+        self.train_sampler = None                 # set by the training code to balance batches
 
         # what main_genome.py reads off the data module
         self.genes_chr = [LazyVariantIDs(store_dir, seq) for seq in self.regions]
@@ -139,16 +174,23 @@ class SNPStoreDataModule(pl.LightningDataModule):
         row_of = {s: i for i, s in enumerate(self.store.samples)}
         tr = self._read_table("train", row_of)
         te = self._read_table("test", row_of)
-        if not self.cont:
+        if not self.cont and not self.multilabel:
             for name, t in (("train", tr), ("test", te)):
                 vals = np.unique(t["y"])
                 if not np.all(np.isin(vals, [0, 1])):
                     raise ValueError(f"{name} labels must be encoded as 0/1, found {vals.tolist()}")
-        train_idx, val_idx = train_test_split(np.arange(len(tr["y"])), test_size=0.15, shuffle=True,
-                                              stratify=None if self.cont else tr["y"], random_state=333)
-        self.splits = {"train": {k: v[train_idx] for k, v in tr.items()},
-                       "val": {k: v[val_idx] for k, v in tr.items()},
-                       "test": te}
+        if self.multilabel and os.path.exists(os.path.join(self.dir, "samples_val.tsv")):
+            self.splits = {"train": tr, "val": self._read_table("val", row_of), "test": te}
+        else:
+            # one label: stratified, as the pickle loader does; a label matrix cannot be stratified on
+            strat = None if (self.cont or self.multilabel) else tr["y"]
+            train_idx, val_idx = train_test_split(np.arange(len(tr["y"])), test_size=0.15, shuffle=True,
+                                                  stratify=strat, random_state=333)
+            self.splits = {"train": {k: v[train_idx] for k, v in tr.items()},
+                           "val": {k: v[val_idx] for k, v in tr.items()},
+                           "test": te}
+        self.n_cov = int(self.splits["train"]["cov"].shape[1])
+        self.n_labels = len(self.label_names) if self.multilabel else 1
         self._row_of = row_of
         self._prepare_scaling()
         self._dev = {}
@@ -166,10 +208,22 @@ class SNPStoreDataModule(pl.LightningDataModule):
         missing = [s for s in df["IID"] if s not in row_of]
         if missing:
             raise KeyError(f"samples_{split}.tsv: {len(missing)} IDs are not in the store, e.g. {missing[:3]}")
-        covs = [c for c in df.columns if c not in ("IID", "label")]
-        return {"rows": np.array([row_of[s] for s in df["IID"]], dtype=np.int64),
-                "y": df["label"].to_numpy(),
-                "cov": df[covs].to_numpy(dtype=np.float64)}
+        rows = np.array([row_of[s] for s in df["IID"]], dtype=np.int64)
+        if not self.multilabel:
+            covs = [c for c in df.columns if c not in ("IID", "label")]
+            return {"rows": rows, "y": df["label"].to_numpy(), "cov": df[covs].to_numpy(dtype=np.float64)}
+        absent = [c for c in self.label_names + self.cov_names if c not in df.columns]
+        if absent:
+            raise KeyError(f"samples_{split}.tsv lacks the columns {absent} named in store.json")
+        y = df[self.label_names].to_numpy(dtype=np.float32)          # empty cell -> NaN -> not applicable
+        bad = ~(np.isnan(y) | (y == 0) | (y == 1))
+        if bad.any():
+            col = self.label_names[int(np.argwhere(bad)[0, 1])]
+            raise ValueError(f"samples_{split}.tsv: labels must be 0, 1 or empty; column {col} has other values")
+        cov = df[self.cov_names].to_numpy(dtype=np.float64)
+        if np.isnan(cov).any():
+            raise ValueError(f"samples_{split}.tsv: covariates {self.cov_names} contain missing values")
+        return {"rows": rows, "y": y, "cov": cov}
 
     def _prepare_scaling(self):
         self.snp_mean = self.snp_inv_std = None
@@ -177,7 +231,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         if self.scaling:
             if self.snp_embed == "cov":
                 if self.snp_stats == "train":
-                    mean, std = self.compute_snp_stats(tr["rows"])
+                    mean, std = self._train_snp_stats(tr["rows"])
                 else:                       # statistics stored with the genotypes (all store samples)
                     mean, std = [], []
                     for seq in self.regions:
@@ -197,6 +251,26 @@ class SNPStoreDataModule(pl.LightningDataModule):
                 for sp in self.splits.values():
                     sp["y"] = (sp["y"] - lm) / ls
                 self.label_mean_std = (lm, ls)
+
+    def _train_snp_stats(self, rows):
+        """Training-split SNP statistics, computed once per (training rows, sequences) and kept in
+        the dataset directory: a pass over the training genotypes takes minutes at biobank scale."""
+        import hashlib
+        h = hashlib.sha256(np.ascontiguousarray(rows, dtype=np.int64).tobytes())
+        h.update(json.dumps(self.regions).encode())
+        path = os.path.join(self.dir, f"snp_stats_train_{h.hexdigest()[:16]}.npz")
+        if os.path.exists(path):
+            z = np.load(path)
+            k = len(self.regions)
+            return [z[f"mean{i}"] for i in range(k)], [z[f"std{i}"] for i in range(k)]
+        mean, std = self.compute_snp_stats(rows)
+        try:
+            tmp = path + f".{os.getpid()}.tmp.npz"
+            np.savez(tmp, **{f"mean{i}": m for i, m in enumerate(mean)}, **{f"std{i}": s_ for i, s_ in enumerate(std)})
+            os.replace(tmp, path)
+        except OSError:                           # read-only dataset directory: just recompute next time
+            pass
+        return mean, std
 
     def compute_snp_stats(self, rows, chunk=256, device=None):
         """Per-SNP mean/std of the dosage over ``rows`` (what the legacy loader computes on train)."""
@@ -242,6 +316,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
             x_all.append(td.to_model_input(q, None if mean is None else mean[k], None if inv is None else inv[k]))
         if self.data_mode == "snps_covs":
             x_all.append(batch["cov"])
+        if "target" in batch:
+            return x_all, y, batch["target"]
         return x_all, y
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
@@ -269,6 +345,9 @@ class SNPStoreDataModule(pl.LightningDataModule):
             self.snp_predict = self._dataset(self.splits["test"])
 
     def train_dataloader(self):
+        if self.train_sampler is not None:        # yields whole batches (optionally with a target label)
+            return DataLoader(self.snp_train, sampler=self.train_sampler, batch_size=None,
+                              num_workers=self.num_workers)
         return self._loader(self.snp_train, True)
 
     def val_dataloader(self):
@@ -288,7 +367,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
 
     def eval_dataloder(self, pheno):
         sp = self._read_table(pheno, self._row_of)
-        if not self.cont:
+        if not self.cont and not self.multilabel:
             vals = np.unique(sp["y"])
             if not np.all(np.isin(vals, [0, 1])):
                 raise ValueError(f"{pheno} labels must be encoded as 0/1, found {vals.tolist()}")

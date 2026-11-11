@@ -29,6 +29,14 @@ def std_scaling_chr(x_all,cm=None,cs=None):
     return output,cm,cs
 
 
+def validate_binary_labels(labels, split_name):
+    label_values = np.unique(labels)
+    if not np.all(np.isin(label_values, [0, 1])):
+        raise ValueError(
+            f"{split_name} labels must be encoded as 0/1, found {label_values.tolist()}"
+        )
+
+
 
 class SNPPCACHRDataModule(pl.LightningDataModule):
     def __init__(self,configs):
@@ -84,8 +92,10 @@ class SNPPCACHRDataModule(pl.LightningDataModule):
         assert all((i == test_labels[0]).all() for i in test_labels)
 
         if not self.cont:
-            train_labels_ = train_labels[0]-1
-            test_labels = test_labels[0]-1
+            train_labels_ = train_labels[0]
+            test_labels = test_labels[0]
+            validate_binary_labels(train_labels_, 'train')
+            validate_binary_labels(test_labels, 'test')
             train_idx, val_idx = train_test_split(np.arange(len(train_labels_)),
                                                 test_size=0.15,
                                                 shuffle=True,
@@ -169,6 +179,8 @@ class SNPPCACHRDataModule(pl.LightningDataModule):
         with open(f'{self.load_data_dir}/{self.rd_mode}/covar_{pheno}.pkl', 'rb') as f:
             covs = pickle.load(f)
         labels =labels[0]
+        if not self.cont:
+            validate_binary_labels(labels, pheno)
         if self.scaling:
             covs = std_scaling_chr([covs],self.cov_cm, self.cov_cs)[0][0]
             if self.snp_embed == 'cov':

@@ -60,6 +60,9 @@ def args_initial():
     parser.add_argument('--non_add', action='store_true', default=False, help='whether to use non-additive genes only')
     parser.add_argument('--shuffle', action='store_true', default=False, help='whether to randomly shuffle data')
     parser.add_argument('--cont_pheno', action='store_true', default=False, help='whether the phenotype is continuous')
+    # genotype-store datasets only (ignored by the pickle loader)
+    parser.add_argument('--snp_stats', type=str, default='store', help="SNP scaling statistics: 'store' (computed over all samples at conversion) or 'train' (recomputed on the training split, as the pickle loader does)")
+    parser.add_argument('--pos_mode', type=str, default=None, help="positions for the positional embedding: 'index' or 'pos' (default: what store.json says)")
 
     args = parser.parse_args()
     return args

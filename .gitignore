@@ -172,3 +172,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# multi-disease run outputs and regenerable synthetic stores
+runs/
+pukb/genes/*/store/

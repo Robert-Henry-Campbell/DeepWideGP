@@ -21,6 +21,7 @@ import pytorch_lightning as pl
 from sklearn import metrics
 from models import DeepGP
 from utils import SNPPCACHRDataModule
+from genostore.datamodule import SNPStoreDataModule, is_store_dataset
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -47,7 +48,9 @@ print('Running experiment for the whole genome')
 
 #%% construct dataloaders
 print("Loading data...")
-snpdata = SNPPCACHRDataModule(configs)
+# A dataset directory holding store.json is read lazily from the disk-backed genotype store
+# (genostore/README.md); anything else goes through the original in-RAM pickle loader.
+snpdata = SNPStoreDataModule(configs) if is_store_dataset(configs) else SNPPCACHRDataModule(configs)
 configs.enc_len = len(snpdata.genes)
 configs.enc_len_chr = [len(snp_chr) for snp_chr in snpdata.genes_chr]
 configs.pos = snpdata.pos_chr

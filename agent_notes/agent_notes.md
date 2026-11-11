@@ -63,3 +63,122 @@ Updated README.md and shell script comments to reflect new sizes.
 ### Codebase changes
 
 1. **`main_genome.py`** — Fixed `_pickle.UnpicklingError` when reloading best checkpoint after training. PyTorch 2.6+ changed `torch.load` to default to `weights_only=True`, which rejects `argparse.Namespace` objects saved by PyTorch Lightning in checkpoints. Added `torch.serialization.add_safe_globals([argparse.Namespace])` near the top of the file.
+
+## 2026-11-10 (late evening) — Session: disk-backed genotype store + GPU-capacity benchmark
+
+Asked to (i) measure how many SNPs fit on a 48 GB GPU and (ii) first replace the loader that
+holds everything as float32 in RAM. Results and methods of (i):
+`DeepWideGP-Scripts/scripts/deepgp_gpu_capacity/{methods,results}.md`.
+
+### Codebase changes
+
+1. **`genostore/`** (NEW package: `format.py`, `store.py`, `torch_decode.py`, `datamodule.py`,
+   `convert.py`, `from_pickles.py`, `prefetch.py`, `README.md`) — compact on-disk genotype
+   store (2-bit codes for dosage 0/1/2 + one byte per fractional dosage, ~0.29 byte/genotype),
+   a `.pgen` converter, a memory-mapped reader, GPU-side decoding, and `SNPStoreDataModule`, a
+   drop-in for `SNPPCACHRDataModule`. Read `genostore/README.md` first.
+2. **`main_genome.py`** — two lines: imports the store module and uses it when the dataset
+   directory contains `store.json`; otherwise the original pickle loader runs unchanged.
+3. **`args_generator.py`** — two new optional flags, `--snp_stats` and `--pos_mode` (store
+   datasets only).
+4. **`tests/test_genostore.py`, `tests/test_genostore_datamodule.py`,
+   `tests/test_genostore_pgen.py`** (NEW) — codec/store round trips, resume, equivalence of the
+   new data module with the pickle loader on the synthetic dataset, `.pgen` conversion.
+
+5. **`scripts/genostore_equivalence_check.sh`** (NEW) — trains the synthetic dataset through both
+   loaders and prints the test metrics side by side.
+6. **`pukb/genes/1causal_10case/store/`** (NEW, 2.7 MB) — the synthetic dataset converted with
+   `python -m genostore.from_pickles`; select it with `--rd_mode store`.
+7. **`README.md`** — short "Large datasets" section pointing to `genostore/README.md`.
+
+Model code (`models/`, `layers/`) and `utils.py` were not touched. The equivalence runs left
+`DeepGP/{logs,results}/DeepGP_snps_covs/1causal_10case/genostore_equiv_*` behind.
+
+### Environment
+
+- **No change to `/home/robert/envs/widedeepgp`.** `pgenlib` is still absent there; the
+  converter and its test were run with `/mnt/sdg/robert/miniforge3/envs/gsem-py/bin/python`
+  (pgenlib 0.95.2, numpy 2.4). Installing a freshly downloaded pgenlib wheel was blocked by the
+  permission layer.
+
+### Things worth knowing
+
+- `/mnt/sdh` (where the `.pgen` files are) is one shingled HDD shared with other jobs. A plain
+  reader got ~0.3 MB/s while other jobs were seeking on it; queued 1.28 MB readahead requests
+  got 70 MB/s (`genostore/prefetch.py`). `fincore` reports "100% cached" for files you cannot
+  write — it is not telling the truth there.
+- The `.pgen` files carry dosage tracks: on chr22, ~4% of genotypes are fractional at 0.01
+  resolution and hard-calling would set ~1.2% to missing. Hence a dosage-preserving store.
+- Only small, ID-stripped test subsets were extracted (to `/dev/shm`, deleted afterwards).
+  Bulk conversion of all participants was blocked as a data-handling decision for the user;
+  the command is in `genostore/README.md`.
+- chr2 (658,133 SNPs), not chr1 (600,143), is the longest sequence in the imputed set.
+- `main_genome.py` with `devices=1` uses GPU 0, which other people occupy: set
+  `CUDA_VISIBLE_DEVICES`.
+
+### Headline numbers of the GPU benchmark (571 trials; details in the Scripts repo)
+
+- Published model (d_model 32, 1 layer, fp32): 6.1 KiB of GPU memory per sample per SNP at peak
+  (1.7 KiB kept until backward, summed over all chromosomes held; 4.35 KiB transient for the one
+  chromosome being back-propagated). Rule of thumb for other sizes:
+  (d_model/32) x (4.35 + 1.6 x layers) KiB; bf16 needs 0.55x.
+- One sequence: chr1 length fits at batch 13, chr2 length at batch 12; 126k SNPs at batch 64.
+- All 22 chromosomes, largest batch — imputed (7.81 M SNPs): 3 as written, 5 bf16, 11 with
+  per-chromosome activation checkpointing, 20 with both. HapMap3 (1.05 M): 25 / 44 / 85 / 156.
+- Checkpointing (reference implementation: `checkpointed_class()` in the Scripts repo's
+  `bench_common.py`) gives identical gradients and costs 25–33% more time per step.
+- Speed: 11–18 M sample-SNPs/s for the published size, so ~4 h per epoch for HapMap3 and
+  26–41 h for all imputed SNPs on one GPU (216k training participants).
+- bf16 is not a Trainer flag here: `nn.BCELoss` refuses autocast.
+- The two loaders train identically within GPU run-to-run drift (same losses to 1e-7 for the
+  first 20 steps from one seed).
+
+---
+
+## 2026-11-11 (afternoon) — Session: benchmark re-run on the true imputed SNPs, timing ladder
+
+Follow-up to the entry above, after the user reported that `/mnt/sdh` was free.
+
+### What changed
+
+- **This repo:** only `genostore/README.md` (store sizes updated to the measured 0.277
+  byte/genotype; disk-read time of the full `.pgen` set added). No code change.
+- **Scripts repo, `scripts/deepgp_gpu_capacity/`:** `bench_common.py` (region specs `chrom:C`
+  and `genome` for a store converted from the imputed files), `run_sweep.py` (stages
+  `imputed_real`, `imputed_real_genome`, `speed_ladder`, `imputed_ladder`), `analyze.py` (tables
+  `imputed_standin_vs_true`, `speed_by_batch`; `limit_bracketed` column), new
+  `multilabel_head_check.py`; `methods.md` and `results.md` revised.
+- **Environment:** no change.
+
+### What was done with data
+
+A second 512-participant, ID-stripped subset — this time of the imputed `.pgen` files, all 22
+chromosomes (7,813,490 SNPs with dosages) — was extracted to `/dev/shm` with the idle-only disk
+policy (638 GB read in 2 h 42 min), verified (0 mismatches on the audit rows) and deleted after
+the runs. No genotype copy remains anywhere.
+
+### Results worth knowing (610 trials in total)
+
+- **Every limit is identical on the chromosomes' own imputed SNPs:** chr1 batch 13, chr2 batch 12
+  (21 in bf16); whole genome 3 / 5 / 11 / 20 (as written / bf16 / checkpointed / both). Peak
+  memory within 0.013% of the array-SNP stand-in runs. Memory depends on shape only.
+- **Imputed store size, measured:** 0.277 byte/genotype (2.7% fractional dosages; the earlier
+  "~4%" came from chr22 slices) -> chr1 55 GB, all imputed 721 GB, HapMap3 ~97 GB for 333,444
+  participants.
+- **Fastest measured setting per model, hours per epoch on one GPU, 215,872 participants.**
+  HapMap3: d32x1 4.2 (fp32) / 3.4 (bf16); d64x1 8.1 / 5.6; d64x2 14.3 / 10.6; d128x2 30.5 / 21.2;
+  d256x4 121 / 86. All imputed (bf16): d32x1 23–25; d64x1 43; d64x2 113; d128x2 226; d256x4 899.
+  bf16 is 1.2–1.5x faster than fp32 as well as smaller; checkpointing costs about a quarter of
+  the speed; the largest batch is not the fastest. Timings repeat to about 15%.
+- **A multi-disease output layer costs nothing:** 1 -> 1,000 outputs adds 0.004 GiB and no
+  measurable step time (the head sees 23 pooled vectors per person).
+- **`val_check_interval=300` (batches) in `main_genome.py` is expensive at small batches:** each
+  validation pass costs 3–5% of a training epoch, so at batch 25 (29 passes per epoch) validation
+  would take longer than training. Early stopping (patience 10) then acts after 3,000 batches.
+- Correction to the report behind the previous entry: over all trials the batch-consistency
+  control holds to 1.1e-5 in fp32 (2e-6 at the published model size) and to bf16 rounding
+  (<= 0.004; exactly equal in 104 of 122 bf16 runs). The first report quoted 2e-6 / 5e-5, figures
+  that predated the larger-model stages of the sweep and were not refreshed.
+- Pitfall met while queueing jobs: a shell loop of the form `while pgrep -f PATTERN; do sleep; done`
+  never ends when PATTERN also appears in the loop's own command line (pgrep matches the
+  wrapping shell). Wait on a PID or a marker file instead.

@@ -110,10 +110,24 @@ Each dataset directory (`pukb/genes/<name>/ld_all/`) contains:
 | `pos.pkl` | List of 22 arrays of positional indices | `[array(n_chr1,), ..., array(n_chr22,)]` |
 | `snp_train.pkl` | List of 22 genotype arrays (train) | `[array(n_train, n_chr_i), ...]` |
 | `snp_test.pkl` | List of 22 genotype arrays (test) | `[array(n_test, n_chr_i), ...]` |
-| `label_train.pkl` | List of 22 identical label arrays (1=ctrl, 2=case) | `[array(n_train,), ...]` |
+| `label_train.pkl` | List of 22 identical label arrays (0=ctrl, 1=case) | `[array(n_train,), ...]` |
 | `label_test.pkl` | List of 22 identical label arrays | `[array(n_test,), ...]` |
 | `covar_train.pkl` | Covariate matrix (train) | `array(n_train, 8)` |
 | `covar_test.pkl` | Covariate matrix (test) | `array(n_test, 8)` |
+
+## Large datasets: disk-backed genotype store
+
+The pickle loader above holds every genotype as float32 in RAM, which stops working long before
+UK Biobank scale (chromosome 1 of the imputed set alone would need ~745 GiB). For large data,
+convert the genotypes once into the compact store in `genostore/` and point the dataset directory
+at it with a `store.json`; `main_genome.py` then reads mini-batches from disk and decodes them
+on the GPU, with the same batches reaching the model. See `genostore/README.md`.
+
+```bash
+# worked example on the synthetic data: same dataset, read through the store
+python -m genostore.from_pickles --src pukb/genes/1causal_10case/ld_all --dst pukb/genes/1causal_10case/store
+CUDA_VISIBLE_DEVICES=<gpu> bash scripts/genostore_equivalence_check.sh
+```
 
 ## License
 BSD 3-Clause License
@@ -124,5 +138,4 @@ Copyright (c) 2025, University of Oxford. & Novo Nordisk. All rights reserved.
 Please use the following BibTeX entry.
 ```
 TBA
-
 

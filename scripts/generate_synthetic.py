@@ -7,7 +7,7 @@ Creates pickle files in the same format expected by SNPPCACHRDataModule:
     pos.pkl        - list of 22 arrays of positional indices per chromosome
     snp_train.pkl  - list of 22 arrays, each (n_train, n_snps_chr)
     snp_test.pkl   - list of 22 arrays, each (n_test, n_snps_chr)
-    label_train.pkl - list of 22 identical label arrays (values 1=control, 2=case)
+    label_train.pkl - list of 22 identical label arrays (values 0=control, 1=case)
     label_test.pkl  - list of 22 identical label arrays
     covar_train.pkl - array (n_train, 8)
     covar_test.pkl  - array (n_test, 8)
@@ -77,8 +77,8 @@ def generate_dataset(data_name, n_participants, n_snps, n_cases, n_causal,
         top_indices = np.argsort(liability)[::-1][:n_cases]
         labels[top_indices] = 1
 
-    # Labels use 1=control, 2=case (code subtracts 1)
-    label_values = labels + 1
+    # Labels use 0=control, 1=case
+    label_values = labels
 
     # Train/test split: 80/20
     n_test = max(n_participants // 5, 2)

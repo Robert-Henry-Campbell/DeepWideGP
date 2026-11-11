@@ -60,8 +60,14 @@ python -m genostore.convert ... --chroms $(seq 1 22) --keep-n 4096 --seed 0 --ou
 python -m genostore.convert verify --out /path/to/store     # audit rows vs. what the reader returns
 ```
 
-For a SNP subset such as HapMap3, first cut the `.pgen` with `plink2 --extract ... --make-pgen`
-and convert the result (the converter takes whole files, or `--max-variants N` prefixes).
+For a SNP subset such as HapMap3+, pass `--extract FILE`: a text file whose header names
+`CHROM` and `ID` (or `CHROM` and `POS`). Only the listed variants' records are read from the
+`.pgen`, so no intermediate copy is needed:
+
+```bash
+python -m genostore.convert --pgen-dir /path/Genomics_PGEN --pattern "UKB_chr{chrom}" \
+    --chroms $(seq 1 22) --extract snps.tsv --out /path/to/store
+```
 
 Source-disk etiquette (`--disk-policy`, see `prefetch.py`): the default `idle` only reads the
 source disk while nobody else is reading it, and otherwise consumes pages another job has
@@ -85,6 +91,19 @@ list of `[chrom, start, stop]` segments (variant indices) that are concatenated.
 one sequence per chromosome. This is how sub-chromosome blocks would be expressed (the model
 itself still assumes 22 sequences). `"pos_mode"`: `"index"` (0..L-1, as the synthetic data
 uses) or `"pos"` (the store's position column, bp for UKB).
+
+Multi-disease datasets (`main_multilabel.py`, `methods.md`) add to `store.json`:
+
+```
+"labels":      ["I10", "E11", ...]     label columns of the sample tables; values 0, 1 or empty
+"covariates":  ["birth_year", "sex", ...]   covariate columns; every other column is ignored
+"annotations": {"file": "annotations.npz", "names": [...]}   optional per-SNP annotation vectors:
+                                        one [SNPs, A] array per chromosome under the key chr<chrom>
+```
+
+and a third table, `samples_val.tsv`, which is used as the validation set as given (without it
+15% of the training table is split off). Naming the columns means a disease can never be read
+as a covariate. A dataset without `"labels"` behaves as before.
 
 An existing pickle dataset can be converted for comparison:
 `python -m genostore.from_pickles --src pukb/genes/1causal_10case/ld_all --dst pukb/genes/1causal_10case/store`.
@@ -120,12 +139,14 @@ the pickle loader (7 runs).
 
 ## Not done yet
 
-- No full-cohort conversion has been run (it creates a new copy of participant-level data and
-  needs a decision on where that lives). Measured rate of the all-sample path: ~280 SNPs/s with
-  8 threads, i.e. ~36 min for chr1 and ~8 h for the genome in one process, plus disk time.
-  Disk time, measured on 11 Nov 2026 when `/mnt/sdh` was otherwise nearly idle: all 22 imputed
-  `.pgen` files (638 GB) were read in 2 h 42 min under the default idle-only policy, for a
-  512-participant test subset (0 mismatches on the audit rows of all 7,813,490 SNPs).
+- A full-cohort conversion of all imputed SNPs has not been run. The HapMap3+ subset has (11 Nov
+  2026, `--extract`): 1,258,200 SNPs for 333,444 participants in about 2 h 40 min wall-clock
+  under the idle-only disk policy (about 450-950 SNPs/s with 24 threads while reading), 116 GB
+  (0.277 byte/genotype), 0 mismatches on the audit rows of all 22 chromosomes.
+- Reads go through a memory map. The first pass over a store that is not in the page cache is
+  slow (about 150 MB/s by page faults, which made the one-off training-split SNP statistics of
+  215,872 participants take ten minutes); reading the files once with a few parallel
+  `dd`/`cat` processes warms the cache at disk speed (2.3 GB/s here, 50 s for 116 GB).
 - The layout is block-major (one 4 KB read per sample per 16,384 SNPs). If training I/O ever
   becomes the bottleneck, a row-major repack is the obvious optimisation.
 - GPU-capacity results that motivated this: `DeepWideGP-Scripts/scripts/deepgp_gpu_capacity/`.

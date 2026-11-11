@@ -129,6 +129,42 @@ python -m genostore.from_pickles --src pukb/genes/1causal_10case/ld_all --dst pu
 CUDA_VISIBLE_DEVICES=<gpu> bash scripts/genostore_equivalence_check.sh
 ```
 
+## Many diseases at once: WideDeepGP
+
+`widedeepgp/` widens the model to one output per disease, trained on all of them together.
+The single-disease code above (`main_genome.py`, `models/`, `layers/`, `utils.py`) is unchanged.
+[methods.md](methods.md) describes the data, the model and the training, and lists every
+difference from the single-disease model.
+
+```bash
+# a dataset whose store.json names its "labels" and "covariates" (genostore/README.md)
+CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py --label <dataset> --rd_mode <variant> --snp_stats train \
+    --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --batch_size 16 --exp_name <run>
+python score_snapshots.py --run runs/default/<run> --split val      # every snapshot, with a covariates-only baseline
+CUDA_VISIBLE_DEVICES=<gpu> python tune_optuna.py --study <name> --n_trials 20 -- <the training arguments>
+tensorboard --logdir runs/
+
+# three-minute check on six synthetic traits (generated on first use)
+CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
+```
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--labels a,b` | train on a subset of the dataset's diseases (one disease = the single-disease comparator) | all |
+| `--sampler` | `rotation`: each batch is balanced on one disease in turn; `shuffled` | `rotation` |
+| `--loss_outputs` | `all`: every output learns from every batch; `target`: only the balanced disease | `all` |
+| `--gamma`, `--w_max` | class-weight exponent (0 none, 0.5 square root, 1 parity) and cap | 0.5, 20 |
+| `--no_sampling_correction` | do not divide each person's loss by their sampling rate | off |
+| `--annot` | per-SNP annotation vectors as a gain and offset on the token embedding | off |
+| `--mixer` | `bimamba1` (the published block) or `mamba3` (needs `scripts/setup_mamba3_env.sh`) | `bimamba1` |
+| `--precision bf16`, `--grad_ckpt`, `--accumulate N` | mixed precision, per-chromosome checkpointing, gradient accumulation | off, off, 1 |
+| `--val_per_epoch`, `--stop_patience`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, budget | 4, 8, 30 |
+| `--resume`, `--init_from <snapshot>` | continue a run; start from saved weights (new output layer if the diseases differ) | |
+
+A run directory holds `config.json`, TensorBoard files, `metrics.csv`, weight snapshots with
+`snapshots.csv` (what each cost), `checkpoints/best.ckpt` and `last.ckpt`, and `results.json`.
+Tests: `python -m pytest tests/test_ml_*.py -q` (the model and training tests need a GPU).
+
 ## License
 BSD 3-Clause License
 

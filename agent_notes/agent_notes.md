@@ -182,3 +182,96 @@ the runs. No genotype copy remains anywhere.
 - Pitfall met while queueing jobs: a shell loop of the form `while pgrep -f PATTERN; do sleep; done`
   never ends when PATTERN also appears in the loop's own command line (pgrep matches the
   wrapping shell). Wait on a PID or a marker file instead.
+
+## 2026-11-11 (evening) — Session: the DeepGP widening plan (one model, 30 diseases)
+
+Plan: `/home/robert/.claude/plans/call-this-deepgp-widening-crystalline-waterfall.md` (revision 3,
+approved by Robert). Scientific description: `methods.md` at the repo root. Work is on branch
+`widening` (not pushed). The single-disease code (`models/`, `layers/`, `utils.py`,
+`main_genome.py`, existing tests) is untouched.
+
+### Codebase changes (this repo)
+
+- **Baseline commit** of what was uncommitted: Robert's April 0/1 label re-encoding and the
+  November genostore work.
+- **`genostore/convert.py`:** `--extract FILE` converts a listed SNP subset straight from the
+  `.pgen` (reads only those records; sparse read-ahead that respects the idle-disk policy).
+- **`genostore/datamodule.py`:** `store.json` may name `"labels"` and `"covariates"` (then only
+  those columns are read, so a disease can never become a covariate), `samples_val.tsv` is used
+  as the validation set when present, labels are checked per column (0, 1 or empty), a batch
+  sampler can be attached (`train_sampler`), per-SNP training statistics are cached, and
+  `"annotations": {"file", "names"}` points at per-chromosome annotation matrices. A dataset
+  without `"labels"` behaves as before.
+- **`genostore/from_pickles.py`:** 2-D labels become named columns.
+- **`args_generator.py`:** `args_initial(argv=None)` and the multi-disease flags (inert for
+  `main_genome.py`).
+- **New package `widedeepgp/`:** `labels.py`, `samplers.py` (rotation of disease-balanced
+  batches; every batch a function of seed and batch number), `losses.py` (sampling-rate
+  correction, class weights, per-disease normalisation), `metrics.py`, `blocks.py` (sequence-block
+  factory: the published block, or Mamba-3 in a bidirectional wrapper), `model.py`
+  (`WideDeepGP`; same parameter names as the published class), `callbacks.py` (snapshots, run
+  log, early stopping and Optuna pruning that survive a resume), `train.py` (`run_training`).
+  Annotation vectors live in `model.py` (the plan named a separate `embed.py`; not needed).
+- **New entry points:** `main_multilabel.py`, `score_snapshots.py`, `tune_optuna.py`.
+- **New scripts:** `scripts/generate_synthetic_multilabel.py`, `scripts/multilabel_synthetic.sh`,
+  `scripts/check_synthetic_run.py` (+ `multilabel_synthetic_seeds.csv`, the five-seed table its
+  bands are computed from), `scripts/setup_mamba3_env.sh`.
+- **New tests:** `tests/test_ml_{labels,sampler,loss}.py` (CPU), `test_ml_{model,train}.py`
+  (GPU, fork environment), `test_ml_mamba3.py` (GPU, Mamba-3 environment),
+  `tests/ml_helpers.py`, `tests/conftest.py` (`slow` marker).
+- **Docs:** `methods.md` (new), README section "Many diseases at once".
+
+### Codebase changes (DeepWideGP-Scripts)
+
+New analysis folder `scripts/build-ard30-dataset/`: `make_snp_list.R` (HapMap3+ ∩ lab PGEN),
+`build_dataset.py` (labels via the code of `find-ukb-ard-phenos`, covariates, splits,
+annotations), `describe_dataset.py` (aggregate description), `test_build_dataset.py`,
+`methods.md`, `results/` (aggregate tables only).
+
+### Environment changes
+
+- `/home/robert/envs/widedeepgp`: `optuna 5.0.0` added (with its dependencies alembic, colorlog,
+  sqlalchemy, Mako, greenlet, tqdm). Nothing else changed.
+- **New environment `/mnt/sdg/robert/envs/widedeepgp-m3`** for Mamba-3 (upstream `mamba_ssm`
+  2.3.2.post1 from source, commit e9594ce; torch 2.10.0+cu128, numpy 1.26.4, Lightning 2.0.8),
+  built by `scripts/setup_mamba3_env.sh`. Upstream and the Vision-Mamba fork are both called
+  `mamba_ssm`, so they cannot share an environment.
+
+### Data written (all under `/mnt/sdg/robert/deepwidegp/data/`, outside git)
+
+- `reference/hm3plus_in_ukb_pgen.tsv`: the 1,258,200 HapMap3+ SNPs present in the lab PGEN.
+- `genostore/hm3plus/`: those SNPs for all 333,444 participants (116 GB; verified, 0 mismatches
+  on the audit rows of every chromosome).
+- `datasets/ard30/hm3plus/`: train 215,872 / tune 20,000 / test 40,000 unrelated White British;
+  57,445 related held out; `store.json`, `labels.json`, `annotations.npz`, `build_log.json`.
+- `datasets/ard30/hm3plus_asian_black/`: 9,408 Asian and 7,631 Black participants, held out.
+
+### Things worth knowing
+
+- **Only 1,258,200 of the 1,444,196 HapMap3+ SNPs are in the lab PGEN** (MAF ≥ ~1% and other QC
+  filters). The 10 Nov synthesis assumed all HapMap3 SNPs were present.
+- **Field 34 (year of birth) is not in the phenotype extract.** It is reconstructed as
+  assessment date − age at recruitment − 0.5 (error ≤ half a year).
+- **The disease list changed after the plan was written** (J18, J22 dropped as infectious, I84
+  and K64 merged, …). The builder reads the list from the selection file and checks all 90 case
+  counts against it, so the file is authoritative; rarest is now I21 (3.7%).
+- **A batch balanced on one disease is not balanced for the others.** With the real labels the
+  rarest disease is 7.8% of a rotation's draws, not 50%. All 30 outputs learn from every batch;
+  the loss divides by each person's sampling rate (0.55 for someone with none of the 30
+  diseases, > 3.1 for the top 1%) and weights cases by the square root of the odds.
+- **bf16:** pooling, head and loss stay in float32; averaging a chromosome in bf16 distorted
+  the between-person signal by about 10% in a probe.
+- **Lightning 2.0.8 traps handled in `train.py`/`callbacks.py`:** a resumed run repeats the
+  validation its checkpoint was written after (the run log, early stopping and Optuna pruning
+  ignore the repeat); the optimiser steps on an epoch's last batch (validation intervals are
+  multiples of the accumulation factor); a step-triggered checkpoint is written before the step
+  is counted (the resumable `last.ckpt` is written after validation only).
+- **Mamba-3 (upstream) pitfalls:** its declared dependencies (tilelang, apache-tvm-ffi,
+  quack-kernels) upgrade torch and numpy and make `import mamba_ssm` fail on Python 3.10, so it
+  is installed with `--no-deps`; newer setuptools has no `pkg_resources`, which Lightning 2.0.8
+  imports, so `setuptools<70` is pinned; the single-input kernel always computes in bf16
+  internally; the first call of each kernel compiles for 1–2 minutes.
+- **Do not edit a shell script while it is running** (bash reads it incrementally; an edit
+  mid-run made the environment build execute a garbled line). Run long jobs from a frozen copy.
+- `pkill -f PATTERN` kills the calling shell too when PATTERN is in its own command line; kill
+  by PID.

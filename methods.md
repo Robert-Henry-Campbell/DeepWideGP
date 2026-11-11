@@ -1,0 +1,587 @@
+# Methods: WideDeepGP, a multi-disease extension of DeepGP
+
+*DeepWideGP repository, DPhil chapter 6. Written 11 November 2026. This document describes the
+data, the model and how it is trained. The code has been run on synthetic data and on the real
+dataset's plumbing; no result of a real-data training run is reported here.*
+
+## 1. Question
+
+DeepGP (Zhu et al., 2025) predicts one disease from genome-wide SNP data with a deep sequence
+model: one bidirectional state-space encoder per chromosome, pooled and combined with
+covariates. We ask whether one such network can predict many age-related diseases (ARDs) at
+once, so that diseases share what the encoders learn, and what has to change in the data, the
+network and the training to make that possible. This document covers the model that answers
+that question, WideDeepGP, and marks every departure from the single-phenotype model
+(section 10).
+
+## 2. Data and phenotyping
+
+### 2.1 Cohort
+
+UK Biobank is a prospective cohort of about 500,000 adults aged 40–69 years at recruitment
+(2006–2010) (Sudlow et al., 2015). We used the local extract of application 15181 (18 November
+2024; 502,399 participants) and the laboratory's quality-controlled imputed genotypes.
+
+| Step | Participants |
+|---|---|
+| In the phenotype extract | 502,399 |
+| After removing withdrawals (list of 25 April 2024) | 502,165 |
+| In the quality-controlled imputed-genotype files | 333,444 |
+| Of those: not withdrawn | 333,324 |
+| Of those: White-British genetic ancestry (field 22006) | 333,317 |
+| Of those: no relative identified in UK Biobank (field 22021 = 0) | **275,872** |
+
+All training, tuning and testing use the 275,872 unrelated White-British participants. Field
+22021 = 0 means that UK Biobank's kinship inference found no relative of third degree or
+closer among all genotyped participants, so no participant in any split has a relative in
+another split.
+
+**Held out and not used.** Labels, covariates and genotypes were prepared with the same
+definitions for two further groups, which take no part in training, tuning or testing and are
+kept for later validation:
+
+- the 57,445 White-British participants with an identified relative;
+- the 9,408 Asian and 7,631 Black participants of the laboratory's second genotype set (17,055
+  genotyped, of whom 16 had withdrawn; none lacks a covariate).
+
+### 2.2 Diseases
+
+The prediction targets are 30 phenotypes selected by the analysis `find-ukb-ard-phenos`
+(DeepWideGP-Scripts; 11 November 2026), whose `methods.md` gives the full account. In summary:
+
+**Source of the ARD set.** The age-related diseases are the both-sex ARD set of the ardmr
+resource: Global Burden of Disease (GBD) causes classified as age-related from trend statistics
+of GBD estimates. Its 127 entries map, through GBD's cause-of-death code lists, to 909
+three-character ICD-10 categories.
+
+**Candidates.** A later ICD-10 edition moved haemorrhoids from I84 to K64, and in these data
+I84 records end and K64 records begin around 2016. The two categories were therefore merged
+into one phenotype (a case has either code), leaving 908 candidates.
+
+**Selection.** Eight criteria were applied in a fixed order, and the 30 phenotypes with the most
+cases were then kept. Each excluded phenotype is attributed to the first criterion it failed.
+
+| Criterion | Excluded | Remaining | Excluded phenotypes |
+|---|---|---|---|
+| Candidates | – | 908 | |
+| 1. Linked to an age-related GBD cause | 0 | 908 | |
+| 2. More than 10,000 cases among unrelated White-British participants | 844 | 64 | |
+| 3. Not a sign or symptom (ICD-10 chapter XVIII) | 5 | 59 | R00, R06, R07, R11, R19 |
+| 4. Not highly sex-skewed (more than 95% of cases of one sex) | 3 | 56 | C50, C61, N40 |
+| 5. Not a residual "other" category | 13 | 43 | B96, E87, I51, K22, K31, K52, K59, K62, K63, K92, M13, M25, M79 |
+| 6. Not a record of health-care contact (Z00–Z99, Y40–Y84) | 9 | 34 | Y83, Z50, Z51, Z88, Z90, Z91, Z92, Z95, Z96 |
+| 7. GBD code map describes the condition | 1 | 33 | J45 |
+| 8. Not an infectious disease | 2 | 31 | J18, J22 |
+| 9. The 30 with the most cases | 1 | 30 | J90 |
+
+Criteria 2, 3, 4 and 6 are explicit rules; criteria 5, 7 and 8 are judgements recorded with
+their reasons in that analysis. Three phenotypes with imperfect code maps were reviewed there
+and kept (C44, N17, I95), and three are predominantly but not exclusively of one sex (K40, 92%
+of cases male; M81, 83% female; E03, 79% female).
+
+**The 30 phenotypes**, with cases in each split (section 2.5):
+
+| Phenotype | ICD-10 | Training cases (%) | Tuning cases | Test cases |
+|---|---|---|---|---|
+| Essential (primary) hypertension | I10 | 68,309 (31.6) | 6,255 | 12,729 |
+| Disorders of lipoprotein metabolism and other lipidaemias | E78 | 34,953 (16.2) | 3,153 | 6,378 |
+| Diverticular disease of intestine | K57 | 30,506 (14.1) | 2,784 | 5,624 |
+| Gastro-oesophageal reflux disease | K21 | 25,427 (11.8) | 2,387 | 4,671 |
+| Gastritis and duodenitis | K29 | 24,564 (11.4) | 2,238 | 4,512 |
+| Diaphragmatic hernia | K44 | 24,297 (11.3) | 2,271 | 4,524 |
+| Chronic ischaemic heart disease | I25 | 23,558 (10.9) | 2,126 | 4,299 |
+| Other arthrosis | M19 | 21,544 (10.0) | 1,966 | 4,006 |
+| Haemorrhoids | I84, K64 | 21,296 (9.9) | 1,962 | 3,989 |
+| Atrial fibrillation and flutter | I48 | 18,365 (8.5) | 1,670 | 3,346 |
+| Gonarthrosis [arthrosis of knee] | M17 | 18,227 (8.4) | 1,675 | 3,476 |
+| Other malignant neoplasms of skin | C44 | 17,671 (8.2) | 1,676 | 3,303 |
+| Non-insulin-dependent diabetes mellitus | E11 | 17,345 (8.0) | 1,663 | 3,143 |
+| Obesity | E66 | 16,800 (7.8) | 1,478 | 2,999 |
+| Dorsalgia | M54 | 14,550 (6.7) | 1,310 | 2,631 |
+| Benign neoplasm of colon, rectum, anus and anal canal | D12 | 14,337 (6.6) | 1,309 | 2,684 |
+| Angina pectoris | I20 | 14,234 (6.6) | 1,284 | 2,609 |
+| Other hypothyroidism | E03 | 13,242 (6.1) | 1,211 | 2,383 |
+| Inguinal hernia | K40 | 12,541 (5.8) | 1,140 | 2,224 |
+| Coxarthrosis [arthrosis of hip] | M16 | 12,286 (5.7) | 1,106 | 2,287 |
+| Cholelithiasis | K80 | 12,194 (5.6) | 1,118 | 2,253 |
+| Acute renal failure | N17 | 11,340 (5.3) | 1,007 | 2,043 |
+| Chronic renal failure | N18 | 10,337 (4.8) | 943 | 1,911 |
+| Other chronic obstructive pulmonary disease | J44 | 9,884 (4.6) | 986 | 1,906 |
+| Internal derangement of knee | M23 | 9,585 (4.4) | 872 | 1,821 |
+| Spondylosis | M47 | 9,492 (4.4) | 797 | 1,722 |
+| Hypotension | I95 | 9,153 (4.2) | 834 | 1,639 |
+| Heart failure | I50 | 8,851 (4.1) | 814 | 1,548 |
+| Osteoporosis without pathological fracture | M81 | 8,604 (4.0) | 840 | 1,615 |
+| Acute myocardial infarction | I21 | 8,090 (3.7) | 730 | 1,541 |
+
+Haemorrhoids are the union of two categories (see above); every other phenotype is one
+three-character category. Training prevalence runs from 3.7% (acute myocardial infarction) to
+31.6% (hypertension), with a median of 6.7%. A participant of the training split has 2.5 of
+the 30 phenotypes on average: 32% have none, 17% have one and 20% have five or more.
+
+### 2.3 Case definition
+
+A participant is a case for a phenotype if at least one record carries an ICD-10 code whose
+first three characters are one of the phenotype's categories, in any of three linked sources:
+
+1. hospital inpatient diagnoses (field 41270), in any diagnostic position of any admission;
+2. the death registry, as underlying (field 40001) or contributory (field 40002) cause;
+3. the cancer registry (field 40006; the extract holds the first registration only).
+
+Ascertainment is lifetime: records of any date in the linkage period count, so cases include
+conditions diagnosed before recruitment and after it. Every other participant is a non-case; no
+participant is excluded for having related codes, and no phenotype is restricted to one sex.
+The label matrix is built with the code of the selection analysis, and its case counts were
+checked to equal that analysis's counts exactly, for all 30 phenotypes, in each of its three
+populations (all participants, genotyped White British, unrelated White British).
+
+### 2.4 Covariates
+
+Twelve covariates enter the model, and the polygenic-score comparators are given the same
+twelve: year of birth, sex (field 31) and the first ten genetic principal components (field
+22009). They are standardised with the training-split mean and standard deviation.
+
+Year of birth is used instead of age at recruitment because case status is ascertained over
+the whole linkage period: with follow-up ending on a common date, a participant's age at the
+end of follow-up is fixed by when they were born, not by when they happened to be recruited.
+Field 34 (year of birth) is not in the extract. It was reconstructed as the date of the first
+assessment (field 53) minus age at recruitment in completed years (field 21022) minus one half,
+the midpoint of the year in which the birth must lie, so the error is at most half a year.
+
+### 2.5 Splits
+
+The 275,872 participants were split once into 215,872 for training, 20,000 for tuning and
+40,000 for testing, by a seeded random permutation of the sorted participant identifiers (seed
+20261111). The tuning set decides when training stops, which snapshot is kept and every
+hyper-parameter; the test set is scored only after those choices are made, and the scoring
+script refuses to read it without an explicit flag and logs each access.
+
+With 20,000 tuning participants the rarest phenotype has 730 tuning cases, which puts the
+standard error of its tuning AUROC near 0.011 (Hanley and McNeil, 1982, at an AUROC of 0.6);
+the mean over 30 phenotypes is correspondingly steadier.
+
+### 2.6 Limitations of the phenotypes
+
+These are the limitations recorded by the selection analysis that bear on the labels:
+
+- **Hospital-based ascertainment.** Conditions managed mainly in primary care or outpatient
+  clinics (for example hypertension, osteoarthritis) are under-ascertained; a non-case may have
+  the condition without an admission that records it.
+- **Not population prevalence.** Ascertainment depends on follow-up time and birth year, few
+  records predate 1997, and UK Biobank participants are healthier than the general population.
+- **Partial cancer registry.** Only the first registration per participant is available.
+- **ICD-9 records** (field 41271) were not used.
+- **Withdrawals** are those of 25 April 2024; later withdrawals must be removed before
+  publication.
+- **Conservative relatedness filter.** Everyone with any identified relative is excluded,
+  not one member of each related pair.
+
+## 3. Genotypes
+
+**SNP set.** The input is the HapMap3+ set of Privé et al. (2023): the 1,054,330 HapMap3
+variants used by LDpred2 plus 389,866 variants added to improve tagging, 1,444,196 in all. The
+laboratory's genotype files (UK Biobank imputed data v3, GRCh37, bi-allelic SNPs, filtered on
+minor-allele frequency, Hardy–Weinberg equilibrium and missingness) contain 1,258,200 of them
+(87.1%), matched by chromosome, position and both alleles: 1,012,953 of the HapMap3 variants
+and 245,247 of the added ones. Of the 185,996 that are absent, 116,513 have a minor-allele
+frequency below 1% in UK Biobank (the files hold nothing rarer than about 1%) and 69,483 failed
+the other filters. The model uses all 1,258,200, from 105,260 on chromosome 2 down to 17,844 on
+chromosome 21.
+
+**No SNP selection.** Published DeepGP chooses its input SNPs separately for each disease, by a
+GWAS p-value filter followed by clumping. Here one fixed set serves all diseases: a network
+whose encoders are shared between diseases needs one input, and a fixed set also removes any
+dependence of the input on the training labels.
+
+**Encoding.** A genotype is the dosage of the alternate allele (0 to 2; imputed dosages kept at
+a resolution of 0.01). Each SNP is standardised with its mean and standard deviation in the
+training split; a missing genotype is set to the mean. Genotypes are stored in a compact
+on-disk format and decoded on the GPU (`genostore/README.md`).
+
+**Annotations.** For the annotated variant of the model (section 4.2), each SNP carries the 96
+functional annotations of the baseline-LD model, version 2.2 (Gazal et al., 2017), as
+distributed with SBayesRC (Zheng et al., 2024): coding, conserved, regulatory and
+histone-mark annotations with their flanking windows, minor-allele-frequency bins, and
+continuous measures such as allele age, recombination rate and background selection. The table
+covers 1,250,863 of the 1,258,200 SNPs (99.4%); the others get zeros and a 97th channel marking
+"no annotation". Each channel is standardised over the model's SNPs.
+
+## 4. Model
+
+The network maps a participant's genotypes and covariates to one logit per disease. Only
+sections 4.2 and 4.7 differ in kind from published DeepGP; section 10 lists every difference.
+
+![Figure 1. WideDeepGP](figures/widedeepgp_architecture.png)
+
+**Figure 1. WideDeepGP.** Each of the 22 chromosomes is a sequence of standardised SNP dosages
+with its own token embedding and its own bidirectional state-space encoder; the encoder output
+is averaged over the chromosome's SNPs. The covariates pass through a small perceptron. One
+attention layer runs across the resulting 23 vectors, and a shared hidden layer feeds one logit
+per disease. Stacked outlines mark the parts that exist once per chromosome, with weights that
+are not shared between chromosomes. Tinted boxes with a heavy outline are new or changed
+relative to single-phenotype DeepGP (tagged "new" or "changed"); plain boxes are as published.
+Training draws batches that are balanced on one disease at a time, in rotation, and every
+output learns from every batch through a loss that corrects for how often each participant is
+drawn. The annotation step is optional and is off in the base model. (Vector version and the
+component table: `figures/widedeepgp_architecture.pdf`, `figures/widedeepgp_architecture_data.csv`;
+drawn by `scripts/make_architecture_figure.py`.)
+
+### 4.1 Input and token embedding
+
+Each chromosome is a sequence of standardised dosages, one token per SNP, in genomic order. A
+token's embedding is the sum of two parts, followed by dropout:
+
+- a **value embedding**: a one-dimensional convolution over the dosage sequence with a kernel
+  of three SNPs, from one channel to *d* (the model width), without bias and with circular
+  padding, so each token also sees its two neighbours;
+- a fixed **sinusoidal position embedding** of the SNP's index along the chromosome, with
+  wavelengths in geometric progression (base 10⁶).
+
+### 4.2 Annotation gain and offset (annotated variant)
+
+With annotations switched on, the value embedding of SNP *s* is modified before the position
+embedding is added:
+
+    token_s = value_s × (1 + G a_s) + H a_s + position_s
+
+where *a_s* is the SNP's standardised annotation vector and *G* and *H* are linear maps from
+the annotations to the model width. The gain lets an annotation scale how strongly a SNP's
+genotype enters the network, which mirrors how SBayesRC uses annotations (they change a SNP's
+expected effect size); the offset lets it mark the SNP irrespective of genotype. Annotations
+describe the SNP, not the person, so the gain and offset are computed once per chromosome and
+shared by everyone in the batch. One pair of maps serves all chromosomes, since the meaning of
+an annotation does not depend on the chromosome. Both maps start at zero, so the annotated
+model starts as the plain model and weights trained without annotations can be loaded into it.
+
+### 4.3 Sequence encoder
+
+Each chromosome has its own encoder of *L* layers. A layer normalises its input (layer
+normalisation), passes it through a bidirectional selective state-space block and adds the
+result to a residual stream; a final root-mean-square normalisation follows the last layer.
+
+The block is the bidirectional Mamba block of Vision Mamba (Zhu et al., 2024), built on Mamba
+(Gu and Dao, 2023), as in published DeepGP. The input is projected to twice the model width and
+split into a signal and a gate. The signal passes through a depthwise convolution (kernel 4)
+and a SiLU non-linearity and then drives a selective state-space recurrence with 16 states per
+channel, whose transition, input and output parameters depend on the token. The recurrence is
+run once along the chromosome and once in reverse, and the two outputs are summed, gated and
+projected back to the model width. In the variant used ("v1"), the two directions share the
+convolution and the projections and differ only in their state matrices. Computation and
+memory grow linearly with the number of SNPs, which is what allows a whole chromosome to be one
+sequence.
+
+**Mamba-3 (candidate).** Mamba-3 (Lahoti et al., 2026) is implemented as an alternative block
+and is being evaluated. Upstream Mamba-3 runs in one direction only, so two blocks are used per
+layer, one reading the chromosome forwards and one backwards, each with its own weights, and
+their outputs are summed. It is in single-input mode with a state size of 16, the state size of
+the current block (Mamba-3's default of 128 would add parameters that outweigh the rest of a
+block this narrow). At a model width of 32 the pair has 14,980 parameters per chromosome and
+layer against the current block's 11,008. Two properties of the upstream implementation matter
+here: its kernel computes the recurrence in bf16 whatever the precision of the rest of the
+network, so a "32-bit" run with this block is 32-bit everywhere except inside the recurrence;
+and its backward pass is incompatible with the checkpointing variant used for the current
+block, so its encoders are checkpointed with the re-entrant variant, which gives the same
+outputs and gradients. The decision rule was fixed in advance: Mamba-3 replaces the current
+block only if it runs at chromosome length and its mean tuning AUROC in the pilot exceeds the
+current block's by more than the seed-to-seed spread at equal GPU-hours; otherwise it is
+dropped.
+
+### 4.4 Pooling
+
+The encoder's output is averaged over the SNPs of the chromosome, giving one vector of width
+*d* per chromosome. Under mixed precision the average is taken in 32-bit floating point
+(section 6).
+
+### 4.5 Covariate encoder
+
+The covariates pass through a two-layer perceptron (hidden width 256, ReLU, dropout 0.1) and a
+root-mean-square normalisation, giving a 23rd vector of width *d*.
+
+### 4.6 Attention across chromosomes
+
+One transformer encoder layer (multi-head self-attention, a feed-forward layer of width 4*d*,
+layer normalisation, dropout 0.1) runs over the 23 vectors, so that the representation of each
+chromosome can depend on the others and on the covariates.
+
+### 4.7 Output head
+
+The 23 vectors are concatenated and passed through a linear layer to a shared hidden layer of
+256 units (ReLU, dropout 0.1) and a final linear layer with one output per disease. The outputs
+are logits; the sigmoid is applied in the loss. Diseases therefore share everything up to the
+hidden layer and differ only in the last linear map: 257 parameters per disease.
+
+### 4.8 Parameter counts
+
+Trainable parameters with 30 outputs and 12 covariates, counted from the constructed network.
+The number does not depend on the number of SNPs.
+
+| Width *d* | Layers | One sequence block | 22 chromosome encoders | Covariate encoder | Attention layer | Head | Total | Annotation maps |
+|---|---|---|---|---|---|---|---|---|
+| 32 | 1 | 11,008 | 244,992 | 11,584 | 12,704 | 196,382 | **465,662** | +6,272 |
+| 32 | 2 | 11,008 | 487,168 | 11,584 | 12,704 | 196,382 | **707,838** | +6,272 |
+| 64 | 1 | 34,816 | 771,584 | 19,840 | 49,984 | 384,798 | **1,226,206** | +12,544 |
+| 64 | 2 | 34,816 | 1,537,536 | 19,840 | 49,984 | 384,798 | **1,992,158** | +12,544 |
+| 128 | 2 | 120,832 | 5,327,872 | 36,352 | 198,272 | 761,630 | **6,324,126** | +25,088 |
+| 256 | 2 | 446,464 | 19,666,944 | 69,376 | 789,760 | 1,515,294 | **22,041,374** | +50,176 |
+
+The chromosome encoders include each chromosome's token embedding (3*d* parameters) and final
+normalisation (*d*). The head is the linear layer from the 23 concatenated vectors to the
+hidden layer (23·*d*·256 + 256) plus 257 parameters per disease. The annotated variant adds two
+maps from the 97 annotation channels to the model width, 2·(97·*d* + *d*) parameters, shared by
+all chromosomes.
+
+For reference, the published single-phenotype configuration (*d* = 32, one layer, eight
+covariates, one output) has 457,185 parameters. Thirty outputs instead of one add 7,453, and
+twelve covariates instead of eight add 1,024.
+
+## 5. Training objective
+
+### 5.1 Batches
+
+Most diseases are uncommon, and a small batch drawn at random often contains no case of the
+rarer ones (with 21 participants, 45% of batches hold no case of the rarest phenotype). Batches
+are therefore drawn by a **rotation**:
+
+- each batch has a *target* disease; half its participants are drawn from the target's cases
+  and half from its non-cases;
+- one rotation makes every disease the target once, in an order reshuffled at every rotation;
+- cases and non-cases of each disease are each visited in shuffled passes, so the cases of an
+  uncommon disease recur many times while its non-cases come round once.
+
+An *epoch-equivalent* is as many draws as there are training participants (215,872).
+
+A batch balanced on its target is not balanced for the other diseases. They appear at their
+population rate, raised by however much they co-occur with the target. Over a whole rotation,
+cases of the rarest phenotype (acute myocardial infarction, 3.7% of the training split) are
+7.8% of the participants drawn; the median across phenotypes rises from 6.7% to 11.3%, and
+hypertension from 31.6% to 44.8%. No sampler could balance all 30 at once: a participant has
+2.5 of the 30 phenotypes on average, and a batch that was half cases for every phenotype would
+need 15.
+
+All 30 outputs nevertheless learn from every batch, because a pass through the encoders is the
+whole cost of a step and discarding 29 of the 30 labels would waste it. Two consequences
+follow, and the loss handles both: the balance between cases and non-cases has to come from
+weights, and the people in a batch are not a random sample of the cohort.
+
+### 5.2 Loss
+
+For a batch of *B* participants,
+
+    loss = (1/n) Σ_j [ Σ_k m_kj · c_j(y_kj) · BCE(z_kj, y_kj) / ω_k ] / (B · Z_j)
+
+    c_j(1) = min( ((1 − π_j)/π_j)^γ , w_max ),   c_j(0) = 1
+    ω_k    = (1/n) Σ_i [ y_ki/(2π_i) + (1 − y_ki)/(2(1 − π_i)) ]
+    Z_j    = π_j · c_j(1) + (1 − π_j)
+
+where *k* indexes participants and *j* the *n* diseases, *z* is the logit, *y* the label, BCE
+the binary cross-entropy, *m* an indicator that the label applies to the participant (always 1
+for these 30 phenotypes) and π_j the prevalence of disease *j* in the training split.
+
+- **ω_k is the sampling rate of participant *k*:** how often the rotation draws them relative
+  to drawing people uniformly. A participant with none of the 30 phenotypes has ω = 0.55, the
+  median participant 0.80, and the 1% drawn most often more than 3.1 (maximum 5.5); the mean
+  is 1 by construction. Dividing by ω is importance weighting: in
+  expectation over a rotation, the batch sum equals the same average over the training cohort
+  whatever the sampler. The rotation then changes how often an example is seen, not the
+  function the network is asked to fit. Without it, the batch balanced on one disease is a
+  case-control sample for that disease and a distorted sample for every disease that co-occurs
+  with it, the situation of secondary phenotypes in case-control studies (Lin and Zeng, 2009;
+  Monsees et al., 2009). The correction has a price in efficiency: weighted this way, the
+  draws of a rotation are worth 80% as many uniform draws (Kish's effective sample size,
+  1/(mean ω · mean 1/ω)).
+- **c_j is the class weight**, which sets how much a case counts relative to a non-case.
+  γ = 1 would weight every disease to parity and γ = 0 leaves the population rate; the default
+  is the square root, γ = ½, which keeps the weights of these phenotypes at 5.1 or less where
+  parity would need up to 25.7. Large weights on the one or two cases a small batch holds make
+  the gradient noisy.
+- **Z_j and the factor 1/n** put every disease on the same scale (each term is a weighted
+  average with expected total weight one) and average the diseases equally, so that a frequent
+  disease does not dominate the sum.
+
+Because the objective is a class-weighted cross-entropy over the training cohort, a logit on
+the population scale is obtained by subtracting log c_j(1). With one disease, uniform sampling
+and γ = 0 the loss is exactly that of published DeepGP.
+
+### 5.3 Variants kept for comparison
+
+Three switches exist so that the choices above can be tested rather than assumed: uniform
+(shuffled) batches with the same loss; the loss without the sampling-rate correction; and a
+"target-only" loss in which only the disease a batch was balanced on learns from it.
+
+## 6. Optimisation
+
+- **Optimiser.** AdamW (Loshchilov and Hutter, 2019) with a constant learning rate by default,
+  as in published DeepGP; a linear warm-up and cosine decay are available.
+- **Batch size and accumulation.** The batch is bounded by GPU memory, which grows with batch
+  size times number of SNPs. Gradients can be accumulated over several batches per update; the
+  rotation order is reshuffled every rotation so that the same diseases do not always share an
+  update.
+- **Mixed precision.** The encoders can run in 16-bit (bf16) arithmetic. Pooling, the head and
+  the loss always run in 32-bit: participants differ by under 2% of a pooled chromosome vector,
+  which is finer than bf16 resolves. In a forward probe at 87,521 SNPs, averaging in bf16
+  distorted the between-participant part of the pooled vector by about 10%, and averaging the
+  same activations in 32-bit by 0.3%.
+- **Activation checkpointing.** Each chromosome's encoder can be run without storing its
+  intermediate activations, which are recomputed during the backward pass. Outputs and
+  gradients are unchanged; memory is then set by the longest chromosome instead of the genome,
+  at the cost of one extra forward pass.
+
+## 7. Model selection and snapshots
+
+- **Validation.** Four times per epoch-equivalent, every output is scored on the whole tuning
+  set: AUROC, average precision, and cross-entropy on the population scale. Metrics are
+  computed over all tuning participants at once, never per batch.
+- **Stopping and the model kept.** Training stops when the mean AUROC across diseases has not
+  improved for eight validation passes, or after 30 epoch-equivalents. The checkpoint with the
+  best mean tuning AUROC is the model reported.
+- **Snapshots.** The weights are also saved at steps evenly spaced on a logarithmic axis (eight
+  per tenfold increase) and at every epoch-equivalent, with the number of updates, participants
+  seen and training time of each. Every snapshot can be scored afterwards, which gives
+  performance as a function of training compute, and allows the best snapshot to be read off
+  for each disease separately as a secondary analysis.
+- **Fixed tables are not saved.** Position tables and annotation matrices are functions of the
+  SNP list and are rebuilt from the dataset; a saved model holds its weights and its
+  configuration.
+
+## 8. Hyper-parameter search
+
+Hyper-parameters are searched with Optuna (Akiba et al., 2019): a tree-structured Parzen
+estimator proposes configurations, each is trained by the same code as a final run, and
+asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the
+configurations whose mean tuning AUROC trails at each rung. Searched: learning rate, weight
+decay, embedding dropout, accumulation and warm-up; optionally the class-weight exponent and
+cap, the sampler and the head's width. Model width, depth, the sequence block and the use of
+annotations are experimental factors and are never searched. Because a full-size
+epoch-equivalent costs several GPU-hours, the search runs first on a proxy (a contiguous eighth
+of each chromosome and 40,000 training participants) and its best configurations are then
+compared at full size.
+
+## 9. Evaluation outputs
+
+For any snapshot and split the scoring script writes, per disease: AUROC, average precision and
+population-scale cross-entropy; the same for a logistic model on the twelve covariates alone,
+fitted on the training split; and the difference between the two AUROCs. Per-participant scores
+are written only on request and only beside the dataset. Comparisons with polygenic scores,
+confidence intervals and calibration are outside this document.
+
+## 10. What changed from single-phenotype DeepGP
+
+| Component | Single phenotype (published) | Multi-phenotype (this model) |
+|---|---|---|
+| SNPs | Chosen per disease: GWAS p-value filter, then clumping | One fixed set for all diseases: 1,258,200 HapMap3+ SNPs |
+| SNP annotations | None | Optional: 96 functional annotations as a per-SNP gain and offset |
+| Labels | One per participant | One per disease per participant |
+| Covariates | Eight | Year of birth, sex, ten principal components |
+| Sequence block | Bidirectional Mamba | The same (Mamba-3 in a bidirectional wrapper is being evaluated) |
+| Output | One sigmoid probability | 30 logits from the same hidden layer |
+| Batches | Shuffled | Rotation of disease-balanced batches |
+| Loss | Binary cross-entropy | Cross-entropy corrected for sampling rate, weighted by class, averaged per disease and then across diseases |
+| Validation metric | Mean of per-batch AUROCs | AUROC of each disease over the whole tuning set; their mean for stopping |
+| Validation schedule | Every 300 batches | Four times per epoch-equivalent |
+| Saved models | The best | The best, the last, and snapshots along training |
+| Hyper-parameters | Set by hand | Searched with Optuna |
+| Precision and memory | 32-bit; all chromosomes' activations held | Optional bf16 encoders with 32-bit pooling; optional per-chromosome checkpointing |
+
+**Unchanged:** the dosage input and its standardisation, the convolutional and positional
+embedding, the per-chromosome encoders and their block, mean pooling, the covariate encoder, the
+attention layer across chromosomes, the shared hidden layer, and the AdamW optimiser. With one
+disease, the same weights give the same output as the published network to within 10⁻⁶, and
+the same random seed gives identical initial weights.
+
+## 11. Departures from the published implementation, and known quirks
+
+The single-phenotype code (`models/`, `layers/`, `utils.py`, `main_genome.py`) is left as
+published. Four of its properties are deliberately reproduced, so that the comparison with the
+published model is like for like:
+
+- The published model's weight-initialisation call runs before its layers exist and has no
+  effect; weights keep the default initialisation of their layers. WideDeepGP does the same.
+- The published configuration does not pass `--bi_direct`, which selects the "v1" bidirectional
+  variant described in section 4.3, not a one-directional model.
+- `--dropout` sets the embedding dropout only; the dropout of the covariate encoder, attention
+  layer and head is fixed at 0.1.
+- The convolution of the value embedding uses circular padding, so the first and last SNP of a
+  chromosome are treated as neighbours.
+
+Two published options do not run and are not offered: the parser's default pooling
+(`--final_pool concat`) and the SNP-only mode (`--dm snps`), which names a class that is not in
+the repository. WideDeepGP supports the pooling of the published configuration (`atten`) and
+`mean` and `last`.
+
+## 12. Tests
+
+`tests/test_ml_*.py` check, among other things, that: only named label and covariate columns
+are read; the rotation sampler draws each participant at exactly the rate ω that the loss
+divides by; the expected batch loss under the rotation equals the cohort loss with the
+correction and differs without it; published weights give the published output; checkpointing
+leaves outputs and gradients unchanged; a resumed run continues the same batches; and saved
+models hold no fixed tables. Learning checks train for a few minutes each: one disease on the
+published smoke-test data must land in the published AUROC band, and on a synthetic six-trait
+dataset the heritable traits must be learned, the rare one included (2% prevalence), while a
+trait with no genetic signal that co-occurs with a heritable trait must stay at an AUROC of
+0.5; with annotation vectors that mark the causal SNPs the model must reach the higher bands of
+annotated runs. The bands are computed from five training seeds
+(`scripts/multilabel_synthetic_seeds.csv`): the lowest seed minus the larger of 0.04 and 2.5
+seed standard deviations. `tests/test_ml_mamba3.py` checks the Mamba-3 wrapper in its own
+environment: one block reads in one direction only, the pair reads both ways, and reversing the
+input while exchanging the two blocks' weights reverses the output.
+
+## 13. Software and reproduction
+
+Python 3.10, PyTorch 2.10, PyTorch Lightning 2.0.8, `mamba_ssm` 1.1.1 from the Vision-Mamba
+fork, Optuna 5.0; Mamba-3 runs in a second environment with upstream `mamba_ssm`
+(`scripts/setup_mamba3_env.sh`).
+
+    # SNP list, genotype store, labels, covariates, splits, annotations (DeepWideGP-Scripts)
+    Rscript scripts/build-ard30-dataset/make_snp_list.R
+    python -m genostore.convert --pgen-dir <pgen dir> --pattern "UKB_chr{chrom}" --chroms $(seq 1 22) \
+        --extract <data>/reference/hm3plus_in_ukb_pgen.tsv --out <data>/genostore/hm3plus
+    python scripts/build-ard30-dataset/build_dataset.py
+    python scripts/build-ard30-dataset/describe_dataset.py     # cases by split, sampling rates
+
+    # train, score, tune (DeepWideGP)
+    python main_multilabel.py --data_dir <data>/datasets --label ard30 --rd_mode hm3plus --snp_stats train \
+        --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --batch_size 16 --accumulate 4 --exp_name <run>
+    python score_snapshots.py --run runs/<experiment>/<run> --split val
+    python tune_optuna.py --study <name> --n_trials 20 -- <the training arguments>
+
+    # tests
+    python -m pytest tests/test_ml_labels.py tests/test_ml_sampler.py tests/test_ml_loss.py -q
+    CUDA_VISIBLE_DEVICES=<gpu> python -m pytest tests/test_ml_model.py tests/test_ml_train.py -q
+    CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
+
+## References
+
+- Akiba T, Sano S, Yanase T, Ohta T, Koyama M. Optuna: a next-generation hyperparameter
+  optimization framework. *KDD* 2019.
+- Bycroft C, Freeman C, Petkova D, et al. The UK Biobank resource with deep phenotyping and
+  genomic data. *Nature* 2018;562:203–209.
+- Gazal S, Finucane HK, Furlotte NA, et al. Linkage disequilibrium-dependent architecture of
+  human complex traits shows action of negative selection. *Nat Genet* 2017;49:1421–1427.
+- Gu A, Dao T. Mamba: linear-time sequence modeling with selective state spaces.
+  arXiv:2312.00752, 2023.
+- Hanley JA, McNeil BJ. The meaning and use of the area under a receiver operating
+  characteristic (ROC) curve. *Radiology* 1982;143:29–36.
+- Jamieson K, Talwalkar A. Non-stochastic best arm identification and hyperparameter
+  optimization. *AISTATS* 2016.
+- Lahoti A, et al. Mamba-3: improved sequence modeling using state space principles.
+  arXiv:2603.15569, 2026.
+- Li L, Jamieson K, Rostamizadeh A, et al. A system for massively parallel hyperparameter
+  tuning. *MLSys* 2020.
+- Lin DY, Zeng D. Proper analysis of secondary phenotype data in case-control association
+  studies. *Genet Epidemiol* 2009;33:256–265.
+- Loshchilov I, Hutter F. Decoupled weight decay regularization. *ICLR* 2019.
+- Monsees GM, Tamimi RM, Kraft P. Genome-wide association scans for secondary traits using
+  case-control samples. *Genet Epidemiol* 2009;33:717–728.
+- Privé F, Albiñana C, Arbel J, Pasaniuc B, Vilhjálmsson BJ. Inferring disease architecture and
+  predictive ability with LDpred2-auto. *Am J Hum Genet* 2023;110:2042–2055.
+- Sudlow C, Gallacher J, Allen N, et al. UK Biobank: an open access resource for identifying the
+  causes of a wide range of complex diseases of middle and old age. *PLoS Med* 2015;12:e1001779.
+- Zheng Z, Liu S, Sidorenko J, et al. Leveraging functional genomic annotations and genome
+  coverage to improve polygenic prediction of complex traits within and between ancestries.
+  *Nat Genet* 2024;56:767–777.
+- Zhu L, Liao B, Zhang Q, et al. Vision Mamba: efficient visual representation learning with
+  bidirectional state space model. *ICML* 2024.
+- Zhu T, Ghose U, Climente-González H, Howson JMM, Hu S, Nevado-Holgado A. Multimodal deep
+  learning enhances genomic risk prediction for cardiometabolic diseases in UK Biobank.
+  medRxiv 2025. doi:10.1101/2025.04.28.25326564.

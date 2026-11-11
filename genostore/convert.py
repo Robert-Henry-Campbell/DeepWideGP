@@ -7,7 +7,11 @@ One streaming pass per chromosome, bounded memory, resumable per block. Needs ``
     python -m genostore.convert --pgen-dir /path/Genomics_PGEN --pattern "UKB_chr{chrom}" \
         --chroms 1 --out /path/store_chr1_all
     python -m genostore.convert ... --chroms 1 2 3 --keep-n 4096 --seed 0 --out /path/store_wg_n4096
+    python -m genostore.convert ... --chroms $(seq 1 22) --extract snps.tsv --out /path/store_subset
     python -m genostore.convert verify --out /path/store
+
+--extract keeps only the listed variants (a text file whose header names CHROM and ID, or CHROM
+and POS) and reads just their records from the .pgen, so a SNP subset needs no intermediate copy.
 
 Memory: one block of n_samples x 16384 bytes (5.5 GB for 333k samples) plus ~1 GB of buffers.
 """
@@ -20,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import format as gf
-from .prefetch import CacheProbe, Prefetcher, REQ_BYTES, disk_busy
+from .prefetch import CacheProbe, Prefetcher, REQ_BYTES, disk_busy, disk_of, disk_read_bytes
 from .store import GenoStore
 
 
@@ -153,6 +157,162 @@ def choose_samples(all_ids, keep_n=None, seed=0, keep_file=None):
     return None
 
 
+def read_extract(path):
+    """Variants to keep, from a delimited text file with a header.
+
+    The header must name CHROM (or chr) and either ID or POS; other columns are ignored.
+    Returns {chrom: {"id": [...] or None, "pos": [...] or None}} in file order.
+    """
+    out = {}
+    with open(path) as f:
+        head = f.readline().rstrip("\n")
+        sep = "\t" if "\t" in head else None
+        names = [c.lstrip("#").upper() for c in head.split(sep)]
+        names = ["CHROM" if c in ("CHR", "CHROMOSOME") else c for c in names]
+        if "CHROM" not in names or not ({"ID", "POS"} & set(names)):
+            raise ValueError(f"{path}: the header must name CHROM and ID (or POS); found {names}")
+        ic = names.index("CHROM")
+        ii = names.index("ID") if "ID" in names else None
+        ip = names.index("POS") if "POS" in names else None
+        for line in f:
+            p = line.rstrip("\n").split(sep)
+            if len(p) <= ic or not p[ic]:
+                continue
+            d = out.setdefault(p[ic], {"id": [] if ii is not None else None, "pos": [] if ip is not None else None})
+            if ii is not None:
+                d["id"].append(p[ii])
+            if ip is not None:
+                d["pos"].append(int(p[ip]))
+    return out
+
+
+def select_variants(pvar_lines, want, chrom, source):
+    """Sorted uint32 indices into the .pvar order of the requested variants (all must be found).
+
+    Matched by ID when the request has IDs (and checked against POS when it has both), otherwise
+    by position.
+    """
+    by_id = want["id"] is not None
+    keys = want["id"] if by_id else want["pos"]
+    col = 2 if by_id else 1
+    index, dup = {}, set()
+    for i, line in enumerate(pvar_lines):
+        k = line.split("\t", 3)[col]
+        k = k if by_id else int(k)
+        if k in index:
+            dup.add(k)
+        index[k] = i
+    missing = [k for k in keys if k not in index]
+    if missing:
+        raise ValueError(f"chr{chrom}: {len(missing)} of {len(keys)} variants in {source} are not in the .pvar, "
+                         f"e.g. {missing[:3]}")
+    clash = [k for k in keys if k in dup]
+    if clash:
+        raise ValueError(f"chr{chrom}: {len(clash)} requested variants are ambiguous in the .pvar, e.g. {clash[:3]}")
+    idx = np.array([index[k] for k in keys], dtype=np.int64)
+    if by_id and want["pos"] is not None:
+        bad = [k for k, i, p in zip(keys, idx, want["pos"]) if int(pvar_lines[i].split("\t", 2)[1]) != p]
+        if bad:
+            raise ValueError(f"chr{chrom}: {len(bad)} variants have a different position in the .pvar, e.g. {bad[:3]}")
+    if len(np.unique(idx)) != len(idx):
+        raise ValueError(f"chr{chrom}: {source} lists some variants more than once")
+    return np.sort(idx).astype(np.uint32)
+
+
+class SparseWarmer:
+    """Read-ahead for a *list* of variant records instead of a contiguous stretch.
+
+    Queues the listed records' byte ranges a chunk or two ahead of the decoder (neighbouring
+    records closer than ``merge_gap`` are fetched as one request), so a rotational disk serves
+    them in one sweep and the decoder finds them in the page cache. Under the ``idle`` policy it
+    first lets its own requests finish, listens for a moment, and waits while other jobs are
+    reading the disk -- the same courtesy as ``Prefetcher``.
+    """
+
+    def __init__(self, path, starts, ends, chunk, policy="idle", ahead=2, merge_gap=256 << 10,
+                 probe_every=5.0, probe_s=0.25, contended_bps=150e3, backoff_s=5.0, log=None):
+        self.fd = os.open(path, os.O_RDONLY)
+        self.path = path
+        self.starts = np.asarray(starts, dtype=np.int64)
+        self.ends = np.asarray(ends, dtype=np.int64)
+        self.chunk, self.ahead, self.merge_gap = int(chunk), int(ahead), int(merge_gap)
+        self.policy, self.probe_every, self.probe_s = policy, probe_every, probe_s
+        self.contended_bps, self.backoff_s, self.log = contended_bps, backoff_s, log
+        self.dev = disk_of(path)
+        self.warmed = 0                       # listed variants whose records have been queued
+        self.last_end = None
+        self.t_probe = -1e18
+        self.t_wait = 0.0
+        self.bytes_queued = 0
+        self.last_progress = time.time()
+        self._t_note = 0.0
+
+    def close(self):
+        os.close(self.fd)
+
+    def skip_to(self, k):
+        self.warmed = max(self.warmed, int(k))
+
+    def _queue(self, k0, k1):
+        s, e = self.starts[k0:k1], self.ends[k0:k1]
+        a, b = int(s[0]), int(e[0])
+        for i in range(1, len(s)):
+            if int(s[i]) - b <= self.merge_gap:
+                b = int(e[i])
+                continue
+            self._advise(a, b)
+            a, b = int(s[i]), int(e[i])
+        self._advise(a, b)
+        self.last_end = b
+
+    def _advise(self, a, b):
+        off = a
+        while off < b:
+            os.posix_fadvise(self.fd, off, min(REQ_BYTES, b - off), os.POSIX_FADV_WILLNEED)
+            off += REQ_BYTES
+        self.bytes_queued += b - a
+
+    def _others_reading(self):
+        if self.last_end is not None:
+            os.pread(self.fd, 1, self.last_end - 1)        # let our own queued requests finish first
+        d0 = disk_read_bytes(self.dev)
+        time.sleep(self.probe_s)
+        d1 = disk_read_bytes(self.dev)
+        if d0 is None or d1 is None:
+            return False, 0.0
+        bps = (d1 - d0) / self.probe_s
+        return bps > self.contended_bps, bps
+
+    def _wait_while_busy(self, deadline=None, stall_timeout=None):
+        if self.policy != "idle" or self.dev is None or time.perf_counter() - self.t_probe < self.probe_every:
+            return
+        while True:
+            busy, bps = self._others_reading()
+            if not busy:
+                break
+            if self.log is not None and time.time() - self._t_note >= 300:
+                self.log(f"read-ahead {os.path.basename(self.path)}: disk busy (others reading {bps / 1e6:.1f} MB/s); "
+                         f"waiting, {self.warmed}/{len(self.starts)} variants queued")
+                self._t_note = time.time()
+            if stall_timeout is not None and time.time() - self.last_progress > stall_timeout:
+                raise _Stopped("stalled")
+            if deadline is not None and time.time() > deadline:
+                raise _Stopped("deadline")
+            time.sleep(self.backoff_s)
+            self.t_wait += self.backoff_s
+        self.t_probe = time.perf_counter()
+
+    def need(self, k1, deadline=None, stall_timeout=None):
+        """Make sure the records of listed variants below ``k1`` are queued, plus ``ahead`` chunks."""
+        target = min(len(self.starts), int(k1) + self.ahead * self.chunk)
+        while self.warmed < target:
+            self._wait_while_busy(deadline, stall_timeout)
+            j = min(target, self.warmed + self.chunk)
+            self._queue(self.warmed, j)
+            self.warmed = j
+            self.last_progress = time.time()
+
+
 class _Stopped(Exception):
     pass
 
@@ -180,11 +340,13 @@ def readable_now(pgen, store_dir, chrom, block_variants, max_variants=None, _cac
 
 def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variants=gf.BLOCK_VARIANTS,
                   chunk=256, policy="idle", duty=0.5, max_ahead=1536 << 20, prefetch=True,
-                  max_variants=None, deadline=None, n_audit=8, threads=8, stall_timeout=None):
+                  max_variants=None, deadline=None, n_audit=8, threads=8, stall_timeout=None,
+                  var_idx=None, extract_src=None):
     """Returns "done", or "deadline" / "stalled" if it stopped early (rerun to resume).
 
     stall_timeout: give up (keeping finished blocks) when no new bytes became readable for
     this many seconds -- used by the opportunistic scheduler to move to another chromosome.
+    var_idx: sorted indices of the variants to keep (None = all); only their records are read.
     """
     import pgenlib
 
@@ -195,11 +357,26 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
     hdr = pgen_header(pgen)
     if hdr["n_samples"] != n_raw:
         raise ValueError(f"{pgen}: {hdr['n_samples']} samples but the .psam has {n_raw}")
-    m = hdr["n_variants"] if max_variants is None else min(max_variants, hdr["n_variants"])
+    listed = var_idx is not None
+    if listed:
+        var_idx = np.ascontiguousarray(var_idx, dtype=np.uint32)
+        if len(var_idx) == 0 or int(var_idx[-1]) >= hdr["n_variants"] or np.any(np.diff(var_idx.astype(np.int64)) <= 0):
+            raise ValueError(f"chr{chrom}: the variant list must be non-empty, sorted, unique and within the .pgen")
+    m_all = len(var_idx) if listed else hdr["n_variants"]
+    m = m_all if max_variants is None else min(max_variants, m_all)
     n = n_raw if sample_idx is None else len(sample_idx)
     offs, exact = pgen_variant_offsets(pgen)
-    log(f"chr{chrom}: {m} variants x {n} samples (of {n_raw}); record offsets "
-        f"{'exact' if exact else 'APPROXIMATE'}; {int(offs[m]) / 1e9:.2f} GB to read")
+    if listed:
+        var_idx = var_idx[:m]
+        rec_start = offs[var_idx].astype(np.int64)
+        rec_end = offs[var_idx.astype(np.int64) + 1].astype(np.int64)
+        to_read = int((rec_end - rec_start).sum())
+    else:
+        to_read = int(offs[m])
+    n_in_file = hdr["n_variants"]
+    which = f" (listed, of {n_in_file})" if listed else ""
+    log(f"chr{chrom}: {m} variants{which} x {n} samples (of {n_raw}); record offsets "
+        f"{'exact' if exact else 'APPROXIMATE'}; {to_read / 1e9:.2f} GB to read")
     w = gf.ChromWriter(store_dir, chrom, n, m, block_variants)
     if w.next_block:
         log(f"chr{chrom}: resuming at block {w.next_block}/{w.n_blocks}")
@@ -212,8 +389,14 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
     np.save(p["json"][:-5] + ".audit_rows.npy", audit_rows)
 
     v_start = w.block_range(w.next_block)[0] if not w.complete else m
-    pf = None
-    if prefetch and not w.complete:
+    pf = warm = None
+    if prefetch and not w.complete and listed:
+        if exact:
+            warm = SparseWarmer(pgen, rec_start, rec_end, chunk, policy=policy, log=log)
+            warm.skip_to(v_start)
+        else:
+            log(f"chr{chrom}: record offsets are approximate, so listed variants are read without read-ahead")
+    elif prefetch and not w.complete:
         pf = Prefetcher(pgen, start=int(offs[v_start]), end=int(offs[m]), policy=policy, duty=duty,
                         max_ahead=max_ahead, log=log, log_every=60.0)
         pf.set_consumed(int(offs[v_start]))
@@ -250,8 +433,15 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
                         if deadline is not None and time.time() > deadline:
                             raise _Stopped("deadline")
                     t_wait += time.time() - t
+                if warm is not None:
+                    t = time.time()
+                    warm.need(k1, deadline, stall_timeout)
+                    t_wait += time.time() - t
                 t = time.time()
-                reader.read_dosages_range(k0, k1, fbuf[:k])
+                if listed:
+                    reader.read_dosages_list(var_idx[k0:k1], fbuf[:k])
+                else:
+                    reader.read_dosages_range(k0, k1, fbuf[:k])
                 t_dec += time.time() - t
                 if pf is not None:
                     pf.set_consumed(int(offs[k1]))
@@ -292,15 +482,20 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
     finally:
         if pf is not None:
             pf.stop()
+        if warm is not None:
+            warm.close()
         reader.close()
         pool.shutdown(wait=True)
     if status != "done":
         why = "time budget reached" if status == "deadline" else "source not readable without disturbing other jobs"
         log(f"chr{chrom}: paused after block {w.next_block}/{w.n_blocks} ({why}); resumable")
         return status
-    lines = read_pvar_lines(pvar, m)
+    lines = read_pvar_lines(pvar, None if listed else m)
+    if listed:
+        lines = [lines[i] for i in var_idx]
     info = w.finalize(lines, {"pgen": pgen, "pvar": pvar, "n_raw_samples": n_raw,
-                              "pgen_bytes_read": int(offs[m]), "max_variants": max_variants})
+                              "pgen_bytes_read": to_read, "max_variants": max_variants,
+                              "pgen_variants": n_in_file, "extract": extract_src})
     log(f"chr{chrom}: complete. {info['bytes_per_genotype']:.4f} bytes/genotype "
         f"({(info['base_bytes'] + info['ovr_bytes']) / 1e9:.2f} GB), exceptions "
         f"{100 * info['n_override'] / (n * m):.2f}%, missing {info['n_missing']}, "
@@ -365,9 +560,19 @@ def main(argv=None):
                     help="with --opportunistic: leave a chromosome after this long without new readable data")
     ap.add_argument("--threads", type=int, default=8, help="threads for quantise/transpose/encode")
     ap.add_argument("--max-variants", type=int, default=None, help="only the first N variants (testing)")
+    ap.add_argument("--extract", default=None,
+                    help="keep only the variants listed in this text file (header naming CHROM and ID, or CHROM "
+                         "and POS); only their records are read from the .pgen")
     ap.add_argument("--time-budget-s", type=float, default=None, help="stop cleanly after this long; rerun to resume")
     a = ap.parse_args(argv)
 
+    extract = read_extract(a.extract) if a.extract else None
+    if extract is not None:
+        if a.opportunistic:
+            raise SystemExit("--extract cannot be combined with --opportunistic")
+        absent = [c for c in a.chroms if c not in extract]
+        if absent:
+            raise SystemExit(f"{a.extract} lists no variants on chr{','.join(absent)}")
     deadline = None if a.time_budget_s is None else time.time() + a.time_budget_s
     prefix = lambda c: os.path.join(a.pgen_dir, a.pattern.format(chrom=c))
     is_done = lambda c: (os.path.exists(gf.chrom_paths(a.out, c)["json"])
@@ -420,10 +625,14 @@ def main(argv=None):
                 time.sleep(15)
                 continue
         open_store(pick)
+        var_idx = None
+        if extract is not None:
+            var_idx = select_variants(read_pvar_lines(prefix(pick) + ".pvar"), extract[pick], pick, a.extract)
         status = convert_chrom(prefix(pick) + ".pgen", prefix(pick) + ".pvar", a.out, pick, state["idx"],
                                state["n_raw"], a.block_variants, a.chunk, a.disk_policy, a.duty,
                                int(a.max_ahead_gb * (1 << 30)), not a.no_prefetch, a.max_variants, deadline,
-                               threads=a.threads, stall_timeout=a.stall_s if a.opportunistic else None)
+                               threads=a.threads, stall_timeout=a.stall_s if a.opportunistic else None,
+                               var_idx=var_idx, extract_src=os.path.abspath(a.extract) if a.extract else None)
         if status == "done":
             pending.remove(pick)
         elif status == "deadline":

@@ -113,6 +113,58 @@ def test_convert_all_and_subset_and_resume():
         assert np.array_equal(GenoStore(s_pre).read_q("1", np.arange(n)), truth["1"][:, :130])
 
 
+def test_convert_listed_variants():
+    """--extract keeps exactly the listed variants, in file order, reading only their records."""
+    with tempfile.TemporaryDirectory() as d:
+        n = 90
+        truth, keep = {}, {}
+        rng = np.random.default_rng(11)
+        for c, m in (("1", 700), ("2", 300)):
+            _, back = write_pgen(d, c, n, m, seed=20 + int(c), p_missing=0.01)
+            truth[c] = gf.quantize_dosage(back).T
+            keep[c] = np.sort(rng.choice(m, size=m // 6, replace=False))
+        common = ["--pgen-dir", d, "--pattern", "T_chr{chrom}", "--block-variants", "64", "--chunk", "50",
+                  "--chroms", "1", "2"]
+        # by ID (with POS cross-checked), rows deliberately not in file order
+        by_id = os.path.join(d, "keep_id.tsv")
+        with open(by_id, "w") as f:
+            f.write("CHROM\tPOS\tID\textra\n")
+            for c in ("2", "1"):
+                for v in keep[c][::-1]:
+                    f.write(f"{c}\t{100 + 7 * v}\trs{c}_{v}\tx\n")
+        # by position only
+        by_pos = os.path.join(d, "keep_pos.txt")
+        with open(by_pos, "w") as f:
+            f.write("chr pos\n" + "".join(f"{c} {100 + 7 * v}\n" for c in ("1", "2") for v in keep[c]))
+
+        for name, extra in (("ahead", ["--extract", by_id, "--disk-policy", "share"]),
+                            ("plain", ["--extract", by_pos, "--no-prefetch"])):
+            s = os.path.join(d, "store_" + name)
+            assert run(common + ["--out", s] + extra) == 0
+            gs = GenoStore(s)
+            for c in ("1", "2"):
+                assert gs.n_variants(c) == len(keep[c])
+                assert np.array_equal(gs.read_q(c, np.arange(n)), truth[c][:, keep[c]])
+                assert list(gs.variants(c)["id"]) == [f"rs{c}_{v}" for v in keep[c]]
+                assert np.array_equal(gs.positions(c), 100 + 7 * keep[c])
+                assert gs.info[c]["provenance"]["pgen_variants"] == truth[c].shape[1]
+            assert gc.verify_store(s)
+
+        # resumes mid-chromosome, and a variant that is not in the file is an error
+        s = os.path.join(d, "store_resume")
+        assert run(common + ["--out", s, "--extract", by_id, "--no-prefetch", "--time-budget-s", "0"]) == 3
+        assert run(common + ["--out", s, "--extract", by_id, "--disk-policy", "share"]) == 0
+        assert np.array_equal(GenoStore(s).read_q("1", np.arange(n)), truth["1"][:, keep["1"]])
+        bad = os.path.join(d, "bad.tsv")
+        with open(bad, "w") as f:
+            f.write("CHROM\tID\n1\trs1_3\n1\tnot_there\n2\trs2_5\n")
+        try:
+            run(common + ["--out", os.path.join(d, "store_bad"), "--extract", bad])
+            raise AssertionError("a missing variant should stop the conversion")
+        except ValueError as e:
+            assert "not in the .pvar" in str(e)
+
+
 def test_record_offsets_are_exact():
     with tempfile.TemporaryDirectory() as d:
         prefix, _ = write_pgen(d, "9", 60, 500, seed=9)
@@ -124,4 +176,5 @@ def test_record_offsets_are_exact():
 if __name__ == "__main__":
     test_record_offsets_are_exact()
     test_convert_all_and_subset_and_resume()
+    test_convert_listed_variants()
     print("pgen conversion tests passed")

@@ -12,6 +12,10 @@ show up as a failed check rather than as a slightly worse number:
                     so the two co-occur. Its AUROC must stay at 0.5: anything else means the
                     covariates, the sampler or the loss manufactured signal.
 
+Each heritable trait depends on a few SNPs of large effect (two shared, two of its own by
+default), like the single-disease smoke test: a small model finds them within minutes, which
+a diffuse polygenic signal would not allow.
+
 Per-SNP annotations: channel ``causal`` marks every causal SNP; the other three carry no
 information. Covariates (age, sex, six "PCs") have no effect on any trait.
 
@@ -19,7 +23,7 @@ Writes <base_dir>/<name>/<rd_mode>/ with the genotype store, samples_{train,val,
 store.json (naming labels and covariates), labels.json, annotations.npz and truth.json (the
 simulation's own AUROC ceiling per trait).
 
-    python scripts/generate_synthetic_multilabel.py --name multi6 --n_participants 20000
+    python scripts/generate_synthetic_multilabel.py --name multi6
 """
 import argparse
 import json
@@ -53,8 +57,8 @@ def _auc(score, y):
     return float((ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
-def generate(name, n_participants=20000, n_snps=2200, base_dir="pukb/genes", rd_mode="store", seed=7,
-             n_shared_causal=30, n_own_causal=20, rho=0.6, frac_val=0.15, frac_test=0.15, block_variants=64):
+def generate(name, n_participants=12000, n_snps=220, base_dir="pukb/genes", rd_mode="store", seed=7,
+             n_shared_causal=2, n_own_causal=2, rho=0.6, frac_val=0.15, frac_test=0.15, block_variants=64):
     from scipy.stats import norm
 
     rng = np.random.default_rng(seed)
@@ -153,13 +157,16 @@ def generate(name, n_participants=20000, n_snps=2200, base_dir="pukb/genes", rd_
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", default="multi6")
-    ap.add_argument("--n_participants", type=int, default=20000)
-    ap.add_argument("--n_snps", type=int, default=2200)
+    ap.add_argument("--n_participants", type=int, default=12000)
+    ap.add_argument("--n_snps", type=int, default=220)
+    ap.add_argument("--n_shared_causal", type=int, default=2)
+    ap.add_argument("--n_own_causal", type=int, default=2)
     ap.add_argument("--base_dir", default="pukb/genes")
     ap.add_argument("--rd_mode", default="store")
     ap.add_argument("--seed", type=int, default=7)
     a = ap.parse_args()
-    out, truth = generate(a.name, a.n_participants, a.n_snps, a.base_dir, a.rd_mode, a.seed)
+    out, truth = generate(a.name, a.n_participants, a.n_snps, a.base_dir, a.rd_mode, a.seed,
+                          n_shared_causal=a.n_shared_causal, n_own_causal=a.n_own_causal)
     print(f"wrote {out}")
     for t in truth["traits"]:
         print(f"  {t['label']:9s} prevalence {t['prevalence']:.2f}  h2 {t['h2']:.2f}  "

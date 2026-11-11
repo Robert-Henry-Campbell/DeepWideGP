@@ -118,6 +118,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def __init__(self, configs, store_dir=None, regions=None):
         super().__init__()
         self.batch_size = configs.batch_size
+        self.eval_batch_size = getattr(configs, "eval_batch_size", None) or configs.batch_size
         self.num_workers = configs.num_workers
         self.data_mode = configs.dm
         self.cont = configs.cont_pheno
@@ -323,6 +324,30 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def on_after_batch_transfer(self, batch, dataloader_idx):
         return self.decode_batch(batch) if isinstance(batch, dict) and "geno" in batch else batch
 
+    def annotations(self):
+        """Per-SNP annotation vectors named by store.json, one float32 array [L_i, A] per input
+        sequence (following ``regions``), and their names. None if the dataset has none.
+
+        store.json: "annotations": {"file": "annotations.npz", "names": [...]}; the file holds
+        one array per chromosome under the key chr<chrom>.
+        """
+        with open(os.path.join(self.dir, "store.json")) as f:
+            spec = json.load(f).get("annotations")
+        if not spec:
+            return None, None
+        z = np.load(os.path.join(self.dir, spec["file"]))
+        out = []
+        for seq in self.regions:
+            parts = []
+            for c, v0, v1 in seq:
+                a = z[f"chr{c}"]
+                if a.shape[0] != self.store.n_variants(c):
+                    raise ValueError(f"annotations for chr{c} have {a.shape[0]} rows, the store has {self.store.n_variants(c)}")
+                parts.append(np.asarray(a[v0:v1], dtype=np.float32))
+            out.append(parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0))
+        names = list(spec.get("names") or [f"a{i}" for i in range(out[0].shape[1])])
+        return out, names
+
     # ---- Lightning plumbing --------------------------------------------------------------
     def shuffle_targets(self):
         if self.shuffle:
@@ -333,7 +358,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
         return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"])
 
     def _loader(self, ds, shuffle):
-        sampler = BatchSampler(RandomSampler(ds) if shuffle else SequentialSampler(ds), self.batch_size, drop_last=False)
+        size = self.batch_size if shuffle else self.eval_batch_size      # evaluation holds no gradients: it can be larger
+        sampler = BatchSampler(RandomSampler(ds) if shuffle else SequentialSampler(ds), size, drop_last=False)
         return DataLoader(ds, sampler=sampler, batch_size=None, num_workers=self.num_workers)
 
     def setup(self, stage: str):

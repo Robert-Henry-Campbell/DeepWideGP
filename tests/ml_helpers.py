@@ -11,6 +11,26 @@ if os.path.join(REPO, "scripts") not in sys.path:
     sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 
+def have_fork():
+    """True where the Vision-Mamba fork of mamba_ssm is installed (the published block)."""
+    try:
+        import inspect
+
+        import mamba_ssm
+        return "bimamba_type" in inspect.signature(mamba_ssm.Mamba.__init__).parameters
+    except Exception:
+        return False
+
+
+def have_mamba3():
+    """True where upstream mamba_ssm with Mamba3 is installed (the second environment)."""
+    try:
+        from mamba_ssm import Mamba3  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def make_cfg(data_dir, label, rd_mode="store", **over):
     """An argument namespace as main_multilabel.py would build it, with small test defaults."""
     from args_generator import args_initial

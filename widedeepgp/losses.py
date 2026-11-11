@@ -33,19 +33,33 @@ import torch.nn.functional as F
 from . import labels as L
 
 
+def label_counts(train_labels):
+    """Cases, non-cases and number of people of a training label matrix, as plain lists."""
+    y = np.asarray(train_labels, dtype=np.float64)
+    n1, n0 = L.case_counts(y)
+    return {"cases": [float(v) for v in n1], "non_cases": [float(v) for v in n0], "n": int(y.shape[0])}
+
+
 class WideLoss(nn.Module):
-    def __init__(self, train_labels, gamma=0.5, w_max=20.0, sampler="rotation", correction=True, outputs="all"):
+    def __init__(self, train_labels=None, gamma=0.5, w_max=20.0, sampler="rotation", correction=True, outputs="all",
+                 counts=None):
+        """train_labels: the training label matrix, or pass ``counts`` = {"cases": [...],
+        "non_cases": [...], "n": people} (what ``label_counts`` returns), which is all the loss
+        needs and is small enough to keep with a saved model."""
         super().__init__()
         if outputs not in ("all", "target"):
             raise ValueError("outputs must be 'all' or 'target'")
         if outputs == "target" and sampler != "rotation":
             raise ValueError("outputs='target' needs the rotation sampler, which names a target per batch")
-        y = np.asarray(train_labels, dtype=np.float64)
-        n1, n0 = L.case_counts(y)
+        if counts is None:
+            counts = label_counts(train_labels)
+        n1 = np.asarray(counts["cases"], dtype=np.float64)
+        n0 = np.asarray(counts["non_cases"], dtype=np.float64)
+        n_people = float(counts["n"])
         pi = n1 / (n1 + n0)
         c1 = L.class_weights(pi, gamma, w_max)
-        f = (n1 + n0) / y.shape[0]
-        rate_case, rate_ctrl = L.rotation_rates(y)
+        f = (n1 + n0) / n_people
+        rate_case, rate_ctrl = n_people / (2.0 * n1), n_people / (2.0 * n0)
         t = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float32)
         self.register_buffer("pi", t(pi))
         self.register_buffer("c1", t(c1))
@@ -53,7 +67,7 @@ class WideLoss(nn.Module):
         self.register_buffer("rate_case", t(rate_case))
         self.register_buffer("rate_ctrl", t(rate_ctrl))
         self.register_buffer("logit_shift", t(np.log(c1)))
-        self.n_labels = y.shape[1]
+        self.n_labels = len(n1)
         self.gamma, self.w_max = float(gamma), float(w_max)
         self.sampler, self.correction, self.outputs = sampler, bool(correction), outputs
 

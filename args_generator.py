@@ -88,9 +88,9 @@ def args_initial(argv=None):
     parser.add_argument('--resume', action='store_true', default=False, help='continue the run of this name from its last checkpoint')
     parser.add_argument('--init_from', type=str, default=None, help='snapshot whose weights initialise the model (all but the output layer if the labels differ)')
     parser.add_argument('--snapshots_per_decade', type=int, default=8, help='weight snapshots per tenfold increase in steps')
-    parser.add_argument('--eval_batch_size', type=int, default=None, help='batch size for validation and scoring (default: twice the training batch)')
+    parser.add_argument('--eval_batch_size', type=int, default=None, help='batch size for validation and scoring (default: the training batch size)')
     parser.add_argument('--steps_per_epoch_equiv', type=int, default=None, help='override the number of batches in an epoch-equivalent (testing)')
-    parser.add_argument('--m3_d_state', type=int, default=None, help='Mamba-3 state size (default: chosen to match the published block\'s parameter count)')
+    parser.add_argument('--m3_d_state', type=int, default=None, help='Mamba-3 state size (default: 16, the state size of the published block)')
 
     args = parser.parse_args(argv)
     return args

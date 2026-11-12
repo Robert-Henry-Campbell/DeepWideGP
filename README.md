@@ -136,6 +136,11 @@ The single-disease code above (`main_genome.py`, `models/`, `layers/`, `utils.py
 [methods.md](methods.md) describes the data, the model and the training, and lists every
 difference from the single-disease model.
 
+**Read [methods.md](methods.md) section 4.9 before training at full size.** In the pilot on
+real data (DeepWideGP-Scripts, `scripts/widedeepgp-pilot/results.md`) the network learned the
+covariates and nothing from unselected SNPs; it learned from the SNPs only when each SNP came
+with signed association statistics, or slowly when the SNPs had been selected by a GWAS.
+
 ```bash
 # a dataset whose store.json names its "labels" and "covariates" (genostore/README.md)
 CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py --label <dataset> --rd_mode <variant> --snp_stats train \

@@ -84,7 +84,7 @@ def main(argv=None):
     ap.add_argument("--run_dir", default="runs")
     ap.add_argument("--min_validations", type=int, default=2)
     ap.add_argument("--reduction", type=int, default=3)
-    ap.add_argument("--sampler_seed", type=int, default=42, help="seed of the TPE sampler (the project's seed)")
+    ap.add_argument("--sampler_seed", type=int, default=1, help="seed of the TPE sampler (the project's seed)")
     a = ap.parse_args(own)
     study = open_study(a.study, a.run_dir, a.min_validations, a.reduction, a.sampler_seed)
 

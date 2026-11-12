@@ -172,7 +172,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--warmup_steps`, `--lr_schedule` | linear learning-rate warm-up (optimiser steps); `constant` or `cosine` decay after it | 0, `constant` |
 | `--val_per_epoch`, `--stop_patience`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, budget | 4, 8, 30 |
 | `--eval_batch_size` | batch size for validation and scoring | the training batch size |
-| `--seed` | random seed (initial weights, dropout, batch order); replicate runs use 42, 43, 44 | 42 (`main_genome.py`: 33) |
+| `--seed` | random seed (initial weights, dropout, batch order) | 1 (`main_genome.py`: 33) |
 | `--resume`, `--init_from <snapshot>` | continue a run on the same data with the same settings (it may train longer); start a new run from saved weights (new output layer if the diseases differ in number, names or order) | |
 
 A run directory holds `config.json` (every setting, plus the code directory, its git commit

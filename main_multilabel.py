@@ -24,12 +24,12 @@ from args_generator import args_initial
 from widedeepgp.train import run_training
 
 _UNSET = "<not given>"
-SEED = 42                                     # the project's seed; replicate runs use 42, 43, 44
+SEED = 1                                      # the project's single seed (the pilot, its control and tuning used it)
 
 
 def parse_args(argv=None):
     """The parser of args_generator.py with the multi-disease defaults: datasets under
-    pukb/genes, attention pooling, seed 42, and SNP statistics of the training split unless
+    pukb/genes, attention pooling, seed 1, and SNP statistics of the training split unless
     --snp_stats is given (the parser's own defaults, kept for main_genome.py, are seed 33 and
     all store samples)."""
     argv = sys.argv[1:] if argv is None else list(argv)

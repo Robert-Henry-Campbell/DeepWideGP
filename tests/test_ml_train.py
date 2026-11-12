@@ -48,7 +48,7 @@ def test_the_multi_disease_entry_points_scale_snps_on_the_training_split():
     assert main_multilabel.parse_args(["--label", "x"]).snp_stats == "train"
     assert main_multilabel.parse_args(["--label", "x", "--snp_stats", "store"]).snp_stats == "store"
     assert main_multilabel.parse_args(["--snp_stats=store", "--label", "x"]).snp_stats == "store"
-    assert main_multilabel.parse_args(["--label", "x"]).seed == 42                # the project's seed
+    assert main_multilabel.parse_args(["--label", "x"]).seed == 1                 # the project's single seed
     assert main_multilabel.parse_args(["--label", "x", "--seed", "7"]).seed == 7
     assert main_multilabel.parse_args(["--seed=7", "--label", "x"]).seed == 7
     from args_generator import args_initial

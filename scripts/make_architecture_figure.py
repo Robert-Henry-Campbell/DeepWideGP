@@ -20,20 +20,25 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "figures")
 NAME = "widedeepgp_architecture"
 MM = 1 / 25.4
-W, H = 183.0, 84.0                                   # figure size in mm
+W, H = 183.0, 97.0                                   # figure size in mm
 INK, INK2, MUTED, EDGE = "#0b0b0b", "#52514e", "#898781", "#c3c2b7"
 BLUE, BLUE_TINT, PLAIN = "#2a78d6", "#cde2fb", "#f6f5f1"
+Y_CHR = 71                                           # bottom edge of the per-chromosome row (mm)
 
 # name, x, y, width, height (mm), status, title, lines, copies drawn behind (one per chromosome)
 BOXES = [
-    ("genotypes", 4, 58, 26, 16, "changed", "Genotypes", ["one chromosome,", "standardised dosage"], 2),
-    ("embedding", 35.5, 58, 26, 16, "same", "Token embedding", ["convolution over", "3 SNPs + position"], 2),
-    ("annotation", 67, 58, 26, 16, "new", "Annotations", ["96 per SNP: a gain", "and an offset on its", "token (optional)"], 2),
-    ("encoder", 98.5, 58, 26, 16, "same", "Sequence encoder", ["bidirectional Mamba,", "one or more layers"], 2),
-    ("pool", 130.5, 58, 21, 16, "same", "Mean pool", ["over the SNPs", "(32-bit)"], 2),
+    ("genotypes", 4, Y_CHR, 26, 16, "changed", "Genotypes", ["one chromosome,", "standardised dosage"], 2),
+    ("embedding", 35.5, Y_CHR, 26, 16, "same", "Token embedding", ["convolution over", "3 SNPs + position"], 2),
+    ("encoder", 98.5, Y_CHR, 26, 16, "same", "Sequence encoder", ["bidirectional Mamba,", "one or more layers"], 2),
+    ("pool", 130.5, Y_CHR, 21, 16, "same", "Mean pool", ["over the SNPs", "(32-bit)"], 2),
+    # one pair of maps serves every chromosome, so the box is drawn once, below the per-chromosome row
+    ("annotation", 49, 52, 62, 16, "new", "Annotation gain and offset",
+     ["from 96 functional annotations and a no-annotation", "flag (97 channels per SNP); one pair of maps,",
+      "shared by all chromosomes (optional)"], 0),
     ("covariates", 4, 34, 26, 16, "changed", "Covariates", ["year of birth, sex,", "10 genetic PCs"], 0),
     ("cov_encoder", 130.5, 34, 21, 16, "same", "Covariate MLP", ["two layers"], 0),
-    ("attention", 157.5, 34, 22.5, 40, "same", "Attention", ["across the 23", "vectors: 22", "chromosomes", "and the", "covariates"], 0),
+    ("attention", 157.5, 34, 22.5, Y_CHR + 16 - 34, "same", "Attention",
+     ["across the 23", "vectors: 22", "chromosomes", "and the", "covariates"], 0),
     ("batches", 4, 8, 57.5, 18, "new", "Batches: a rotation over the diseases",
      ["each batch is half cases and half non-cases of", "one target disease; every disease is the target", "in turn"], 0),
     ("loss", 67, 8, 57.5, 18, "new", "Loss: all 30 outputs learn from every batch",
@@ -47,8 +52,10 @@ COMPONENTS = [
     # component, input, output, trainable parameters, relative to single-phenotype DeepGP
     ("Genotypes", "22 chromosomes, 1,258,200 SNPs", "[B, L_c, 1] per chromosome", 0,
      "changed: one fixed SNP set (HapMap3+) for all diseases instead of SNPs chosen per disease"),
-    ("Token embedding", "[B, L_c, 1]", "[B, L_c, d]", 2112, "same (96 per chromosome)"),
-    ("Annotation gain and offset", "[L_c, 97] per chromosome", "scales and shifts [B, L_c, d]", 6272,
+    ("Token embedding", "[B, L_c, 1]", "[B, L_c, d]", 2112, "same (96 parameters per chromosome)"),
+    ("Annotation gain and offset",
+     "[L_c, 97] per chromosome: 96 functional annotations and a no-annotation flag per SNP",
+     "scales and shifts [B, L_c, d]", 6272,
      "new, optional; one pair of maps shared by all chromosomes; not in the total below"),
     ("Sequence encoder", "[B, L_c, d]", "[B, L_c, d]", 242880,
      "same (11,008 per chromosome and layer, plus a final normalisation of 32)"),
@@ -73,8 +80,11 @@ are not shared between chromosomes. Tinted boxes with a heavy outline are new or
 to single-phenotype DeepGP (tagged "new" or "changed"); plain boxes are as published. Training
 draws batches that are balanced on one disease at a time, in rotation, and every output learns
 from every batch through a loss that corrects for how often each participant is drawn. The
-annotation step is optional and is off in the base model. With a model width of 32 and one
-encoder layer the network has 465,662 trainable parameters (table: `widedeepgp_architecture_data.csv`).
+annotation step is optional and is off in the base model. Its gain and offset are computed from
+96 functional annotations and a no-annotation flag per SNP (97 channels) by one pair of maps
+shared by all chromosomes, so that box is drawn once, outside the stack. With a model width of
+32 and one encoder layer the network has 465,662 trainable parameters (table:
+`widedeepgp_architecture_data.csv`).
 """
 
 
@@ -118,9 +128,12 @@ def draw():
     mid = lambda n: b[n][1] + b[n][3] / 2
     right = lambda n: b[n][0] + b[n][2]
     # the chromosome branch, left to right
-    for a_, c_ in (("genotypes", "embedding"), ("embedding", "annotation"), ("annotation", "encoder"), ("encoder", "pool")):
+    for a_, c_ in (("genotypes", "embedding"), ("embedding", "encoder"), ("encoder", "pool")):
         arrow(ax, (right(a_) + 1.9, mid(a_)), (b[c_][0], mid(c_)))
     arrow(ax, (right("pool") + 1.9, mid("pool")), (b["attention"][0], mid("pool")))
+    # the shared annotation gain and offset act on the tokens between embedding and encoder
+    x_ann = b["annotation"][0] + b["annotation"][2] / 2
+    arrow(ax, (x_ann, b["annotation"][1] + b["annotation"][3]), (x_ann, mid("embedding")))
     # the covariate branch
     arrow(ax, (right("covariates"), mid("covariates")), (b["cov_encoder"][0], mid("cov_encoder")))
     arrow(ax, (right("cov_encoder"), mid("cov_encoder")), (b["attention"][0], mid("cov_encoder")))
@@ -141,7 +154,7 @@ def draw():
     ax.text((right("loss") + b["head"][0]) / 2, mid("head") + 1.2, "logits", fontsize=7, color=MUTED, ha="center",
             va="bottom", rotation=90)
     # the bracket over the per-chromosome parts
-    x0, x1, yb = b["genotypes"][0], right("pool") + 1.8, 78.6
+    x0, x1, yb = b["genotypes"][0], right("pool") + 1.8, Y_CHR + 16 + 4.6
     line(ax, [(x0, yb - 1.2), (x0, yb), (x1, yb), (x1, yb - 1.2)])
     ax.text((x0 + x1) / 2, yb + 0.8, "22 chromosomes, each with its own embedding and encoder (weights not shared)",
             fontsize=7, color=INK, ha="center", va="bottom")

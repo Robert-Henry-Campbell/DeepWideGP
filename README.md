@@ -136,17 +136,22 @@ The single-disease code above (`main_genome.py`, `models/`, `layers/`, `utils.py
 [methods.md](methods.md) describes the data, the model and the training, and lists every
 difference from the single-disease model.
 
-**Read [methods.md](methods.md) section 4.9 before training at full size.** In the pilot on
-real data (DeepWideGP-Scripts, `scripts/widedeepgp-pilot/results.md`) the network learned the
-covariates and nothing from unselected SNPs; it learned from the SNPs only when each SNP came
-with signed association statistics, or slowly when the SNPs had been selected by a GWAS.
+**Read [methods.md](methods.md) section 4.9 before training at full size.** In the pilot on real
+data (DeepWideGP-Scripts, branch `widening`, `scripts/widedeepgp-pilot/results.md`) the network
+ended slightly below a logistic model on the covariates and learned nothing detectable from
+unselected SNPs unless each SNP carried signed association statistics (then about a third of
+what a clumped polygenic score adds); on simulated traits it learned from the SNPs only when
+each SNP came with signed association statistics, or slowly when the SNPs had been selected by a
+GWAS.
 
 ```bash
-# a dataset whose store.json names its "labels" and "covariates" (genostore/README.md)
-CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py --label <dataset> --rd_mode <variant> --snp_stats train \
+# a dataset <data_dir>/<dataset>/<variant>/ whose store.json names its "labels" and "covariates"
+# (genostore/README.md); without --data_dir, datasets are looked for in pukb/genes
+CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
     --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --batch_size 16 --exp_name <run>
 python score_snapshots.py --run runs/default/<run> --split val      # every snapshot, with a covariates-only baseline
-CUDA_VISIBLE_DEVICES=<gpu> python tune_optuna.py --study <name> --n_trials 20 -- <the training arguments>
+CUDA_VISIBLE_DEVICES=<gpu> python tune_optuna.py --study <name> --n_trials 20 -- \
+    --data_dir <data_dir> --label <dataset> --rd_mode <variant> <the other training arguments>
 tensorboard --logdir runs/
 
 # three-minute check on six synthetic traits (generated on first use)
@@ -156,6 +161,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | Flag | Meaning | Default |
 |---|---|---|
 | `--labels a,b` | train on a subset of the dataset's diseases (one disease = the single-disease comparator) | all |
+| `--snp_stats` | SNP standardisation: `train` (training-split mean and SD) or `store` (all store samples) | `train` (`main_genome.py`: `store`) |
 | `--sampler` | `rotation`: each batch is balanced on one disease in turn; `shuffled` | `rotation` |
 | `--loss_outputs` | `all`: every output learns from every batch; `target`: only the balanced disease | `all` |
 | `--gamma`, `--w_max` | class-weight exponent (0 none, 0.5 square root, 1 parity) and cap | 0.5, 20 |
@@ -163,10 +169,15 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--annot` | per-SNP annotation vectors as a gain and offset on the token embedding | off |
 | `--mixer` | `bimamba1` (the published block) or `mamba3` (needs `scripts/setup_mamba3_env.sh`) | `bimamba1` |
 | `--precision bf16`, `--grad_ckpt`, `--accumulate N` | mixed precision, per-chromosome checkpointing, gradient accumulation | off, off, 1 |
+| `--warmup_steps`, `--lr_schedule` | linear learning-rate warm-up (optimiser steps); `constant` or `cosine` decay after it | 0, `constant` |
 | `--val_per_epoch`, `--stop_patience`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, budget | 4, 8, 30 |
-| `--resume`, `--init_from <snapshot>` | continue a run; start from saved weights (new output layer if the diseases differ) | |
+| `--eval_batch_size` | batch size for validation and scoring | the training batch size |
+| `--seed` | random seed (initial weights, dropout, batch order) | 33 |
+| `--resume`, `--init_from <snapshot>` | continue a run on the same data with the same settings (it may train longer); start a new run from saved weights (new output layer if the diseases differ in number, names or order) | |
 
-A run directory holds `config.json`, TensorBoard files, `metrics.csv`, weight snapshots with
+A run directory holds `config.json` (every setting, plus the code directory, its git commit
+(none for a copy outside git), a `git_dirty` flag for uncommitted changes to tracked .py files,
+and the Python interpreter), TensorBoard files, `metrics.csv`, weight snapshots with
 `snapshots.csv` (what each cost), `checkpoints/best.ckpt` and `last.ckpt`, and `results.json`.
 Tests: `python -m pytest tests/test_ml_*.py -q` (the model and training tests need a GPU).
 

@@ -1,8 +1,9 @@
 # genostore — disk-backed genotypes for DeepGP
 
 Added 2026-11-10. Replaces "unpickle every genotype into RAM as float32" for large datasets.
-The original pickle loader (`utils.SNPPCACHRDataModule`) is untouched and still used for any
-dataset directory that does not contain a `store.json`.
+The original pickle loader (`utils.SNPPCACHRDataModule`) is untouched by the store work (its
+labels are 0/1 since the April 2026 change) and still used for any dataset directory that does
+not contain a `store.json`.
 
 ## Why
 
@@ -92,7 +93,8 @@ one sequence per chromosome. This is how sub-chromosome blocks would be expresse
 itself still assumes 22 sequences). `"pos_mode"`: `"index"` (0..L-1, as the synthetic data
 uses) or `"pos"` (the store's position column, bp for UKB).
 
-Multi-disease datasets (`main_multilabel.py`, `methods.md`) add to `store.json`:
+Multi-disease datasets (`main_multilabel.py`, `methods.md`; with `--data_dir` they can live
+outside `pukb/genes`) add to `store.json`:
 
 ```
 "labels":      ["I10", "E11", ...]     label columns of the sample tables; values 0, 1 or empty
@@ -110,10 +112,11 @@ An existing pickle dataset can be converted for comparison:
 
 ## Behaviour differences from the pickle loader (deliberate)
 
-- **SNP scaling statistics.** Default `--snp_stats store` standardises with the mean/SD stored
-  at conversion time (all samples in the store). `--snp_stats train` recomputes them on the
-  training split, which is what the pickle loader does. The first avoids a pass over the
-  training genotypes at start-up; it uses test-set genotypes (never labels) in the scaling.
+- **SNP scaling statistics.** Default `--snp_stats store` (in `main_genome.py`) standardises
+  with the mean/SD stored at conversion time (all samples in the store). `--snp_stats train`,
+  the default of the multi-disease entry points, recomputes them on the training split, which
+  is what the pickle loader does. The first avoids a pass over the training genotypes at
+  start-up; it uses test-set genotypes (never labels) in the scaling.
 - **Monomorphic SNPs** (SD = 0) become 0 instead of inf/NaN.
 - **Missing genotypes** become the SNP mean (0 after scaling).
 - `--non_add` and `--use_sim` are not implemented for store datasets.
@@ -140,9 +143,11 @@ the pickle loader (7 runs).
 ## Not done yet
 
 - A full-cohort conversion of all imputed SNPs has not been run. The HapMap3+ subset has (11 Nov
-  2026, `--extract`): 1,258,200 SNPs for 333,444 participants in about 2 h 40 min wall-clock
-  under the idle-only disk policy (about 450-950 SNPs/s with 24 threads while reading), 116 GB
-  (0.277 byte/genotype), 0 mismatches on the audit rows of all 22 chromosomes.
+  2026, `--extract`): 1,258,200 SNPs for 333,444 participants in about 65 min wall-clock under
+  the idle-only disk policy (chromosome 21 first as a one-minute test, then the other 21 in
+  64 min with 24 threads, about 160-600 SNPs/s per block), 116 GB (0.277 byte/genotype), 0
+  mismatches on the audit rows of all 22 chromosomes. The same SNPs for the 17,055 Asian and
+  Black participants took about 23 min.
 - Reads go through a memory map. The first pass over a store that is not in the page cache is
   slow (about 150 MB/s by page faults, which made the one-off training-split SNP statistics of
   215,872 participants take ten minutes); reading the files once with a few parallel

@@ -336,3 +336,258 @@ a frozen export of commit 8f03ca6 in `runs/pilot_code_8f03ca6`.
   always leaves alone.
 - `pgrep -f PATTERN` matches a waiting shell whose own command line contains the pattern;
   write the pattern with a bracket (`run_capacity[.]py`) or wait on a file instead.
+
+## 2026-11-12 (afternoon) — Session continued on Opus 5.5: second seeds, audit, corrections
+
+The session moved from Fable 5.2 to Opus 5.5 at about 12:30. Write-ups:
+DeepWideGP-Scripts (branch `widening`) `scripts/widedeepgp-pilot/results.md` and `methods.md`;
+model summary in `methods.md` section 4.9 here.
+
+### What happened
+
+- All 18 pilot runs finished overnight (9 arms x seeds 1 and 2). The genotype-permutation
+  scoring was rerun for all 18 (the seed-1 values reproduced the earlier ones to 3e-8) and the
+  pilot tables and figures were regenerated with both seeds. With two seeds, target-only
+  (-0.0011) and no sampling-rate correction (-0.0023) differ from the default under the pre-set
+  rule, both in the direction the plan's defaults predicted; every decision stands.
+- An audit by 13 agents (plan vs work, tests, the pilot write-up, both methods documents, notes
+  and memory, data inventory and governance; an adversarial check of every finding; a
+  completeness critic) checked about 1,230 claims (1,085 passed, 147 flagged) and confirmed
+  about 100 problems. A second round (5 agents on disjoint files, each reviewed) and the lead
+  fixed them. The final test run, after the last code change, is recorded in the next entry.
+- A 200-step bf16 counterpart of the full-size dry run
+  (`/mnt/sdg/robert/deepwidegp/runs/dryrun/bf16_b18`, run from `runs/pilot_code_8f03ca6`)
+  matched the 32-bit run (loss within 0.2%, AUROC 0.6110 against 0.6108) in 0.74 times the time
+  per step and 0.59 times the memory.
+- Gate evidence that lived only in the session scratchpad or in git-ignored folders was copied
+  (small files only, synthetic data) to `/mnt/sdg/robert/deepwidegp/runs/gate_evidence/` (README
+  there): plan 8C one-label regression, 8F two-worker Optuna check, the five-seed band runs, and
+  Mamba-3 gate 5 (`multi6_mamba3_gate5`). The pilot used the code of commit 8f03ca6 (an export
+  in `runs/pilot_code_8f03ca6`), which contains every code change of the previous entry except
+  717c755.
+
+### Code changes (this repository)
+
+- Exact sampling correction for odd batch sizes: the sampler takes round(B/2) cases
+  (`samplers.cases_per_batch`) and the loss's sampling rates now use that share (hp key
+  `case_share`; `labels.rotation_rates`/`sampling_rate` take it; old models default to 0.5).
+- `main_multilabel.parse_args` / `tune_optuna`: training-split SNP statistics
+  (`--snp_stats train`) unless the flag is given; `tune_optuna.load_study` reads a study without
+  writing to its journal.
+- `train.run_training` refuses a model or dataset without covariates (`--dm snps`, `--use_cov`,
+  no covariates named); `check_resume_tables` refuses to resume over other SNP positions or
+  annotation vectors; models record `annot_digest` (a model with annotations refuses different
+  matrices; older annotated models load with a warning); `config.json` records `code_dir`,
+  `git_commit`, `git_dirty` (tracked .py files differ from the commit) and `python`.
+- `score_snapshots.py --snapshots best` follows `results.json`'s `best_checkpoint`.
+- `genostore/format.py`, `convert.py`: stores are created owner-only (0700 directories, 0600
+  files) whatever the umask.
+- Docstrings (`callbacks.py`, `__init__.py`), `scripts/make_architecture_figure.py` (Figure 1
+  draws the annotation maps once, shared by all chromosomes; 96 annotations and a flag).
+- Tests: odd-batch rates and loss, parse_args defaults, refusals, digest checks on load and on
+  resume, provenance, read-only study loading, the resume fallback read from `results.json`;
+  new `tests/test_genostore_permissions.py`.
+
+### Code changes (DeepWideGP-Scripts, branch `widening`)
+
+- `widedeepgp-pilot/genetic_signal.py`: file lock around its CSV merge; other experiments write
+  `genetic_signal_<experiment>.csv`; rows replaced per (arm, seed[, label]); the data module is
+  rebuilt when a run's dataset differs; labels without cases are left out of every mean; scores
+  the checkpoint `results.json` names.
+- `simulated_control.py`, `gwas_annotation.py`: refuse to run unless the dataset's third table
+  is a draw from the training split (never the real test set); the selected-SNP store is
+  owner-only; Figure 5 reads every run at the end of training.
+- New: `position_code_capacity.py`, `check_control_data_path.py`, `test_pilot_checks.py`;
+  `analyze_pilot.py` reports the gain over the covariates; `capacity_probe.py` passes the
+  annotations so no false digest warning appears.
+- `build-ard30-dataset`: `describe_dataset.py` writes no maximum over participants; new
+  `proxy_region_loci.py` and `results/proxy_region_loci.csv` (the 20 loci behind the proxy
+  region, listed from memory on 11 Nov).
+
+### Data and environment
+
+- `data/genostore/` made owner-only (`chmod -R go-rwx`).
+- `docs/2026-11-11_widening_plan_rev3.md`: a copy of the approved plan (untracked, like the
+  synthesis document, so it survives a clean-up of `~/.claude`).
+- No environment changes.
+
+### Things worth knowing
+
+- Every pilot network ends slightly below a logistic model on the 12 covariates (default
+  -0.0014 in mean tuning AUROC). Any redesign must show, on real labels, a positive gain over
+  that model and a positive genotype-dependent part.
+- Pan-UKB summary statistics are not out-of-sample: Pan-UKB is UK Biobank and includes our
+  tuning and test participants. FinnGen R12 is on GRCh38; data/reference/map_hm3_plus.rds has
+  pos_hg38 for all but 1,006 of its 1,444,196 SNPs (606 of the model's 1,258,200) and an rsID
+  for all but 408 (260 of the model's, which carry a chr:pos_ref_alt identifier instead); no
+  model SNP lacks both, so a match by GRCh38 position with an rsID fallback needs no lift-over
+  tool.
+- The genotype stores hold every sample of the lab PGEN, including 120 + 16 participants on the
+  withdrawal list of 25 April 2024; every table excludes them. Whether to rebuild the stores
+  without them is Robert's decision.
+- `scripts/find-ukb-ard-phenos` in DeepWideGP-Scripts (another session's folder) is in no
+  commit, but `build-ard30-dataset/build_dataset.py` imports it.
+- The legacy single-disease test rewrites the tracked synthetic output
+  `DeepGP/results/.../synthetic_1causal_10case_test/preds.pkl`; it is left uncommitted.
+- Shell pitfall: in `a && b && (x) & (y) & wait`, the whole `a && b && (x)` chain runs in a
+  background subshell, so variables it sets are unset in `(y)`. Set variables on lines of their
+  own first.
+- A second Claude session (started 13:54 on 12 Nov) is planning PRS comparators in this project
+  and shares the working trees.
+
+## 2026-11-12 (evening) — Final checks, last fixes, commits
+
+Everything in the two entries above, with the corrections, is committed on branch `widening`
+(not pushed): DeepWideGP 2310856 (code and tests) and the commit that adds this entry
+(documents, figure, notes); DeepWideGP-Scripts 7a1d789 (`scripts/widedeepgp-pilot`,
+`scripts/build-ard30-dataset`, committed through a temporary index; the working tree stays on
+`main`).
+
+### What happened
+
+- Review rounds after the corrections round, each by fresh agents reading the code, the
+  documents and the primary sources (runs, logs, reference files, Lightning's source):
+  1. a final check (code; documents): 8 low code issues, 2 medium and 13 low document issues;
+  2. a check of those fixes: 5 low code issues, 1 medium and 5 low document issues;
+  3. a check of those: 1 medium and 4 low code issues (what a resume keeps), 4 low document
+     issues;
+  4. a check of those: 6 low issues (copied run directories, the last checkpoint's name,
+     wording);
+  5. a check of those, cut short when the session restarted, whose toy Lightning flows showed
+     that the new `RunCheckpoint` did not restore checkpoints saved by a plain
+     `ModelCheckpoint` (Lightning keys a callback's state by its class name) nor a folder
+     reached by another path; fixed, and the flows rerun on the fixed code.
+  Every issue was fixed. Most of them concern `--resume`, which the pilot used once (a copied
+  run folder) and which full-size runs will rely on.
+- Tests of the code as committed (2310856); logs in
+  `/mnt/sdg/robert/deepwidegp/runs/gate_evidence/final_tests_2026-11-12/`:
+  - On the CPU, 22:13:36 to 22:14:07 UTC: the label, sampler, loss and Mamba-3 tests and the
+    four genostore files, 44 passed and 9 skipped; the CPU tests of `test_ml_train.py` and
+    `test_ml_model.py`, 13 passed (their GPU tests skip there); DeepWideGP-Scripts' pilot and
+    dataset tests, 27 passed.
+  - On the GPU: not run yet. Another user's job has held all five GPUs since about 18:08.
+    `run_gpu_suites_when_free.sh` in that folder, started detached at 22:16 UTC, waits until
+    two GPUs are free (Robert's rule: the free GPUs minus one), then runs the quick and slow
+    training tests, the model tests and the capacity probe on an export of 2310856
+    (`code_2310856/`, outside git) and writes `gpu_summary.txt`; it gives up after 24 hours.
+    The last full GPU run, `third_run/` (17:38 to 17:51 UTC: quick training tests 16, model
+    9, slow 3 passed), was on the code before `RunCheckpoint` and the version-ranked
+    `last_checkpoint`.
+  - Earlier runs kept there: `first_run/`, `second_run/` and `third_run/`, full runs that
+    passed on the code of earlier rounds; `fourth_run_cpu_only/`, the CPU suites just before
+    the last `RunCheckpoint` fix; and `stopped_run/`, stopped at 16:55 so that
+    `check_resume_args` could be added, whose two FAILED lines
+    (`test_a_resume_with_rewritten_annotations_is_refused`,
+    `test_one_label_lands_in_the_published_band`) are the tests the stop killed; both pass in
+    every full run.
+
+### Code changes
+
+DeepWideGP:
+- `widedeepgp/train.py`:
+  - `check_resume_tables(ckpt_path, hp, loss=None)` also refuses a checkpoint trained on other
+    labels (`label_names`, names or order), on a training split with other label counts, or
+    with any other saved setting except those in `RESUMABLE` (`total_optimizer_steps`,
+    `grad_ckpt`). Given the run's loss module, it also compares the loss's constants with the
+    checkpoint's (relative tolerance 1e-6), which covers checkpoints saved before `case_share`
+    was recorded. The loss's constants are persistent buffers and the optimiser's state is
+    restored too, so a resume with other labels or settings would have trained with the
+    checkpoint's values while `config.json` recorded the new ones. The 20 last checkpoints of
+    the pilot's 18 runs and of `pilot_sim/selected_long_s1` (its `last.ckpt` and
+    `last-v1.ckpt`) all pass, against settings and a loss rebuilt from their own saved
+    settings with the live code.
+  - New `check_resume_args`: refuses a resume whose `--snp_stats`, `--scaling`,
+    `--batch_size`, `--accumulate`, `--seed`, `--steps_per_epoch_equiv` or `--val_per_epoch`
+    differ from the run's existing `config.json` (`RUN_ARGS`), which the resumed run
+    overwrites.
+  - New `last_checkpoint`: `--resume` continues from `last.ckpt` or the highest
+    `last-vN.ckpt`, and refuses when another last checkpoint is newer than that one (a copy
+    that did not keep the files' times). Lightning writes `last-vN.ckpt` beside a `last.ckpt`
+    it did not write itself, as in `pilot_sim/selected_long_s1`; before, `--resume` always read
+    `last.ckpt`, so a further resume of that folder would have started again from the copied
+    6-epoch-equivalent weights.
+  - Checkpoints are written by `RunCheckpoint` (below); `--init_from` passes the source's label
+    names to `load_weights`.
+  - `code_version` runs `git --no-optional-locks status`, so recording the code version never
+    writes the index of a checkout that another process may be using. The module docstring
+    lists `git_dirty`.
+- `widedeepgp/callbacks.py`:
+  - New `RunCheckpoint`, a `ModelCheckpoint` that, when a checkpoint's saved folder is named
+    differently from the run's (a copied run directory, or the same folder through a symlink
+    or a relative `--run_dir`) and the checkpoint files are there, moves the saved best and
+    last paths into the run's folder before restoring them. Lightning restores the best score
+    only when the folder is named exactly as when the state was saved (this fsspec reports the
+    local protocol as a tuple, so Lightning keeps paths as given), so a copy, once resumed,
+    started a new best (`best-v1.ckpt`) compared with nothing from before the resume, and
+    `results.json` could report a later and worse pass as the run's best. Its `state_key` is
+    `ModelCheckpoint`'s, so the pilot's checkpoints (saved by a plain `ModelCheckpoint`)
+    restore into it; with its own class name they would not have, and resuming any of them
+    would also have started a new best. Checked with a toy LightningModule on the CPU, 21
+    training runs of which 19 resume (in place, copies with and without file times, copies of
+    copies, a symlink, a moved folder, a relative run path, pilot-era checkpoints in place and
+    copied): each keeps the best checkpoint and score of an in-place resume, and the three
+    copied originals that were compared are unchanged. A copy without `best.ckpt`, or one taken
+    while the run was writing, falls back to Lightning's behaviour.
+  - `EarlyStoppingOnce` keeps the resumed run's `--stop_patience`; Lightning's
+    `EarlyStopping.load_state_dict` would put back the checkpoint's, silently.
+- `widedeepgp/model.py`: `load_weights(..., source_labels=None)`: with `allow_new_head`, the
+  output layer also starts afresh when the source's label names differ in names or order.
+  Before, a list of other diseases of the same length loaded the saved rows as they were, each
+  into another disease's output.
+- `score_snapshots.py`: `--snapshots last` scores the checkpoint `last_checkpoint` picks.
+- `args_generator.py`: the `--resume` help text says what a resume keeps.
+- Tests. `test_ml_train.py`, on the CPU: `test_resume_checks_every_table` (every branch, on
+  checkpoints holding only settings and loss constants),
+  `test_resume_keeps_the_batches_and_snp_scaling`,
+  `test_a_resumed_run_keeps_its_own_stopping_patience`,
+  `test_a_resume_starts_from_the_latest_last_checkpoint`,
+  `test_run_training_resumes_from_the_latest_last_checkpoint`,
+  `test_a_copied_run_directory_carries_on_with_its_best_and_last`; on the GPU,
+  `test_starting_from_the_weights_of_a_run_on_other_diseases` and
+  `test_a_copied_run_resumes_as_if_in_place`; the GPU test of a refused resume also checks
+  that `run_training` refuses other arguments, other settings and (for a checkpoint without
+  `case_share`) other loss constants, that `config.json` is left alone, and that a resume with
+  the original annotations goes ahead; the code-version test computes the expected commit the
+  way `code_version` does (a copy inside another checkout has none); the `results.json` test
+  also covers `--snapshots last`. `test_ml_model.py`: the same two diseases in the other order
+  get a fresh output layer, and a source without names loads as before.
+
+DeepWideGP-Scripts:
+- `capacity_probe.py` passes the annotations to `model_hparams` only where it takes them, so
+  the probe also runs on the frozen pilot code (`DEEPGP_REPO=runs/pilot_code_8f03ca6`).
+- `position_code_capacity.py`: docstrings (least squares with the cut-off of
+  `numpy.linalg.lstsq(rcond=None)`, which is the default only from NumPy 2.0; it is not exact).
+
+Documents: the bf16 dry run at full length agreed with the 32-bit one in training loss to within
+0.2% (0.19% at step 149), not 0.1%; `git_dirty` is documented; "nothing" became "nothing
+detectable" or "next to nothing" where the pilot shows a small effect; `map_hm3_plus.rds` lacks
+pos_hg38 for 1,006 SNPs (606 of the model's), and 408 of its identifiers (260 of the model's)
+are chr:pos_ref_alt, not rsIDs, but no model SNP lacks both; the pilot methods describe the bf16
+repeat of the dry run and the code each dry run used (the 32-bit run's code was edited after
+the run had loaded it and before it was committed, in ways that do not change that run); the
+limitations say what the proxy can rank; the dataset methods say that `build_log.json` holds
+each covariate's minimum and maximum; results.md section 7 describes a GRCh38 position match,
+not a lift-over; methods.md section 4.9 gives the GWAS-annotation scheme as a ninth, added
+during the pilot; "signed" information is said to be needed on unselected SNPs only (the
+network learned, slowly, from GWAS-selected SNPs without a sign); the least-squares cut-off is
+named as lstsq's with rcond=None; methods.md section 7, the README and the pilot methods'
+"Longer training" bullet describe what `--resume` and `--init_from` keep and which checkpoint a
+resume reads.
+
+Correction to the 12 Nov (night) entry above: its "Things worth knowing" says the network
+learns "nothing from unselected SNPs". The evidence is nothing detectable on the real labels
+(-0.0003 to +0.0003 for the eight planned arms, every interval including zero) and next to
+nothing on the simulated traits (0.50 to 0.52).
+
+### Things worth knowing
+
+- `--resume` continues the same run: the same data, settings, batches and seed; it may train
+  longer (budget, early-stopping patience) and switch activation checkpointing. To start from
+  saved weights with anything else, use `--init_from`. A single-disease model saved by
+  `main_genome.py` records no disease names, so `--init_from` loads its output layer as it is
+  when the sizes match.
+- To extend a finished run, copy its folder and resume the copy (the copy keeps the run's best
+  checkpoint and score), or resume it in place. `pilot_sim/selected_long_s1` was copied with
+  the pilot's code, so it holds stale `best.ckpt` and `last.ckpt` beside `best-v1.ckpt` and
+  `last-v1.ckpt`; `results.json`, `--snapshots best|last` and `--resume` all pick the `-v1`
+  files.

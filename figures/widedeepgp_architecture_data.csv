@@ -1,7 +1,7 @@
 component,input,output,trainable_parameters_d32_1layer,relative_to_single_phenotype_deepgp
 Genotypes,"22 chromosomes, 1,258,200 SNPs","[B, L_c, 1] per chromosome",0,changed: one fixed SNP set (HapMap3+) for all diseases instead of SNPs chosen per disease
-Token embedding,"[B, L_c, 1]","[B, L_c, d]",2112,same (96 per chromosome)
-Annotation gain and offset,"[L_c, 97] per chromosome","scales and shifts [B, L_c, d]",6272,"new, optional; one pair of maps shared by all chromosomes; not in the total below"
+Token embedding,"[B, L_c, 1]","[B, L_c, d]",2112,same (96 parameters per chromosome)
+Annotation gain and offset,"[L_c, 97] per chromosome: 96 functional annotations and a no-annotation flag per SNP","scales and shifts [B, L_c, d]",6272,"new, optional; one pair of maps shared by all chromosomes; not in the total below"
 Sequence encoder,"[B, L_c, d]","[B, L_c, d]",242880,"same (11,008 per chromosome and layer, plus a final normalisation of 32)"
 Mean pool,"[B, L_c, d]","[B, d]",0,same; taken in 32-bit arithmetic under mixed precision
 Covariates,"year of birth, sex, 10 principal components","[B, 12]",0,changed: 12 covariates instead of 8

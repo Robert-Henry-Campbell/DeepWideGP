@@ -2,9 +2,9 @@
 
 *DeepWideGP repository, DPhil chapter 6. Written 11–12 November 2026. This document describes
 the data, the model and how it is trained. A pilot on real data is reported in
-DeepWideGP-Scripts (`scripts/widedeepgp-pilot/results.md`); what it showed about the model
-itself is summarised in section 4.9 and should be read before the model is trained at full
-size.*
+DeepWideGP-Scripts (branch `widening`, `scripts/widedeepgp-pilot/results.md`); what it showed
+about the model itself is summarised in section 4.9 and should be read before the model is
+trained at full size.*
 
 ## 1. Question
 
@@ -30,7 +30,7 @@ UK Biobank is a prospective cohort of about 500,000 adults aged 40–69 years at
 | After removing withdrawals (list of 25 April 2024) | 502,165 |
 | In the quality-controlled imputed-genotype files | 333,444 |
 | Of those: not withdrawn | 333,324 |
-| Of those: White-British genetic ancestry (field 22006) | 333,317 |
+| Of those: White-British genetic ancestry (field 22006; Bycroft et al., 2018) | 333,317 |
 | Of those: no relative identified in UK Biobank (field 22021 = 0) | **275,872** |
 
 All training, tuning and testing use the 275,872 unrelated White-British participants. Field
@@ -182,13 +182,13 @@ These are the limitations recorded by the selection analysis that bear on the la
 
 **SNP set.** The input is the HapMap3+ set of Privé et al. (2023): the 1,054,330 HapMap3
 variants used by LDpred2 plus 389,866 variants added to improve tagging, 1,444,196 in all. The
-laboratory's genotype files (UK Biobank imputed data v3, GRCh37, bi-allelic SNPs, filtered on
-minor-allele frequency, Hardy–Weinberg equilibrium and missingness) contain 1,258,200 of them
-(87.1%), matched by chromosome, position and both alleles: 1,012,953 of the HapMap3 variants
-and 245,247 of the added ones. Of the 185,996 that are absent, 116,513 have a minor-allele
-frequency below 1% in UK Biobank (the files hold nothing rarer than about 1%) and 69,483 failed
-the other filters. The model uses all 1,258,200, from 105,260 on chromosome 2 down to 17,844 on
-chromosome 21.
+laboratory's genotype files (UK Biobank imputed data v3 as released by Bycroft et al., 2018, on
+GRCh37; bi-allelic SNPs, filtered by the laboratory on minor-allele frequency, Hardy–Weinberg
+equilibrium and missingness) contain 1,258,200 of them (87.1%), matched by chromosome, position
+and both alleles: 1,012,953 of the HapMap3 variants and 245,247 of the added ones. Of the
+185,996 that are absent, 116,513 have a minor-allele frequency below 1% in UK Biobank (the files
+hold nothing rarer than about 1%) and 69,483 failed the other filters. The model uses all
+1,258,200, from 105,260 on chromosome 2 down to 17,844 on chromosome 21.
 
 **No SNP selection.** Published DeepGP chooses its input SNPs separately for each disease, by a
 GWAS p-value filter followed by clumping. Here one fixed set serves all diseases: a network
@@ -224,9 +224,11 @@ are not shared between chromosomes. Tinted boxes with a heavy outline are new or
 relative to single-phenotype DeepGP (tagged "new" or "changed"); plain boxes are as published.
 Training draws batches that are balanced on one disease at a time, in rotation, and every
 output learns from every batch through a loss that corrects for how often each participant is
-drawn. The annotation step is optional and is off in the base model. (Vector version and the
-component table: `figures/widedeepgp_architecture.pdf`, `figures/widedeepgp_architecture_data.csv`;
-drawn by `scripts/make_architecture_figure.py`.)
+drawn. The annotation step is optional and is off in the base model. Its gain and offset are
+computed from 96 functional annotations and a no-annotation flag per SNP (97 channels) by one
+pair of maps shared by all chromosomes, so that box is drawn once, outside the stack. (Vector
+version and the component table: `figures/widedeepgp_architecture.pdf`,
+`figures/widedeepgp_architecture_data.csv`; drawn by `scripts/make_architecture_figure.py`.)
 
 ### 4.1 Input and token embedding
 
@@ -346,27 +348,40 @@ over the chromosome. A SNP-specific effect, with its own size and sign, can ther
 only through what distinguishes one token from another: the position code, and the annotation
 vector where one is used.
 
-The position code has 32 sinusoidal features at a model width of 32. A linear read-out of it
-can represent every SNP's own effect when a chromosome has ten SNPs, as in the synthetic test
-data of this repository, but only about 0.05% of an arbitrary effect profile at the 57,000 SNPs
-per chromosome of the full dataset. The encoder is not linear, so this is a heuristic, not a
-bound. The pilot bears it out:
+The position code has 32 sinusoidal features at a model width of 32. A linear read-out of it (a
+least-squares fit of the effect profile on the code and a constant, with the cut-off that
+`numpy.linalg.lstsq` uses with rcond=None for directions that rounding cannot resolve; numerical
+rank 10 to 31) reproduces every SNP's own effect when a chromosome has ten SNPs, as in the
+synthetic test data of this repository, but only 11 to 17% of the true effect profiles of the
+pilot's simulated traits on its GWAS-selected SNPs (26 to 267 per chromosome; a figure that
+depends on the cut-off: about 9 to 14% at float32 precision, roughly 20 to 38% if every
+direction is kept), 0.3 to 0.4% on all of the pilot's 157,279 SNPs (2,231 to 13,158 per
+chromosome), and about 0.05% of an arbitrary effect profile at the 57,000 SNPs per chromosome of
+the full dataset (DeepWideGP-Scripts, branch `widening`,
+`scripts/widedeepgp-pilot/position_code_capacity.py`). The encoder is not linear, so this is a
+heuristic, not a bound. The pilot bears it out:
 
-- On the real labels (157,279 SNPs, 40,000 training participants, six epoch-equivalents) every
-  training scheme reached the AUROC of a logistic model on the covariates and no more, and
-  permuting the genotypes between participants changed nothing.
+- On the real labels (157,279 SNPs, 40,000 training participants, six epoch-equivalents, two
+  seeds per scheme) every training scheme ended slightly below a logistic model on the
+  covariates (the default by 0.0014 in mean tuning AUROC). Permuting the genotypes between
+  participants changed nothing detectable in the eight planned schemes (-0.0003 to +0.0003 over
+  their 16 runs). In a ninth, added during the pilot, each SNP carried the association
+  *z*-scores of the 30 diseases from a GWAS of 165,872 other participants of the training split;
+  there permuting cost 0.0004 and 0.0005 of mean AUROC in the two seeds, about a third of the
+  0.0014 that a clumped polygenic score from the same GWAS adds to the covariates.
 - On traits simulated on the same genotypes, with 20 to 20,000 causal SNPs and a known ceiling
   of 0.78 to 0.85, the network stayed at an AUROC of 0.51 where a clumped polygenic score or
   GBLUP fitted to the same participants reached 0.72 to 0.81. Mamba-3 did the same, and so did
   an annotation that marked the causal SNPs without saying which way each acts.
 - Given only the 2,476 SNPs that a GWAS of the training participants selects, the kind of input
   published DeepGP receives, the network learned slowly (0.54 to 0.65 after six
-  epoch-equivalents, peaking at 0.55 to 0.68 with longer training before it overfitted).
+  epoch-equivalents; continued to 30, it was at 0.54 to 0.64 at the end, after a best pass of
+  0.55 to 0.68 at 13.5, chosen on the tuning set and so optimistic).
 - Given every SNP's signed association *z*-score for each trait as annotation channels, it
-  learned on all 157,279 SNPs (0.59 to 0.69). The annotation gain multiplies each SNP's dosage,
-  so a signed statistic gives the network what it otherwise lacks: a size and a direction for
-  every SNP. The same statistics kept only at clumped lead SNPs did not work: a few hundred
-  marked SNPs are averaged away over a chromosome.
+  learned on all 157,279 SNPs (0.58 to 0.69 at the end of training). The annotation gain
+  multiplies each SNP's dosage, so a signed statistic gives the network what it otherwise
+  lacks: a size and a direction for every SNP. The same statistics kept only at clumped lead
+  SNPs did not work: a few hundred marked SNPs are averaged away over a chromosome.
 - The 96 functional annotations, which carry no direction, made no difference on the real
   labels and little on the simulated traits.
 
@@ -386,7 +401,8 @@ rarer ones (with 21 participants, 45% of batches hold no case of the rarest phen
 are therefore drawn by a **rotation**:
 
 - each batch has a *target* disease; half its participants are drawn from the target's cases
-  and half from its non-cases;
+  and half from its non-cases (when the batch size *B* is odd, *B*/2 is rounded to an even
+  number of cases and the rest are non-cases);
 - one rotation makes every disease the target once, in an order reshuffled at every rotation;
 - cases and non-cases of each disease are each visited in shuffled passes, so the cases of an
   uncommon disease recur many times while its non-cases come round once.
@@ -413,16 +429,18 @@ For a batch of *B* participants,
     loss = (1/n) Σ_j [ Σ_k m_kj · c_j(y_kj) · BCE(z_kj, y_kj) / ω_k ] / (B · Z_j)
 
     c_j(1) = min( ((1 − π_j)/π_j)^γ , w_max ),   c_j(0) = 1
-    ω_k    = (1/n) Σ_i [ y_ki/(2π_i) + (1 − y_ki)/(2(1 − π_i)) ]
+    ω_k    = (1/n) Σ_i [ ρ · y_ki/π_i + (1 − ρ) · (1 − y_ki)/(1 − π_i) ]
     Z_j    = π_j · c_j(1) + (1 − π_j)
 
 where *k* indexes participants and *j* the *n* diseases, *z* is the logit, *y* the label, BCE
 the binary cross-entropy, *m* an indicator that the label applies to the participant (always 1
-for these 30 phenotypes) and π_j the prevalence of disease *j* in the training split.
+for these 30 phenotypes) and π_j the prevalence of disease *j* in the training split; ρ is the
+share of a batch drawn from its target's cases, ½ when *B* is even.
 
 - **ω_k is the sampling rate of participant *k*:** how often the rotation draws them relative
-  to drawing people uniformly. A participant with none of the 30 phenotypes has ω = 0.55, the
-  median participant 0.80, and the 1% drawn most often more than 3.1 (maximum 5.5); the mean
+  to drawing people uniformly, computed from the numbers of cases and non-cases that a batch
+  actually holds. At an even batch size a participant with none of the 30 phenotypes has
+  ω = 0.55, the median participant 0.80, and the 1% drawn most often more than 3.1; the mean
   is 1 by construction. Dividing by ω is importance weighting: in
   expectation over a rotation, the batch sum equals the same average over the training cohort
   whatever the sampler. The rotation then changes how often an example is seen, not the
@@ -431,12 +449,13 @@ for these 30 phenotypes) and π_j the prevalence of disease *j* in the training 
   with it, the situation of secondary phenotypes in case-control studies (Lin and Zeng, 2009;
   Monsees et al., 2009). The correction has a price in efficiency: weighted this way, the
   draws of a rotation are worth 80% as many uniform draws (Kish's effective sample size,
-  1/(mean ω · mean 1/ω)).
+  1/(mean ω · mean 1/ω); Kish, 1965).
 - **c_j is the class weight**, which sets how much a case counts relative to a non-case.
-  γ = 1 would weight every disease to parity and γ = 0 leaves the population rate; the default
-  is the square root, γ = ½, which keeps the weights of these phenotypes at 5.1 or less where
-  parity would need up to 25.7. Large weights on the one or two cases a small batch holds make
-  the gradient noisy.
+  γ = 1 would weight every disease to parity, except that the cap (w_max = 20 by default) holds
+  the seven phenotypes with more than 20 non-cases per case at a weight of 20, below parity, and
+  γ = 0 leaves the population rate; the default is the square root, γ = ½, which keeps the
+  weights of these phenotypes at 5.1 or less where parity would need up to 25.7. Large weights
+  on the one or two cases a small batch holds make the gradient noisy.
 - **Z_j and the factor 1/n** put every disease on the same scale (each term is a weighted
   average with expected total weight one) and average the diseases equally, so that a frequent
   disease does not dominate the sum.
@@ -459,26 +478,33 @@ Three switches exist so that the choices above can be tested rather than assumed
   size times number of SNPs. Gradients can be accumulated over several batches per update; the
   rotation order is reshuffled every rotation so that the same diseases do not always share an
   update.
-- **Mixed precision.** The encoders can run in 16-bit (bf16) arithmetic. Pooling, the head and
-  the loss always run in 32-bit: participants differ by under 2% of a pooled chromosome vector,
-  which is finer than bf16 resolves. In a forward probe at 87,521 SNPs, averaging in bf16
+- **Mixed precision.** The encoders can run in 16-bit (bf16) arithmetic, and since the pilot
+  this is the setting for full-size runs. Pooling, the head and the loss always run in 32-bit:
+  participants differ by under 2% of a pooled chromosome vector, which is finer than bf16
+  resolves. In a forward probe with random weights and inputs at 87,521 SNPs, averaging in bf16
   distorted the between-participant part of the pooled vector by about 10%, and averaging the
-  same activations in 32-bit by 0.3%.
+  same activations in 32-bit by 0.3%. In the pilot, bf16 encoders gave the same mean tuning
+  AUROC as 32-bit ones (0.6594 against 0.6593 over two seeds) in 0.81 times the training time
+  and 0.62 times the peak GPU memory, at up to 13,158 SNPs per sequence. At full length (105,260
+  SNPs on chromosome 2), 200 steps from the same seed and batches gave the same training loss to
+  within 0.2% at every logged step and the same mean tuning AUROC (0.6110 against 0.6108), in
+  0.74 times the time per step (0.76 in the capacity trials, which had a GPU to themselves) and
+  0.59 times the peak memory; a whole run has not been compared.
 - **Activation checkpointing.** Each chromosome's encoder can be run without storing its
   intermediate activations, which are recomputed during the backward pass. Outputs and
   gradients are unchanged; memory is then set by the longest chromosome instead of the genome,
   at the cost of one extra forward pass.
 
 **Measured at full size** (one 48 GB GPU; model width 32, one layer; 1,258,200 SNPs; the
-analysis `widedeepgp-pilot` in DeepWideGP-Scripts). The largest batch is 21 participants in
-32-bit, 36 with bf16 encoders, 69 with checkpointing and 130 with both; annotation vectors
-lower the 32-bit limit to 19. One epoch-equivalent takes 4.7 GPU-hours in 32-bit and 3.6 with
-bf16 encoders, and checkpointing costs about a quarter of the speed. The network is fastest at
-batches of 8 to 16, so larger batches give fewer and larger updates, not more throughput. A
-validation pass over the 20,000 tuning participants takes 7 to 10 minutes, about 3% of an
-epoch-equivalent, so four passes per epoch-equivalent add about a tenth to the training time.
-The per-SNP means and standard deviations of the training split are computed in one pass over
-its genotypes (ten minutes) and cached with the dataset.
+analysis `widedeepgp-pilot` in DeepWideGP-Scripts, branch `widening`). The largest batch is 21
+participants in 32-bit, 36 with bf16 encoders, 69 with checkpointing and 130 with both;
+annotation vectors lower the 32-bit limit to 19. One epoch-equivalent takes 4.7 GPU-hours in
+32-bit and 3.6 with bf16 encoders, and checkpointing costs about a quarter of the speed. The
+network is fastest at batches of 8 to 16, so larger batches give fewer and larger updates, not
+more throughput. A validation pass over the 20,000 tuning participants takes 7 to 10 minutes,
+about 3% of an epoch-equivalent, so four passes per epoch-equivalent add about a tenth to the
+training time. The per-SNP means and standard deviations of the training split are computed in
+one pass over its genotypes (ten minutes) and cached with the dataset.
 
 ## 7. Model selection and snapshots
 
@@ -495,7 +521,26 @@ its genotypes (ten minutes) and cached with the dataset.
   for each disease separately as a secondary analysis.
 - **Fixed tables are not saved.** Position tables and annotation matrices are functions of the
   SNP list and are rebuilt from the dataset; a saved model holds its weights and its
-  configuration.
+  configuration, with a digest of its positions and of its annotation matrices, and refuses to
+  load against tables that differ from those it was trained with (an annotated model saved
+  before the annotation digest was added, such as the pilot's annotation and GWAS-annotation
+  runs, loads with a warning).
+- **Resuming, and starting from saved weights.** `--resume` continues a run from its last
+  checkpoint (`last.ckpt`, or the highest `last-vN.ckpt` where Lightning wrote one, as in a run
+  directory the pilot's code copied and resumed); a copy of a run directory (made while nothing
+  writes to it), or the same directory reached by another path, is resumed as if in place,
+  keeping its best checkpoint and best score. It refuses a checkpoint trained on other
+  positions, annotations, diseases or training labels, or with other model, loss or optimiser
+  settings, and a run whose `config.json` records other batches, seed, schedule or input
+  scaling: the loss's constants and the optimiser's state are restored from the checkpoint and
+  would silently override new values, and the resumed run's `config.json` replaces the first
+  one. Only the planned length may change (the epoch-equivalent budget and the early-stopping
+  patience), besides how the run is executed (activation checkpointing, data-loading workers,
+  the validation batch size). `--init_from` starts a new run from saved weights; the output
+  layer starts afresh when the source was trained for other diseases: a different number, or,
+  when the source records its diseases (every WideDeepGP snapshot and checkpoint does), other
+  names or another order. A single-disease model saved by `main_genome.py` records none, so a
+  one-disease run loads its output layer as it is.
 
 ## 8. Hyper-parameter search
 
@@ -506,9 +551,15 @@ configurations whose mean tuning AUROC trails at each rung. Searched: learning r
 decay, embedding dropout, accumulation and warm-up; optionally the class-weight exponent and
 cap, the sampler and the head's width. Model width, depth, the sequence block and the use of
 annotations are experimental factors and are never searched. Because a full-size
-epoch-equivalent costs several GPU-hours, the search runs first on a proxy (a contiguous eighth
-of each chromosome and 40,000 training participants) and its best configurations are then
-compared at full size.
+epoch-equivalent costs several GPU-hours, the search was planned to run first on a proxy (a
+contiguous eighth of each chromosome and 40,000 training participants) and to compare its best
+configurations at full size. The pilot showed that a search on the real labels of that proxy is
+uninformative: every training scheme ended slightly below a logistic model on the covariates
+(section 4.9). What the search optimises, and at which stage it runs, therefore depend on the
+open decision of section 4.9 about how SNP-specific information reaches the network. The first
+gate for any design or configuration is the pilot's simulated-trait control, whose ceilings are
+known; an eleven-trial search there (one trial completed, nine pruned, one stopped by hand), on
+GWAS-selected SNPs, found no setting that learned faster than the pilot's settings.
 
 ## 9. Evaluation outputs
 
@@ -534,7 +585,7 @@ confidence intervals and calibration are outside this document.
 | Validation schedule | Every 300 batches | Four times per epoch-equivalent |
 | Saved models | The best | The best, the last, and snapshots along training |
 | Hyper-parameters | Set by hand | Searched with Optuna |
-| Precision and memory | 32-bit; all chromosomes' activations held | Optional bf16 encoders with 32-bit pooling; optional per-chromosome checkpointing |
+| Precision and memory | 32-bit; all chromosomes' activations held | bf16 encoders with 32-bit pooling, head and loss (adopted for full-size runs after the pilot); optional per-chromosome checkpointing |
 
 **Unchanged:** the dosage input and its standardisation, the convolutional and positional
 embedding, the per-chromosome encoders and their block, mean pooling, the covariate encoder, the
@@ -545,8 +596,9 @@ the same random seed gives identical initial weights.
 ## 11. Departures from the published implementation, and known quirks
 
 The single-phenotype code (`models/`, `layers/`, `utils.py`, `main_genome.py`) is left as
-published. Four of its properties are deliberately reproduced, so that the comparison with the
-published model is like for like:
+published, apart from fixes for the installed software versions, labels coded 0/1 instead of
+1/2 (April 2026) and the option to read the genotype store. Four of its properties are
+deliberately reproduced, so that the comparison with the published model is like for like:
 
 - The published model's weight-initialisation call runs before its layers exist and has no
   effect; weights keep the default initialisation of their layers. WideDeepGP does the same.
@@ -557,45 +609,56 @@ published model is like for like:
 - The convolution of the value embedding uses circular padding, so the first and last SNP of a
   chromosome are treated as neighbours.
 
-Two published options do not run and are not offered: the parser's default pooling
-(`--final_pool concat`) and the SNP-only mode (`--dm snps`), which names a class that is not in
-the repository. WideDeepGP supports the pooling of the published configuration (`atten`) and
-`mean` and `last`.
+Two published options do not run: the parser's default pooling (`--final_pool concat`) and the
+SNP-only mode (`--dm snps`), which names a class that is not in the repository. WideDeepGP does
+not offer them either: its entry points replace `concat` with `atten`, the pooling of the
+published configuration (`mean` and `last` are also supported), and training stops with an
+error when a model without covariates is asked for (`--dm snps`, or `--use_cov`, which switches
+the covariates off) or the dataset names no covariates.
 
 ## 12. Tests
 
-`tests/test_ml_*.py` check, among other things, that: only named label and covariate columns
-are read; the rotation sampler draws each participant at exactly the rate ω that the loss
-divides by; the expected batch loss under the rotation equals the cohort loss with the
-correction and differs without it; published weights give the published output; checkpointing
-leaves outputs and gradients unchanged; a resumed run continues the same batches; and saved
-models hold no fixed tables. Learning checks train for a few minutes each: one disease on the
-published smoke-test data must land in the published AUROC band, and on a synthetic six-trait
-dataset the heritable traits must be learned, the rare one included (2% prevalence), while a
-trait with no genetic signal that co-occurs with a heritable trait must stay at an AUROC of
-0.5; with annotation vectors that mark the causal SNPs the model must reach the higher bands of
-annotated runs. The bands are computed from five training seeds
-(`scripts/multilabel_synthetic_seeds.csv`): the lowest seed minus the larger of 0.04 and 2.5
-seed standard deviations. `tests/test_ml_mamba3.py` checks the Mamba-3 wrapper in its own
-environment: one block reads in one direction only, the pair reads both ways, and reversing the
-input while exchanging the two blocks' weights reverses the output.
+`tests/test_ml_*.py` check, among other things, that: only named label and covariate columns are
+read; the rotation sampler draws each participant at exactly the rate ω that the loss divides
+by, for odd batch sizes too; the expected batch loss under the rotation equals the cohort loss
+with the correction and differs without it; published weights give the published output;
+checkpointing leaves outputs and gradients unchanged; a resumed run continues the same batches,
+and a checkpoint trained differently is refused; and saved models hold no fixed tables. Learning
+checks train for a few minutes each: one disease on the published smoke-test data must land in
+the published AUROC band, and on a synthetic six-trait dataset the heritable traits must be
+learned, the rare one included (2% prevalence), while a trait with no genetic signal that
+co-occurs with a heritable trait must stay within an AUROC of 0.40 to 0.60; with annotation
+vectors that mark the causal SNPs the model must reach the higher bands of annotated runs. The
+bands are computed from five training seeds (`scripts/multilabel_synthetic_seeds.csv`): the
+lowest seed minus the larger of 0.04 and 2.5 seed standard deviations. `tests/test_ml_mamba3.py`
+checks the Mamba-3 wrapper in its own environment: one block reads in one direction only, the
+pair reads both ways, and reversing the input while exchanging the two blocks' weights reverses
+the output. With the Mamba-3 block the six-trait synthetic run passed the same bands as with the
+current block; this was the last of the five gates Mamba-3 had to pass before the pilot (record:
+`/mnt/sdg/robert/deepwidegp/runs/gate_evidence/multi6_mamba3_gate5`).
 
 ## 13. Software and reproduction
 
 Python 3.10, PyTorch 2.10, PyTorch Lightning 2.0.8, `mamba_ssm` 1.1.1 from the Vision-Mamba
 fork, Optuna 5.0; Mamba-3 runs in a second environment with upstream `mamba_ssm`
-(`scripts/setup_mamba3_env.sh`).
+(`scripts/setup_mamba3_env.sh`). The genotype conversion (`genostore.convert`, run from the
+DeepWideGP directory) needs `pgenlib`, which neither environment has; it ran under Python 3.11
+with pgenlib 0.95.2 in `/mnt/sdg/robert/miniforge3/envs/gsem-py`. Each run's `config.json`
+records every setting together with the code directory, its git commit (none for a copy outside
+git), whether any tracked .py file differs from that commit (`git_dirty`; the differences
+themselves, and untracked files, are not saved) and the Python interpreter that ran it.
 
-    # SNP list, genotype store, labels, covariates, splits, annotations (DeepWideGP-Scripts)
+    # SNP list, labels, covariates, splits, annotations (DeepWideGP-Scripts, branch widening)
     Rscript scripts/build-ard30-dataset/make_snp_list.R
-    python -m genostore.convert --pgen-dir <pgen dir> --pattern "UKB_chr{chrom}" --chroms $(seq 1 22) \
-        --extract <data>/reference/hm3plus_in_ukb_pgen.tsv --out <data>/genostore/hm3plus
+    <gsem-py>/bin/python -m genostore.convert --pgen-dir <pgen dir> --pattern "UKB_chr{chrom}" --chroms $(seq 1 22) \
+        --extract <data>/reference/hm3plus_in_ukb_pgen.tsv --out <data>/genostore/hm3plus   # in DeepWideGP
     python scripts/build-ard30-dataset/build_dataset.py
     python scripts/build-ard30-dataset/describe_dataset.py     # cases by split, sampling rates
 
     # train, score, tune (DeepWideGP)
     python main_multilabel.py --data_dir <data>/datasets --label ard30 --rd_mode hm3plus --snp_stats train \
-        --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --batch_size 16 --accumulate 4 --exp_name <run>
+        --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --precision bf16 --batch_size 16 \
+        --accumulate 4 --exp_name <run>
     python score_snapshots.py --run runs/<experiment>/<run> --split val
     python tune_optuna.py --study <name> --n_trials 20 -- <the training arguments>
 
@@ -618,6 +681,7 @@ fork, Optuna 5.0; Mamba-3 runs in a second environment with upstream `mamba_ssm`
   characteristic (ROC) curve. *Radiology* 1982;143:29–36.
 - Jamieson K, Talwalkar A. Non-stochastic best arm identification and hyperparameter
   optimization. *AISTATS* 2016.
+- Kish L. *Survey sampling*. New York: Wiley, 1965.
 - Lahoti A, et al. Mamba-3: improved sequence modeling using state space principles.
   arXiv:2603.15569, 2026.
 - Li L, Jamieson K, Rostamizadeh A, et al. A system for massively parallel hyperparameter

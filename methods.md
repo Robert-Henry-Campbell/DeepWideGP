@@ -1,8 +1,10 @@
 # Methods: WideDeepGP, a multi-disease extension of DeepGP
 
-*DeepWideGP repository, DPhil chapter 6. Written 11 November 2026. This document describes the
-data, the model and how it is trained. The code has been run on synthetic data and on the real
-dataset's plumbing; no result of a real-data training run is reported here.*
+*DeepWideGP repository, DPhil chapter 6. Written 11–12 November 2026. This document describes
+the data, the model and how it is trained. A pilot on real data is reported in
+DeepWideGP-Scripts (`scripts/widedeepgp-pilot/results.md`); what it showed about the model
+itself is summarised in section 4.9 and should be read before the model is trained at full
+size.*
 
 ## 1. Question
 
@@ -334,6 +336,41 @@ For reference, the published single-phenotype configuration (*d* = 32, one layer
 covariates, one output) has 457,185 parameters. Thirty outputs instead of one add 7,453, and
 twelve covariates instead of eight add 1,024.
 
+### 4.9 What tells one SNP from another, and what the pilot showed
+
+The encoders share their weights across the SNPs of a chromosome and their output is averaged
+over the chromosome. A SNP-specific effect, with its own size and sign, can therefore enter
+only through what distinguishes one token from another: the position code, and the annotation
+vector where one is used.
+
+The position code has 32 sinusoidal features at a model width of 32. A linear read-out of it
+can represent every SNP's own effect when a chromosome has ten SNPs, as in the synthetic test
+data of this repository, but only about 0.05% of an arbitrary effect profile at the 57,000 SNPs
+per chromosome of the full dataset. The encoder is not linear, so this is a heuristic, not a
+bound. The pilot bears it out:
+
+- On the real labels (157,279 SNPs, 40,000 training participants, six epoch-equivalents) every
+  training scheme reached the AUROC of a logistic model on the covariates and no more, and
+  permuting the genotypes between participants changed nothing.
+- On traits simulated on the same genotypes, with 20 to 20,000 causal SNPs and a known ceiling
+  of 0.78 to 0.85, the network stayed at an AUROC of 0.51 where a clumped polygenic score or
+  GBLUP fitted to the same participants reached 0.72 to 0.81. Mamba-3 did the same, and so did
+  an annotation that marked the causal SNPs without saying which way each acts.
+- Given only the 2,476 SNPs that a GWAS of the training participants selects, the kind of input
+  published DeepGP receives, the network learned slowly (0.54 to 0.65 after six
+  epoch-equivalents, levelling off near 0.55 to 0.69 with longer training).
+- Given every SNP's signed association *z*-score for each trait as annotation channels, it
+  learned on all 157,279 SNPs (0.59 to 0.69). The annotation gain multiplies each SNP's dosage,
+  so a signed statistic gives the network what it otherwise lacks: a size and a direction for
+  every SNP.
+
+The consequence for the design is that the choice made in section 3, one unselected SNP set
+with no per-disease information, leaves the network without the means to learn SNP effects, at
+least at the scale tested. How SNP-specific information should enter (association statistics
+as annotation, GWAS-based selection of SNPs, or parameters of its own for each SNP) is an open
+design decision, to be settled on the simulated-trait control of the pilot before a full-size
+run.
+
 ## 5. Training objective
 
 ### 5.1 Batches
@@ -425,6 +462,17 @@ Three switches exist so that the choices above can be tested rather than assumed
   intermediate activations, which are recomputed during the backward pass. Outputs and
   gradients are unchanged; memory is then set by the longest chromosome instead of the genome,
   at the cost of one extra forward pass.
+
+**Measured at full size** (one 48 GB GPU; model width 32, one layer; 1,258,200 SNPs; the
+analysis `widedeepgp-pilot` in DeepWideGP-Scripts). The largest batch is 21 participants in
+32-bit, 36 with bf16 encoders, 69 with checkpointing and 130 with both; annotation vectors
+lower the 32-bit limit to 19. One epoch-equivalent takes 4.7 GPU-hours in 32-bit and 3.6 with
+bf16 encoders, and checkpointing costs about a quarter of the speed. The network is fastest at
+batches of 8 to 16, so larger batches give fewer and larger updates, not more throughput. A
+validation pass over the 20,000 tuning participants takes 7 to 10 minutes, about 3% of an
+epoch-equivalent, so four passes per epoch-equivalent add about a tenth to the training time.
+The per-SNP means and standard deviations of the training split are computed in one pass over
+its genotypes (ten minutes) and cached with the dataset.
 
 ## 7. Model selection and snapshots
 

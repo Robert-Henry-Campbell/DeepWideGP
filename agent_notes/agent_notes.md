@@ -275,3 +275,64 @@ annotations), `describe_dataset.py` (aggregate description), `test_build_dataset
   mid-run made the environment build execute a garbled line). Run long jobs from a frozen copy.
 - `pkill -f PATTERN` kills the calling shell too when PATTERN is in its own command line; kill
   by PID.
+
+## 2026-11-12 (night) — Session continued: dry run, capacity, pilot, and what the pilot found
+
+Write-up: `DeepWideGP-Scripts/scripts/widedeepgp-pilot/results.md` (methods beside it). The
+summary for the model is in `methods.md`, section 4.9.
+
+### Codebase changes (this repo, branch `widening`)
+
+- `widedeepgp/callbacks.py`: step metrics (throughput, learning rate, gradient norm) are logged
+  on the batches Lightning 2.0 actually writes (they were dropped when my cadence and
+  Lightning's did not coincide); peak GPU memory is tracked for training and validation apart;
+  the metrics of each validation pass are kept so the best step's need not be recomputed.
+- `widedeepgp/train.py`: validation intervals are rounded up (a run used to overshoot its
+  budget by one interval); `results.json` gains seconds per batch, participants per second and
+  peak memory; the tuning set is no longer scored a second time at the end of a run.
+- `widedeepgp/model.py`, `blocks.py`: Mamba-3 encoders use the re-entrant checkpoint (its
+  backward reads saved tensors twice); Mamba-3 head size is the largest power of two that
+  divides the inner width.
+- `score_snapshots.py`: per-person score files store identifiers as text (they needed pickle).
+- `scripts/check_synthetic_run.py`: bands computed from the five-seed table, separate for
+  annotated runs; `scripts/make_architecture_figure.py` and `figures/`; `genostore/README.md`
+  updated; `methods.md` section 4.9 and measured capacity.
+
+### Codebase changes (DeepWideGP-Scripts, branch `widening`, committed without switching the
+shared working tree off `main`)
+
+New analysis folder `scripts/widedeepgp-pilot/`: `run_pilot.py` (launcher; leaves one GPU
+free; live cap in `<runs>/<experiment>/max_gpus`), `run_capacity.py` + `capacity_probe.py`,
+`genetic_signal.py` (AUROC with genotypes permuted between participants), `simulated_control.py`
+(traits simulated on the proxy's real genotypes; linear references; input variants),
+`gwas_annotation.py` (GWAS z-scores of the 30 diseases as annotation), `analyze_pilot.py`,
+`test_pilot.py`, `methods.md`, `results.md`, `results/`.
+
+### Data written (under `/mnt/sdg/robert/deepwidegp/data/`)
+
+`datasets/ard30/hm3plus_proxy8` (pilot proxy), `hm3plus_proxy8_sim` and its variants
+`_selected`, `_oracle`, `_gwas`, `_gwasclump` (simulated-trait control), `hm3plus_proxy8_gwas`
+and `hm3plus_proxy8_gwasclump` (real labels with GWAS z-scores as annotation),
+`genostore/hm3plus_proxy8_sim_selected` (47 MB store of 2,476 selected SNPs). Runs:
+`/mnt/sdg/robert/deepwidegp/runs/{dryrun,pilot,pilot_sim,sim_selected_tune}`; the pilot ran from
+a frozen export of commit 8f03ca6 in `runs/pilot_code_8f03ca6`.
+
+### Things worth knowing
+
+- **The network learns the covariates and nothing from unselected SNPs at pilot scale**, on
+  real labels and on simulated traits with known signal (AUROC 0.51 where linear methods get
+  0.72–0.81). It learns slowly from GWAS-selected SNPs and on all SNPs when each SNP carries a
+  signed association z-score as annotation. Mamba-3 and unsigned marks on causal SNPs do not
+  help. Read `results.md` before planning any full-size run.
+- **Measured at full size (1,258,200 SNPs, d32x1, one 48 GB GPU):** largest batch 21 / 36 / 69 /
+  130 (fp32 / bf16 / checkpointing / both), 4.7 GPU-h per epoch-equivalent in fp32 and 3.6 in
+  bf16; Mamba-3 9 / 18 / 98 / 122 and a kernel crash above ~122 participants x 105,260 tokens.
+- **A model's AUROC on these diseases is mostly year of birth and sex** (0.66 from covariates
+  alone on the proxy). Use `genetic_signal.py` to see what a model takes from the genotypes.
+- **Thousands of one-SNP regions make the store loader crawl** (4 s per batch); write a small
+  store of the selected SNPs instead (`simulated_control.py select`).
+- **A GPU looks free between two short jobs.** The pilot launcher started a run on the GPU a
+  capacity search was using; run such searches on the highest-numbered GPU, which the launcher
+  always leaves alone.
+- `pgrep -f PATTERN` matches a waiting shell whose own command line contains the pattern;
+  write the pattern with a bracket (`run_capacity[.]py`) or wait on a file instead.

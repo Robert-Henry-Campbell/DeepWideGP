@@ -5,10 +5,12 @@
         --exp_name <run> --final_pool atten --d_model 32 --e_layers 1 --batch_size 16 ...
 
 The dataset is <data_dir>/<label>/<rd_mode>/ in the genotype-store layout; when its store.json
-names "labels", every named label is predicted (or the subset given with --labels). The
+names "labels", every named label is predicted (or the subset given with --labels). SNPs are
+standardised with statistics of the training split unless --snp_stats says otherwise. The
 single-disease script, main_genome.py, is unchanged. See methods.md for what the model does and
 widedeepgp/train.py for what a run writes.
 """
+import sys
 import time
 
 import torch
@@ -21,13 +23,26 @@ torch.load = lambda *a, **k: _torch_load(*a, **{**k, "weights_only": False})
 from args_generator import args_initial
 from widedeepgp.train import run_training
 
+_UNSET = "<not given>"
 
-def main(argv=None):
-    cfg = args_initial(argv)
+
+def parse_args(argv=None):
+    """The parser of args_generator.py with the multi-disease defaults: datasets under
+    pukb/genes, attention pooling, and SNP statistics of the training split unless --snp_stats
+    is given (the parser's own default, kept for main_genome.py, is all store samples)."""
+    argv = sys.argv[1:] if argv is None else list(argv)
+    cfg = args_initial(["--snp_stats", _UNSET] + argv)      # a --snp_stats in argv comes later and wins
+    if cfg.snp_stats == _UNSET:
+        cfg.snp_stats = "train"
     if cfg.data_dir is None:
         cfg.data_dir = "pukb/genes"
     if cfg.final_pool == "concat":            # the parser's default, which the model does not implement
         cfg.final_pool = "atten"
+    return cfg
+
+
+def main(argv=None):
+    cfg = parse_args(argv)
     if cfg.exp_name is None:
         cfg.exp_name = time.strftime("run_%Y%m%d_%H%M%S")
     out = run_training(cfg)

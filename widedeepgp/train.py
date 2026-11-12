@@ -9,33 +9,38 @@ Vocabulary
                        epoch boundary and a resumed run continues the same batch sequence
 
 A run directory, <run_dir>/<experiment>/<exp_name>/, holds
-    config.json      every setting, the derived schedule, the label counts, the covariate scaling
+    config.json      every setting, the derived schedule, the label counts, the covariate scaling,
+                     the code directory, its git commit, whether tracked .py files differ from
+                     it (git_dirty) and the Python interpreter
     tb/              TensorBoard event files
     metrics.csv      one row per validation pass, label and metric
     snapshots/       weights along training (log-spaced steps and every epoch-equivalent)
     snapshots.csv    what each snapshot cost: steps, participants seen, training seconds
-    checkpoints/     best.ckpt (by mean validation AUROC) and last.ckpt (to resume)
+    checkpoints/     best.ckpt (by mean validation AUROC) and last.ckpt (to resume; a copy of
+                     a run directory carries on in the same files: callbacks.RunCheckpoint)
     results.json     validation metrics of the best checkpoint
 """
 import json
 import math
 import os
+import re
+import subprocess
+import sys
 import time
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from lightning_fabric.utilities.apply_func import move_data_to_device
-from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from genostore.datamodule import SNPStoreDataModule, is_store_dataset
 
 from . import metrics as M
-from .callbacks import EarlyStoppingOnce, OptunaPruning, RunLog, Snapshots, snapshot_steps
+from .callbacks import EarlyStoppingOnce, OptunaPruning, RunCheckpoint, RunLog, Snapshots, snapshot_steps
 from .losses import label_counts
-from .model import WideDeepGP, positions_digest
-from .samplers import make_sampler
+from .model import WideDeepGP, annotations_digest, positions_digest
+from .samplers import cases_per_batch, make_sampler
 
 MONITOR = "val/auroc_mean"
 
@@ -76,8 +81,9 @@ def schedule(cfg, n_train):
             "optimizer_steps": n_val * per_val // acc, "accumulate": acc}
 
 
-def model_hparams(cfg, dm, sched=None, annot_names=None):
-    """Everything the model needs to be rebuilt, as a plain dict (saved in every checkpoint)."""
+def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
+    """Everything the model needs to be rebuilt, as a plain dict (saved in every checkpoint).
+    annot: the standardised annotation matrices, whose digest is kept."""
     names = dm.label_names if dm.multilabel else ["label"]
     return {
         "d_model": int(cfg.d_model), "e_layers": int(cfg.e_layers), "dropout": float(cfg.dropout),
@@ -88,7 +94,9 @@ def model_hparams(cfg, dm, sched=None, annot_names=None):
         "label_names": list(names), "label_counts": label_counts(train_labels(dm)),
         "seq_len": [int(n) for n in dm.seq_len], "pos_digest": positions_digest(dm.pos_chr),
         "annot_dim": len(annot_names) if annot_names else 0, "annot_names": list(annot_names or []),
+        "annot_digest": annotations_digest(annot) if annot is not None else None,
         "gamma": float(cfg.gamma), "w_max": float(cfg.w_max), "sampler": cfg.sampler,
+        "case_share": cases_per_batch(cfg.batch_size) / int(cfg.batch_size) if cfg.sampler == "rotation" else 0.5,
         "sampling_correction": not cfg.no_sampling_correction, "loss_outputs": cfg.loss_outputs,
         "precision": str(cfg.precision), "grad_ckpt": bool(cfg.grad_ckpt),
         "lr": float(cfg.lr), "l2": float(cfg.l2), "warmup_steps": int(cfg.warmup_steps),
@@ -98,7 +106,7 @@ def model_hparams(cfg, dm, sched=None, annot_names=None):
 
 def build_model(cfg, dm, sched=None):
     annot, annot_names = load_annotations(dm) if cfg.annot else (None, None)
-    return WideDeepGP(model_hparams(cfg, dm, sched, annot_names), dm.pos_chr, annot)
+    return WideDeepGP(model_hparams(cfg, dm, sched, annot_names, annot), dm.pos_chr, annot)
 
 
 def load_model(path, dm, device="cpu"):
@@ -131,12 +139,147 @@ def predict_split(model, dm, split, device=None):
     return torch.cat(logits).numpy(), torch.cat(ys).numpy()
 
 
+def code_version(code_dir=None):
+    """The directory the training code was loaded from, its git commit (None unless that
+    directory is the top of a git checkout; a frozen copy has none), whether any tracked .py file
+    there differs from that commit (git_dirty; None outside git) and the Python interpreter."""
+    code_dir = os.path.realpath(code_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    commit = None
+    try:
+        r = subprocess.run(["git", "-C", code_dir, "rev-parse", "--show-toplevel", "HEAD"], capture_output=True,
+                           text=True, timeout=60)
+        top_and_commit = r.stdout.splitlines()
+        if r.returncode == 0 and len(top_and_commit) == 2 and os.path.realpath(top_and_commit[0]) == code_dir:
+            commit = top_and_commit[1]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    dirty = None
+    if commit is not None:
+        try:
+            # --no-optional-locks: a status run must not write the index of a checkout that
+            # another process (an editor, a commit) may be using
+            r = subprocess.run(["git", "--no-optional-locks", "-C", code_dir, "status", "--porcelain",
+                                "--untracked-files=no", "--", "*.py"], capture_output=True, text=True, timeout=60)
+            dirty = bool(r.stdout.strip()) if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return {"code_dir": code_dir, "git_commit": commit, "git_dirty": dirty, "python": sys.executable}
+
+
+# Settings a resumed run may change: how long it trains, and activation checkpointing (which
+# leaves outputs and gradients unchanged). Everything else in a model's hp defines the run.
+RESUMABLE = ("total_optimizer_steps", "grad_ckpt")
+# Arguments that define a run's inputs and batches but are not among a model's saved settings;
+# a resumed run must keep them. The dataset is checked through the saved position and
+# annotation digests, label names and counts and number of covariates, so the path it is named
+# by may differ.
+RUN_ARGS = ("snp_stats", "scaling", "batch_size", "accumulate", "seed", "steps_per_epoch_equiv", "val_per_epoch")
+
+
+def last_checkpoint(ckpt_dir):
+    """The checkpoint a resumed run continues from, or None: last.ckpt, or the highest
+    last-vN.ckpt. Lightning writes last-vN.ckpt when a last.ckpt it did not write itself is in
+    the way: in a run directory copied and resumed before RunCheckpoint existed (the pilot's
+    pilot_sim/selected_long_s1), or in one started again without --resume. That file must also
+    be the newest; a copy that did not keep the files' times can make a stale one newer, and
+    then the run's state is ambiguous and nothing is picked."""
+    if not os.path.isdir(ckpt_dir):
+        return None
+    version = {}
+    for name in os.listdir(ckpt_dir):
+        m = re.fullmatch(r"last(?:-v(\d+))?\.ckpt", name)
+        if m:
+            version[os.path.join(ckpt_dir, name)] = int(m.group(1) or 0)
+    if not version:
+        return None
+    latest = max(version, key=version.get)
+    newer = sorted(os.path.basename(p) for p in version if os.path.getmtime(p) > os.path.getmtime(latest))
+    if newer:
+        raise ValueError(f"cannot tell where the run in {ckpt_dir} stands: {os.path.basename(latest)} is the latest by "
+                         f"name but {', '.join(newer)} was written after it (copied without the files' times?); move "
+                         "the stale checkpoints out of the folder")
+    return latest
+
+
+def check_resume_args(config_path, cfg):
+    """Refuse to resume a run with other input scaling, batches or schedule than its config.json,
+    written when it started, records (the resumed run is about to overwrite that file)."""
+    if not os.path.exists(config_path):
+        return
+    with open(config_path) as f:
+        old = json.load(f).get("args", {})
+    new = vars(cfg)
+    changed = [k for k in RUN_ARGS if k in old and k in new and old[k] != new[k]]
+    if changed:
+        raise ValueError(f"cannot resume the run in {os.path.dirname(config_path)}: it was started with other "
+                         "arguments (" + ", ".join(f"--{k} {old[k]!r}, now {new[k]!r}" for k in changed)
+                         + "); --init_from starts a new run from its weights instead")
+
+
+def check_resume_tables(ckpt_path, hp, loss=None):
+    """Refuse to resume from a checkpoint that was trained differently: on other SNP positions,
+    annotation vectors, diseases or training labels, or with other settings.
+
+    The position and annotation tables are rebuilt from the dataset and are not part of the
+    saved weights, so Lightning would restore the weights over different tables without
+    noticing. The loss's constants (prevalences, class weights, sampling rates) and the
+    optimiser's state are restored from the checkpoint, so a resume with other labels or
+    settings would keep the checkpoint's values while this run's config.json records the new
+    ones. Only the settings in RESUMABLE may change; --init_from starts a new run from saved
+    weights. ``loss``, this run's loss module, is also compared constant by constant with the
+    checkpoint's, which covers checkpoints saved before some settings were recorded (such as
+    case_share). Checkpoints saved before the annotation digest existed are resumed with a
+    warning, as load_model loads them."""
+    import warnings
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    old = ckpt["hyper_parameters"]["hp"]
+    if old.get("pos_digest") != hp.get("pos_digest") or list(old.get("seq_len", [])) != list(hp["seq_len"]):
+        raise ValueError(f"cannot resume from {ckpt_path}: it was trained on other SNP positions")
+    if int(old.get("annot_dim", 0)) != int(hp.get("annot_dim", 0)):
+        raise ValueError(f"cannot resume from {ckpt_path}: it was trained with annot_dim {old.get('annot_dim', 0)}, "
+                         f"this run has {hp.get('annot_dim', 0)}")
+    if int(hp.get("annot_dim", 0)):
+        if old.get("annot_digest") is None:
+            warnings.warn(f"{ckpt_path} holds no digest of its annotation vectors, so the ones of this run cannot be "
+                          "checked against those it was trained with")
+        elif old["annot_digest"] != hp.get("annot_digest"):
+            raise ValueError(f"cannot resume from {ckpt_path}: the annotation vectors differ from the ones it was "
+                             "trained with (has the annotation file been rewritten?)")
+    if "label_names" in old and list(old["label_names"]) != list(hp["label_names"]):
+        raise ValueError(f"cannot resume from {ckpt_path}: it was trained on the labels {list(old['label_names'])}, "
+                         f"this run has {list(hp['label_names'])}; --init_from starts a new run from its weights, "
+                         "with a new output layer")
+    if old.get("label_counts") is not None and old["label_counts"] != hp.get("label_counts"):
+        raise ValueError(f"cannot resume from {ckpt_path}: its training split had other label counts (has the dataset "
+                         "been rebuilt?); --init_from starts a new run from its weights instead")
+    checked = {"pos_digest", "seq_len", "annot_dim", "annot_digest", "label_names", "label_counts"}
+    changed = [k for k in sorted(old) if k in hp and k not in checked and k not in RESUMABLE and old[k] != hp[k]]
+    if changed:
+        raise ValueError(f"cannot resume from {ckpt_path}: it was trained with other settings ("
+                         + ", ".join(f"{k} {old[k]!r}, now {hp[k]!r}" for k in changed)
+                         + "); --init_from starts a new run from its weights instead")
+    if loss is not None:
+        saved = ckpt.get("state_dict", {})
+        for name, value in loss.named_buffers():
+            was = saved.get(f"loss_fn.{name}")
+            if was is not None and (was.shape != value.shape or not torch.allclose(
+                    was.float().cpu(), value.float().cpu(), rtol=1e-6, atol=0.0)):
+                raise ValueError(f"cannot resume from {ckpt_path}: the loss's {name} differs from the one it was "
+                                 "trained with (other label counts, gamma, w_max or an odd batch size?); "
+                                 "--init_from starts a new run from its weights instead")
+
+
 def run_training(cfg, trial=None, extra_callbacks=()):
     """Train one model. Returns a dict with the run directory, the best mean validation AUROC,
     per-label validation metrics of the best checkpoint and the validation history."""
+    if cfg.dm != "snps_covs" or not cfg.use_cov:
+        raise ValueError("WideDeepGP always uses the covariates: a genotype-only model (--dm snps, or --use_cov, "
+                         "which switches the covariates off) is not offered")
     t0 = time.time()
     pl.seed_everything(int(cfg.seed), workers=True)
     dm = build_data(cfg)
+    if dm.n_cov == 0:
+        raise ValueError(f"{dm.dir}/store.json names no covariates; WideDeepGP always uses them")
     y_train = train_labels(dm)
     n_train = len(y_train)
     sched = schedule(cfg, n_train)
@@ -145,14 +288,18 @@ def run_training(cfg, trial=None, extra_callbacks=()):
     model = build_model(cfg, dm, sched)
     if cfg.init_from:
         src = torch.load(cfg.init_from, map_location="cpu", weights_only=False)
-        left_out = model.load_weights(src["state_dict"], allow_new_head=True)
+        src_labels = (src.get("hyper_parameters") or {}).get("hp", {}).get("label_names")
+        left_out = model.load_weights(src["state_dict"], allow_new_head=True, source_labels=src_labels)
         print(f"initialised from {cfg.init_from}; not loaded: {left_out or 'nothing'}", flush=True)
 
     run_dir = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name or "run")
     ckpt_dir = os.path.join(run_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
-    last = os.path.join(ckpt_dir, "last.ckpt")
-    resume = last if (cfg.resume and os.path.exists(last)) else None
+    resume = last_checkpoint(ckpt_dir) if cfg.resume else None
+    if resume:
+        print(f"resuming from {resume}", flush=True)
+        check_resume_tables(resume, model.hp, model.loss_fn)
+        check_resume_args(os.path.join(run_dir, "config.json"), cfg)
     n_snps = int(sum(dm.seq_len))
     n_params = sum(p.numel() for p in model.parameters())
     config = {"args": {k: v for k, v in vars(cfg).items() if isinstance(v, (str, int, float, bool, type(None)))},
@@ -166,7 +313,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
                                     if getattr(dm, "cov_cm", None) is not None else None),
               "snp_scaling": dm.snp_stats, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
               "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-              "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
+              "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), **code_version()}
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=1)
 
@@ -174,7 +321,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
     snaps = Snapshots(run_dir, snapshot_steps(sched["optimizer_steps"], int(cfg.snapshots_per_decade),
                                               every=max(1, sched["batches_per_epoch_equiv"] // acc)), n_train)
     runlog = RunLog(run_dir, n_train, n_snps)
-    best_ckpt = ModelCheckpoint(dirpath=ckpt_dir, filename="best", monitor=MONITOR, mode="max", save_top_k=1,
+    best_ckpt = RunCheckpoint(dirpath=ckpt_dir, filename="best", monitor=MONITOR, mode="max", save_top_k=1,
                                 save_last=True, save_on_train_epoch_end=False, auto_insert_metric_name=False)
     callbacks = [best_ckpt, snaps, runlog] + list(extra_callbacks)
     if int(cfg.stop_patience) > 0:
@@ -191,7 +338,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
 
     # the best checkpoint and its validation metrics (kept from the pass made at that step; scored
     # again only when this process did not make that pass, as after a resume)
-    best_path = best_ckpt.best_model_path or last
+    best_path = best_ckpt.best_model_path or last_checkpoint(ckpt_dir)
     state = torch.load(best_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["state_dict"])
     device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -527,6 +527,16 @@ def verify_store(store_dir, chroms=None):
 
 
 def main(argv=None):
+    """The command line. What a conversion writes is participant-level, so it runs under umask
+    077: every file and directory it creates is its owner's only (the caller's umask is restored)."""
+    old = os.umask(0o077)
+    try:
+        return _main(argv)
+    finally:
+        os.umask(old)
+
+
+def _main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "verify":
         ap = argparse.ArgumentParser(prog="genostore.convert verify")

@@ -32,7 +32,7 @@ _torch_load = torch.load
 torch.load = lambda *a, **k: _torch_load(*a, **{**k, "weights_only": False})
 
 from widedeepgp import metrics as M
-from widedeepgp.train import build_data, load_model, predict_split, train_labels
+from widedeepgp.train import build_data, last_checkpoint, load_model, predict_split, train_labels
 
 FIELDS = ["snapshot", "step", "samples_seen", "epoch_equiv", "train_seconds", "split", "label", "metric", "value",
           "n", "n_cases"]
@@ -53,6 +53,10 @@ def covariates_only(dm, split, names):
 
 
 def pick_snapshots(run, which):
+    """[(file relative to the run, its row of snapshots.csv)]. "best" is the checkpoint that
+    results.json names, when the run has finished, and "last" the one a resume would continue
+    from (train.last_checkpoint): a run directory copied and then resumed before RunCheckpoint
+    existed holds best-v1.ckpt and last-v1.ckpt beside the stale best.ckpt and last.ckpt."""
     table = []
     path = os.path.join(run, "snapshots.csv")
     if os.path.exists(path):
@@ -61,8 +65,16 @@ def pick_snapshots(run, which):
     if which == "all":
         return [(r["file"], r) for r in table]
     if which in ("best", "last"):
-        return [(os.path.join("checkpoints", which + ".ckpt"), {"step": "", "samples_seen": "", "epoch_equiv": "",
-                                                               "train_seconds": ""})]
+        rel = os.path.join("checkpoints", which + ".ckpt")
+        results = os.path.join(run, "results.json")
+        if which == "best" and os.path.exists(results):
+            with open(results) as f:             # a path inside the run, which may have moved since
+                rel = os.path.join("checkpoints", os.path.basename(json.load(f)["best_checkpoint"]))
+        if which == "last":
+            latest = last_checkpoint(os.path.join(run, "checkpoints"))
+            if latest:
+                rel = os.path.relpath(latest, run)
+        return [(rel, {"snapshot": which, "step": "", "samples_seen": "", "epoch_equiv": "", "train_seconds": ""})]
     want = {int(s) for s in which.split(",")}
     return [(r["file"], r) for r in table if int(r["step"]) in want]
 
@@ -101,7 +113,7 @@ def main(argv=None):
         logits, y = predict_split(model, dm, a.split, a.device)
         shift = model.loss_fn.logit_shift.cpu().numpy()
         m = M.per_label_metrics(logits, y, shift, names)
-        tag = os.path.splitext(os.path.basename(rel))[0]
+        tag = info.get("snapshot") or os.path.splitext(os.path.basename(rel))[0]
         meta = dict(snapshot=tag, step=info["step"] or ckpt.get("global_step", ""),
                     samples_seen=info["samples_seen"] or ckpt.get("samples_seen", ""),
                     epoch_equiv=info["epoch_equiv"], train_seconds=info["train_seconds"], split=a.split)

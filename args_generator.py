@@ -85,7 +85,7 @@ def args_initial(argv=None):
     parser.add_argument('--seed', type=int, default=33, help='random seed')
     parser.add_argument('--run_dir', type=str, default='runs', help='where runs are written')
     parser.add_argument('--experiment', type=str, default='default', help='experiment name (a folder of runs)')
-    parser.add_argument('--resume', action='store_true', default=False, help='continue the run of this name from its last checkpoint')
+    parser.add_argument('--resume', action='store_true', default=False, help='continue the run of this name from its last checkpoint, on the same data with the same settings (it may train longer)')
     parser.add_argument('--init_from', type=str, default=None, help='snapshot whose weights initialise the model (all but the output layer if the labels differ)')
     parser.add_argument('--snapshots_per_decade', type=int, default=8, help='weight snapshots per tenfold increase in steps')
     parser.add_argument('--eval_batch_size', type=int, default=None, help='batch size for validation and scoring (default: the training batch size)')

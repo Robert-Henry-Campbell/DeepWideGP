@@ -40,10 +40,13 @@ def test_masked_entries_do_not_learn():
 
 def test_omega_in_the_loss_matches_the_label_module():
     y = random_labels(3000, missing=1)
-    loss = WideLoss(y)
     yb = torch.from_numpy(y[:200])
-    om = loss.omega(torch.nan_to_num(yb), ~torch.isnan(yb)).numpy()
-    assert np.allclose(om, L.sampling_rate(y, *L.rotation_rates(y))[:200], rtol=1e-5)
+    for share in (0.5, 10 / 21):                                 # an even batch; a batch of 21 = 10 cases + 11 others
+        loss = WideLoss(y, case_share=share)
+        om = loss.omega(torch.nan_to_num(yb), ~torch.isnan(yb)).numpy()
+        assert np.allclose(om, L.sampling_rate(y, *L.rotation_rates(y, share))[:200], rtol=1e-5)
+        assert np.isclose(L.sampling_rate(y, case_share=share).mean(), 1.0)     # on average, drawn as often as uniformly
+    assert np.allclose(L.rotation_rates(y)[0], L.rotation_rates(y, 0.5)[0])     # the default is half and half
     assert np.allclose(loss.logit_shift.numpy(), np.log(L.class_weights(L.prevalence(y), 0.5, 20.0)), atol=1e-6)
 
 
@@ -57,24 +60,40 @@ def test_every_label_is_on_the_same_scale():
         assert abs(float(total) - math.log(2.0)) < 1e-5
 
 
+@pytest.fixture
+def one_thread():
+    """Thousands of losses on a few people each: one thread is fastest, by far on a busy machine."""
+    n = torch.get_num_threads()
+    torch.set_num_threads(1)
+    yield
+    torch.set_num_threads(n)
+
+
+@pytest.mark.parametrize("batch_size", [40, 5])
 @pytest.mark.parametrize("outputs", ["all", "target"])
-def test_the_sampler_does_not_change_what_is_fitted(outputs):
-    """Averaged over rotations, the batch loss equals the population loss for the same logits."""
+def test_the_sampler_does_not_change_what_is_fitted(outputs, batch_size, one_thread):
+    """Averaged over rotations, the batch loss equals the population loss for the same logits,
+    also for an odd batch (5 = 2 cases + 3 non-cases), where rates for half and half do not."""
     y = random_labels(1200, prevalences=(0.3, 0.1, 0.05), shared=0.6, seed=2, missing=1)
     rng = np.random.default_rng(1)
     z_all = torch.from_numpy(rng.standard_normal(y.shape).astype(np.float32))   # any fixed prediction per person
     yt = torch.from_numpy(y)
     _, pop = WideLoss(y, sampler="shuffled")(z_all, yt, target=-1)              # the population objective
-    loss = WideLoss(y, sampler="rotation", outputs=outputs)
-    s = RotationBatchSampler(y, batch_size=40, steps_per_epoch=3, seed=0)
-    acc = torch.zeros(3, dtype=torch.float64)
+    s = RotationBatchSampler(y, batch_size=batch_size, steps_per_epoch=3, seed=0)
+    loss = WideLoss(y, sampler="rotation", outputs=outputs, case_share=s.n_case / batch_size)
+    half = WideLoss(y, sampler="rotation", outputs=outputs)                     # as if every batch were half cases
+    acc, acc_half = torch.zeros(3, dtype=torch.float64), torch.zeros(3, dtype=torch.float64)
     n_rot = 2500
     for g in range(3 * n_rot):
         t, idx = s.batch(g)
         _, per = loss(z_all[idx], yt[idx], target=t)
         acc += per.double()
-    est = acc / (3 * n_rot) if outputs == "all" else acc / n_rot                # each label is the target once per rotation
-    assert torch.allclose(est.float(), pop, rtol=0.04), (est, pop)
+        if batch_size % 2:
+            acc_half += half(z_all[idx], yt[idx], target=t)[1].double()
+    n = 3 * n_rot if outputs == "all" else n_rot                                # each label is the target once per rotation
+    assert torch.allclose((acc / n).float(), pop, rtol=0.04), (acc / n, pop)
+    if batch_size % 2:
+        assert not torch.allclose((acc_half / n).float(), pop, rtol=0.04)       # measured 4.5-12% off
 
     if outputs == "all":                                                        # without the correction it is not the same objective
         raw = WideLoss(y, sampler="rotation", correction=False)

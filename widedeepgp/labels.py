@@ -45,20 +45,22 @@ def class_weights(pi, gamma=0.5, w_max=20.0):
     return np.minimum(((1.0 - pi) / pi) ** float(gamma), float(w_max))
 
 
-def rotation_rates(y):
+def rotation_rates(y, case_share=0.5):
     """How often the rotation sampler draws a case / a non-case of each label, relative to
-    drawing people uniformly: (N / (2 * cases), N / (2 * non-cases)).
+    drawing people uniformly: (N * s / cases, N * (1 - s) / non-cases), s = ``case_share``.
 
-    A batch balanced on label i takes half its people from the cases of i and half from the
-    non-cases of i, among the people label i applies to.
+    A batch balanced on label i takes the share s of its people from the cases of i and the
+    rest from the non-cases of i, among the people label i applies to. s is one half unless
+    the batch size is odd (samplers.cases_per_batch).
     """
     y = np.asarray(y, dtype=np.float64)
     n1, n0 = case_counts(y)
     n = y.shape[0]
-    return n / (2.0 * n1), n / (2.0 * n0)
+    s = float(case_share)
+    return n * s / n1, n * (1.0 - s) / n0
 
 
-def sampling_rate(y, rate_case=None, rate_ctrl=None):
+def sampling_rate(y, rate_case=None, rate_ctrl=None, case_share=0.5):
     """omega: how often the rotation sampler draws each person, relative to uniform drawing.
 
     Each label is the target of one batch per rotation, so a person's rate is the mean over
@@ -67,7 +69,7 @@ def sampling_rate(y, rate_case=None, rate_ctrl=None):
     """
     y = np.asarray(y, dtype=np.float64)
     if rate_case is None:
-        rate_case, rate_ctrl = rotation_rates(y)
+        rate_case, rate_ctrl = rotation_rates(y, case_share)
     r = np.where(np.isnan(y), 0.0, y * rate_case + (1.0 - y) * rate_ctrl)
     return r.mean(axis=1)
 

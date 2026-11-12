@@ -12,11 +12,13 @@ into it. What differs:
 * the sequence block comes from ``blocks.make_block``;
 * under bf16 the encoders run in bf16 while pooling, the head and the loss stay in float32;
 * each sequence's encoder can run under activation checkpointing;
-* fixed tables (positions, annotations) are not written into saved models;
+* fixed tables (positions, annotations) are not written into saved models; a digest of each
+  is, and a model is not rebuilt with tables that differ from the ones it was trained with;
 * optional per-SNP annotation vectors scale and shift the token embedding.
 """
 import hashlib
 import math
+import warnings
 
 import numpy as np
 import pytorch_lightning as pl
@@ -40,6 +42,17 @@ def positions_digest(pos):
     h = hashlib.sha256()
     for p in pos:
         h.update(np.ascontiguousarray(np.asarray(p, dtype=np.int64)).tobytes())
+    return h.hexdigest()[:16]
+
+
+def annotations_digest(annot):
+    """Digest of the annotation matrices a model is given (standardised, float32): a rewritten
+    annotation file changes it."""
+    h = hashlib.sha256()
+    for a in annot:
+        a = np.ascontiguousarray(np.asarray(a, dtype=np.float32))
+        h.update(str(a.shape).encode())
+        h.update(a.tobytes())
     return h.hexdigest()[:16]
 
 
@@ -116,10 +129,17 @@ class WideDeepGP(pl.LightningModule):
                     raise ValueError(f"annotations of sequence {i} have shape {tuple(a.shape)}, "
                                      f"expected {(len(pos[i]), self.annot_dim)}")
                 self.register_buffer(f"annot_{i}", a, persistent=False)
+            if hp.get("annot_digest") is None:
+                warnings.warn("this model was saved without a digest of its annotation vectors, so the ones given "
+                              "cannot be checked against those it was trained with")
+            elif hp["annot_digest"] != annotations_digest(annot):
+                raise ValueError("the annotation vectors given differ from the ones this model was trained with "
+                                 "(has the annotation file been rewritten?)")
 
+        # a model saved before case_share was recorded was trained on even batches: exactly half cases
         self.loss_fn = WideLoss(counts=hp["label_counts"], gamma=float(hp["gamma"]), w_max=float(hp["w_max"]),
                                 sampler=hp["sampler"], correction=bool(hp["sampling_correction"]),
-                                outputs=hp["loss_outputs"])
+                                outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)))
         self.lr, self.l2 = float(hp["lr"]), float(hp["l2"])
         self._val, self._train_sum, self._train_cnt = [], None, None
         self.last_val_metrics = None
@@ -257,12 +277,14 @@ class WideDeepGP(pl.LightningModule):
         for k in [k for k in sd if k.endswith("position_embedding.pe")]:     # written by the published class
             del sd[k]
 
-    def load_weights(self, state_dict, allow_new_head=False):
+    def load_weights(self, state_dict, allow_new_head=False, source_labels=None):
         """Load weights saved by this class or by the published one.
 
         Fixed tables in the source are ignored and the loss's constants are kept as configured.
-        With allow_new_head, an output layer of a different size is left at its initial values
-        (a model for a different list of diseases); everything else must match.
+        With allow_new_head, the output layer is left at its initial values when the source was
+        trained for other diseases: a layer of a different size, or, when ``source_labels`` (the
+        source's label names) is given, other names or another order, since each row of the
+        layer belongs to one disease. Everything else must match.
         Returns the names that were not loaded.
         """
         own = self.state_dict()
@@ -270,8 +292,12 @@ class WideDeepGP(pl.LightningModule):
                and not k.startswith("loss_fn.")}
         skipped = []
         last = f"combine.layers.{len(self.combine.layers) - 1}."
+        other_labels = source_labels is not None and list(source_labels) != self.label_names
         for k in list(src):
-            if k in own and own[k].shape != src[k].shape:
+            if allow_new_head and other_labels and k.startswith(last):
+                skipped.append(k)
+                del src[k]
+            elif k in own and own[k].shape != src[k].shape:
                 if allow_new_head and k.startswith(last):
                     skipped.append(k)
                     del src[k]

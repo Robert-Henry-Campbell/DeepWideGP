@@ -128,8 +128,19 @@ def test_annotations_start_as_the_plain_model(tmp_path):
     assert extra == 2 * (4 * 16 + 16)                                   # one gain map, one offset map, shared
 
 
+def test_the_loss_corrects_for_the_share_of_cases_the_sampler_draws(tmp_path):
+    from widedeepgp.model import WideDeepGP
+    from widedeepgp.train import build_model
+    cfg, dm = _data(tmp_path, batch_size=21)                            # 10 cases and 11 non-cases per batch
+    model = build_model(cfg, dm)
+    assert model.hp["case_share"] == 10 / 21 and model.loss_fn.case_share == 10 / 21
+    saved_before = {k: v for k, v in model.hp.items() if k != "case_share"}     # saved before it was recorded
+    assert WideDeepGP(saved_before, dm.pos_chr).loss_fn.case_share == 0.5
+
+
 def test_saved_models_hold_no_tables_and_reload(tmp_path):
-    from widedeepgp.train import load_model, predict_split, run_training
+    from widedeepgp.model import annotations_digest
+    from widedeepgp.train import load_annotations, load_model, predict_split, run_training
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
     cfg = make_cfg(data_dir, "multi", run_dir=str(tmp_path / "runs"), experiment="t", exp_name="a", annot=True,
                    steps_per_epoch_equiv=8, val_per_epoch=2, max_epoch_equiv=1.0, snapshots_per_decade=4)
@@ -141,6 +152,7 @@ def test_saved_models_hold_no_tables_and_reload(tmp_path):
     hp = ck["hyper_parameters"]["hp"]
     json.dumps(hp)                                                      # plain data: no arrays, no positions
     assert hp["label_names"][0] == "shared_a" and hp["annot_dim"] == 4 and len(hp["seq_len"]) == 22
+    assert hp["annot_digest"] == annotations_digest(load_annotations(out["datamodule"])[0])
     model, _ = load_model(out["best_checkpoint"], out["datamodule"], "cuda")
     a = predict_split(model, out["datamodule"], "val")[0]
     b = predict_split(out["model"].cuda(), out["datamodule"], "val")[0]
@@ -154,6 +166,20 @@ def test_saved_models_hold_no_tables_and_reload(tmp_path):
     assert "optimizer_states" not in snap and snap["samples_seen"] == 8 * 16
     for f in ("config.json", "metrics.csv", "snapshots.csv", "results.json", "checkpoints/last.ckpt"):
         assert os.path.exists(os.path.join(run, f)), f
+
+    # an annotation file rewritten after training is refused; a model saved before the digest was
+    # kept is rebuilt with whatever annotations it is given, with a warning
+    dm = out["datamodule"]
+    path = os.path.join(dm.dir, json.load(open(os.path.join(dm.dir, "store.json")))["annotations"]["file"])
+    z = dict(np.load(path))
+    z["chr1"][0, 0] += 1.0
+    np.savez(path, **z)
+    with pytest.raises(ValueError, match="annotation vectors given differ"):
+        load_model(out["best_checkpoint"], dm, "cuda")
+    del ck["hyper_parameters"]["hp"]["annot_digest"]
+    torch.save(ck, str(tmp_path / "saved_before.ckpt"))
+    with pytest.warns(UserWarning, match="without a digest"):
+        load_model(str(tmp_path / "saved_before.ckpt"), dm, "cuda")
 
 
 def test_weights_move_to_a_model_with_other_labels(tmp_path):
@@ -169,3 +195,15 @@ def test_weights_move_to_a_model_with_other_labels(tmp_path):
     assert sorted(left) == ["combine.layers.3.bias", "combine.layers.3.weight"]
     a, b = six.state_dict(), two.state_dict()
     assert all(torch.equal(a[k], b[k]) for k in a if not k.startswith(("loss_fn.", "combine.layers.3")))
+    # the same two diseases the other way round: the output layer has the same shape, but each
+    # row belongs to one disease, so given the source's names it starts afresh
+    cfg3 = make_cfg(cfg.data_dir, "multi", labels="null_f,solo_d")
+    flipped = build_model(cfg3, SNPStoreDataModule(cfg3)).cuda()
+    initial = {k: v.clone() for k, v in flipped.state_dict().items() if k.startswith("combine.layers.3")}
+    left = flipped.load_weights(two.state_dict(), allow_new_head=True, source_labels=two.label_names)
+    assert sorted(left) == ["combine.layers.3.bias", "combine.layers.3.weight"]
+    assert all(torch.equal(flipped.state_dict()[k], v) for k, v in initial.items())
+    a, b = two.state_dict(), flipped.state_dict()
+    assert all(torch.equal(a[k], b[k]) for k in a if not k.startswith(("loss_fn.", "combine.layers.3")))
+    assert flipped.load_weights(flipped.state_dict(), allow_new_head=True, source_labels=["null_f", "solo_d"]) == []
+    assert flipped.load_weights(two.state_dict(), allow_new_head=True) == []    # a source without names: as before

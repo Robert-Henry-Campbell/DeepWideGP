@@ -20,6 +20,8 @@ the command line, never searched.
 The value maximised is the best mean validation AUROC of the trial. After each validation pass
 the value is reported, and successive halving stops the trials that trail (``--min_validations``
 passes before a trial may be stopped, keeping one in ``--reduction`` at each rung).
+
+To look at a study without writing to its journal, open it with ``load_study``.
 """
 import argparse
 import json
@@ -36,7 +38,7 @@ import optuna
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend
 
-from args_generator import args_initial
+from main_multilabel import parse_args
 from widedeepgp.train import run_training
 
 
@@ -62,6 +64,15 @@ def open_study(name, run_dir, min_validations=2, reduction=3, seed=None):
         pruner=optuna.pruners.SuccessiveHalvingPruner(min_resource=min_validations, reduction_factor=reduction))
 
 
+def load_study(name, run_dir):
+    """An existing study, opened read-only to inspect it. open_study is for workers: opening a
+    study that exists with create_study still appends a record to the journal."""
+    path = os.path.join(run_dir, name, "optuna_journal.log")
+    if not os.path.exists(path):                  # the journal backend would create an empty one
+        raise FileNotFoundError(f"no study journal at {path}")
+    return optuna.load_study(study_name=name, storage=JournalStorage(JournalFileBackend(path)))
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     base = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -78,11 +89,7 @@ def main(argv=None):
     study = open_study(a.study, a.run_dir, a.min_validations, a.reduction, a.sampler_seed)
 
     def objective(trial):
-        cfg = args_initial(base)
-        if cfg.data_dir is None:
-            cfg.data_dir = "pukb/genes"
-        if cfg.final_pool == "concat":
-            cfg.final_pool = "atten"
+        cfg = parse_args(base)                       # the defaults of main_multilabel.py
         cfg.run_dir, cfg.experiment, cfg.exp_name = a.run_dir, a.study, f"trial_{trial.number:04d}"
         suggest(trial, cfg, a.space)
         try:

@@ -1,10 +1,12 @@
 """Batch samplers.  python -m pytest tests/test_ml_sampler.py -q"""
 import numpy as np
 import pytest
+import torch
 
-from ml_helpers import random_labels
+from ml_helpers import make_cfg, random_labels, synthetic_dataset
 
 from widedeepgp import labels as L
+from widedeepgp.losses import WideLoss
 from widedeepgp.samplers import NO_TARGET, RotationBatchSampler, ShuffledBatchSampler, make_sampler
 
 
@@ -69,23 +71,47 @@ def test_cases_come_round_before_they_repeat():
     assert set(drawn) <= set(np.flatnonzero(y[:, 1] == 1))
 
 
-def test_draw_rate_matches_omega():
-    """The rate at which the sampler draws each person equals the omega the loss divides by."""
+@pytest.mark.parametrize("batch_size", [30, 5])
+def test_draw_rate_matches_omega(batch_size):
+    """The rate at which the sampler draws each person equals the omega the loss divides by,
+    for an odd batch too (5 = 2 cases + 3 non-cases, not half and half)."""
     y = random_labels(1500, prevalences=(0.3, 0.1, 0.05), shared=0.6, seed=4, missing=2)
-    s = RotationBatchSampler(y, batch_size=30, steps_per_epoch=3, seed=0)
+    s = RotationBatchSampler(y, batch_size=batch_size, steps_per_epoch=3, seed=0)
     counts = np.zeros(len(y))
-    n_batches = 3 * 6000
+    n_batches = 3 * 6000 * 30 // batch_size                                     # the same number of draws
     for g in range(n_batches):
         np.add.at(counts, s.batch(g)[1], 1)
-    rate = counts / (n_batches * 30 / len(y))
-    om = L.sampling_rate(y)
+    rate = counts / (n_batches * batch_size / len(y))
+    yt = torch.from_numpy(y)
+    loss = WideLoss(y, case_share=s.n_case / batch_size)
+    om = loss.omega(torch.nan_to_num(yt), ~torch.isnan(yt)).double().numpy()  # what the loss divides by
+    half = L.sampling_rate(y)                                                   # as if every batch were half cases
     # compare by label pattern (people with the same labels have the same omega)
     keys = [tuple(np.nan_to_num(r, nan=-1)) for r in y]
+    worst_half = 0.0
     for k in set(keys):
         m = np.array([kk == k for kk in keys])
         if m.sum() >= 30:
             assert abs(rate[m].mean() / om[m].mean() - 1) < 0.06, (k, rate[m].mean(), om[m].mean())
+            worst_half = max(worst_half, abs(rate[m].mean() / half[m].mean() - 1))
     assert np.corrcoef(rate, om)[0, 1] > 0.97
+    if batch_size % 2:
+        assert worst_half > 0.15                                                # half and half is a fifth off here
+
+
+def test_the_model_records_the_share_of_cases_its_sampler_draws(tmp_path):
+    from genostore.datamodule import SNPStoreDataModule
+    from widedeepgp.train import model_hparams, train_labels
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=66)
+    cfg = make_cfg(data_dir, "multi")
+    dm = SNPStoreDataModule(cfg)
+    for b in (16, 21, 19, 69):
+        cfg.batch_size = b
+        n_case = RotationBatchSampler(train_labels(dm), b, steps_per_epoch=4).n_case
+        assert model_hparams(cfg, dm)["case_share"] == n_case / b
+    assert n_case == 34                                                         # 69 = 34 cases + 35 non-cases
+    cfg.sampler = "shuffled"                                                    # no target: nothing to correct
+    assert model_hparams(cfg, dm)["case_share"] == 0.5
 
 
 def test_shuffled_sampler():

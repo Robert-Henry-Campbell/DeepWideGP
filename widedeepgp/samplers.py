@@ -22,6 +22,13 @@ from torch.utils.data import Sampler
 NO_TARGET = -1
 
 
+def cases_per_batch(batch_size, case_fraction=0.5):
+    """Cases of the target in a rotation batch, round(batch_size * case_fraction); the rest are
+    non-cases. Python rounds halves to even, so an odd batch is not split exactly in half (21:
+    10 cases and 11 non-cases; 19: 10 and 9), and the loss uses the share this gives."""
+    return int(round(int(batch_size) * float(case_fraction)))
+
+
 class _Queue:
     """Endless shuffled passes over a fixed set of indices, addressable by position.
 
@@ -86,7 +93,8 @@ class ShuffledBatchSampler(_StepSampler):
 
 
 class RotationBatchSampler(_StepSampler):
-    """One target label per batch; half the batch are its cases, half its non-cases.
+    """One target label per batch; half the batch are its cases, half its non-cases (an odd
+    batch cannot be halved: see cases_per_batch).
 
     labels: float [N, n_labels] with 1, 0 or NaN (not applicable; never drawn for that target).
     case_fraction: share of the batch taken from the target's cases (0.5 = balanced).
@@ -100,7 +108,7 @@ class RotationBatchSampler(_StepSampler):
         if y.ndim != 2:
             raise ValueError("labels must be [people, labels]")
         self.n_labels = y.shape[1]
-        self.n_case = int(round(self.batch_size * float(case_fraction)))
+        self.n_case = cases_per_batch(self.batch_size, case_fraction)
         self.n_ctrl = self.batch_size - self.n_case
         if self.n_case < 1 or self.n_ctrl < 1:
             raise ValueError("the batch must hold at least one case and one non-case of the target")

@@ -32,6 +32,9 @@ holds all samples for variants [b*16384, (b+1)*16384). Inside a block, data is s
 Block-major files can be written sequentially from a variant-major source (.pgen), which is
 what makes conversion a single streaming pass; reading one sample costs one 4 KB base read
 plus one short exception read per block.
+
+A store holds participant-level data: its directory is created 0700 and its files 0600,
+whatever the umask.
 """
 import hashlib
 import json
@@ -46,6 +49,7 @@ ENCODING = "base2+ovr8"
 BLOCK_VARIANTS = 16384
 DOSAGE_SCALE = 100
 MISSING = 255
+DIR_MODE, FILE_MODE = 0o700, 0o600          # owner only
 
 CODE_OF = np.full(256, 3, dtype=np.uint8)
 CODE_OF[0], CODE_OF[100], CODE_OF[200] = 0, 1, 2
@@ -143,9 +147,16 @@ def decode_packed(packed, ovr, width=None):
 # --------------------------------------------------------------------------------------
 # small file helpers
 # --------------------------------------------------------------------------------------
+def new_file(path, mode="w"):
+    """Open ``path`` for writing, created (or emptied) readable and writable by its owner only."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    os.fchmod(fd, FILE_MODE)                     # a file that already existed would keep its mode
+    return os.fdopen(fd, mode)
+
+
 def _write_json_atomic(path, obj):
     tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "w") as f:
+    with new_file(tmp) as f:
         json.dump(obj, f, indent=1)
         f.flush()
         os.fsync(f.fileno())
@@ -174,7 +185,7 @@ def samples_digest(sample_ids):
 
 def create_store(store_dir, sample_ids, block_variants=BLOCK_VARIANTS, provenance=None):
     """Create the store directory (or validate that an existing one has the same samples)."""
-    os.makedirs(store_dir, exist_ok=True)
+    os.makedirs(store_dir, mode=DIR_MODE, exist_ok=True)
     meta_path = os.path.join(store_dir, "meta.json")
     sample_ids = [str(s) for s in sample_ids]
     meta = {"format": FORMAT, "version": VERSION, "encoding": ENCODING,
@@ -188,7 +199,7 @@ def create_store(store_dir, sample_ids, block_variants=BLOCK_VARIANTS, provenanc
                 raise ValueError(f"{store_dir} already holds a store with different {k}: "
                                  f"{old.get(k)!r} vs {meta[k]!r}")
         return old
-    with open(os.path.join(store_dir, "samples.txt"), "w") as f:
+    with new_file(os.path.join(store_dir, "samples.txt")) as f:
         f.write("\n".join(sample_ids) + "\n")
     _write_json_atomic(meta_path, meta)
     return meta
@@ -217,8 +228,8 @@ class ChromWriter:
             st = {"n_samples": self.n, "n_variants": self.m, "block_variants": self.w,
                   "blocks_done": 0, "base_bytes": 0, "ovr_bytes": 0, "ovr_block_start": [0],
                   "n_override": 0, "n_missing": 0, "elapsed_s": 0.0}
-            for k in ("base", "ovr", "ptr"):
-                open(self.p[k], "wb").close()
+            for k in ("base", "ovr", "ptr", "stats"):
+                new_file(self.p[k], "wb").close()
             stats = np.lib.format.open_memmap(self.p["stats"], mode="w+", dtype=np.float64, shape=(3, self.m))
             stats[:] = 0
             stats.flush()
@@ -305,7 +316,7 @@ class ChromWriter:
         self.stats.flush()
         if variant_lines is not None:
             tsv_pos = np.empty(self.m, dtype=np.int64)
-            with open(self.p["variants"], "w") as f:
+            with new_file(self.p["variants"]) as f:
                 f.write("#CHROM\tPOS\tID\tREF\tALT\n")
                 k = 0
                 for line in variant_lines:
@@ -322,7 +333,8 @@ class ChromWriter:
             pos = np.asarray(pos)
             if len(pos) != self.m:
                 raise ValueError(f"chr{self.chrom}: {len(pos)} positions for {self.m} variants")
-            np.save(self.p["pos"], pos)
+            with new_file(self.p["pos"], "wb") as f:
+                np.save(f, pos)
         info = {"chrom": self.chrom, "n_samples": self.n, "n_variants": self.m,
                 "block_variants": self.w, "n_blocks": self.n_blocks,
                 "base_bytes": self.st["base_bytes"], "ovr_bytes": self.st["ovr_bytes"],

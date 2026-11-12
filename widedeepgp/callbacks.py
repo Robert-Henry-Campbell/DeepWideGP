@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Callbacks for a multi-disease run: weight snapshots, the run's own log files, Optuna pruning."""
+"""Callbacks for a multi-disease run: weight snapshots, the run's own log files, early stopping
+that counts a repeated validation pass once (EarlyStoppingOnce), Optuna pruning."""
 import csv
 import os
 import time
 
 import pytorch_lightning as pl
 import torch
-from pytorch_lightning.callbacks import EarlyStopping
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from . import metrics as M
 
@@ -33,7 +34,8 @@ class Snapshots(pl.Callback):
 
     The table (snapshots.csv) records optimiser step, batches, participants seen,
     epoch-equivalents and training time, which is what a compute axis needs. Snapshots hold
-    weights and the model's configuration, not optimiser state: resuming uses last.ckpt.
+    weights and the model's configuration, not optimiser state: resuming uses the run's last
+    checkpoint (train.last_checkpoint).
     """
 
     FIELDS = ["step", "batches", "samples_seen", "epoch_equiv", "train_seconds", "file"]
@@ -85,7 +87,12 @@ class Snapshots(pl.Callback):
 
 class RunLog(pl.Callback):
     """Writes metrics.csv (one row per validation pass, label and metric) and logs throughput,
-    memory, learning rate, gradient norm and the cases seen per disease to the trainer's logger."""
+    memory, learning rate, gradient norm and the cases seen per disease to the trainer's logger.
+
+    ``metrics_at`` keeps the metrics of each pass this process made, by optimiser step, so that
+    results.json takes the best step's from there instead of scoring the tuning set again; a
+    pass made before a resume is not in it, and that step is scored again from its checkpoint.
+    """
 
     FIELDS = ["validation", "step", "samples_seen", "epoch_equiv", "label", "metric", "value", "n", "n_cases"]
 
@@ -202,9 +209,46 @@ class EarlyStoppingOnce(EarlyStopping):
         return dict(super().state_dict(), seen_step=self._seen_step)
 
     def load_state_dict(self, state_dict):
+        """Restore the count of passes without improvement but keep this run's patience
+        (--stop_patience): a resumed run may change how long it trains, and Lightning would
+        otherwise put back the checkpoint's patience."""
         self._seen_step = int(state_dict.get("seen_step", -1))
+        patience = self.patience
         super().load_state_dict(state_dict)
+        self.patience = patience
 
+
+
+class RunCheckpoint(ModelCheckpoint):
+    """ModelCheckpoint that carries a run's best and last checkpoints over to a copy of its
+    directory, or to the same directory named another way.
+
+    Lightning restores the best score and the name of the last checkpoint only when the
+    checkpoint folder is named exactly as when the state was saved (with this fsspec it keeps
+    the path as given: a symlink or a relative --run_dir counts as another folder). A copied
+    run directory, once resumed, would start a new best (best-v1.ckpt) compared with nothing
+    from before the resume, and a new last-v1.ckpt beside the copied last.ckpt. When the files
+    are there, the saved paths are moved into this folder first, so the run carries on in
+    best.ckpt and last.ckpt with its best score, as a run resumed in place does. Copy a run
+    directory only while nothing is writing to it."""
+
+    @property
+    def state_key(self):
+        # ModelCheckpoint's own key, so that checkpoints written before this class existed (every
+        # run of the pilot) restore it, and the ones it writes restore a plain ModelCheckpoint
+        return "ModelCheckpoint" + super().state_key[len(type(self).__qualname__):]
+
+    def load_state_dict(self, state_dict):
+        saved_dir = state_dict.get("dirpath")
+        if saved_dir and self.dirpath and saved_dir != self.dirpath:
+            def here(path):
+                return os.path.join(self.dirpath, os.path.basename(path)) if path else path
+            moved = {k: here(state_dict.get(k, "")) for k in ("best_model_path", "kth_best_model_path",
+                                                             "last_model_path")}
+            best_k = {here(path): score for path, score in (state_dict.get("best_k_models") or {}).items()}
+            if all(os.path.exists(path) for path in [*moved.values(), *best_k] if path):
+                state_dict = {**state_dict, **moved, "best_k_models": best_k, "dirpath": self.dirpath}
+        super().load_state_dict(state_dict)
 
 class OptunaPruning(pl.Callback):
     """Report the watched validation metric to an Optuna trial after every validation pass and

@@ -9,7 +9,7 @@ This package holds everything the multi-disease model adds:
     metrics.py    per-disease metrics over a whole evaluation set
     blocks.py     the sequence-block factory (current Mamba block, Mamba-3)
     model.py      WideDeepGP, the Lightning module (network, annotation gain and offset, training logic)
-    callbacks.py  snapshots, throughput, Optuna pruning
+    callbacks.py  snapshots, run logs, early stopping, Optuna pruning
     train.py      one training run, shared by the command line and the tuner
 
 methods.md at the repository root describes the science.

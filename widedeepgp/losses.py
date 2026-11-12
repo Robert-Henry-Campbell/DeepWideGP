@@ -42,10 +42,12 @@ def label_counts(train_labels):
 
 class WideLoss(nn.Module):
     def __init__(self, train_labels=None, gamma=0.5, w_max=20.0, sampler="rotation", correction=True, outputs="all",
-                 counts=None):
+                 counts=None, case_share=0.5):
         """train_labels: the training label matrix, or pass ``counts`` = {"cases": [...],
         "non_cases": [...], "n": people} (what ``label_counts`` returns), which is all the loss
-        needs and is small enough to keep with a saved model."""
+        needs and is small enough to keep with a saved model. case_share: the share of a
+        rotation batch drawn from its target's cases (one half unless the batch size is odd;
+        samplers.cases_per_batch)."""
         super().__init__()
         if outputs not in ("all", "target"):
             raise ValueError("outputs must be 'all' or 'target'")
@@ -59,7 +61,8 @@ class WideLoss(nn.Module):
         pi = n1 / (n1 + n0)
         c1 = L.class_weights(pi, gamma, w_max)
         f = (n1 + n0) / n_people
-        rate_case, rate_ctrl = n_people / (2.0 * n1), n_people / (2.0 * n0)
+        s = float(case_share)
+        rate_case, rate_ctrl = n_people * s / n1, n_people * (1.0 - s) / n0      # as labels.rotation_rates
         t = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float32)
         self.register_buffer("pi", t(pi))
         self.register_buffer("c1", t(c1))
@@ -68,7 +71,7 @@ class WideLoss(nn.Module):
         self.register_buffer("rate_ctrl", t(rate_ctrl))
         self.register_buffer("logit_shift", t(np.log(c1)))
         self.n_labels = len(n1)
-        self.gamma, self.w_max = float(gamma), float(w_max)
+        self.gamma, self.w_max, self.case_share = float(gamma), float(w_max), s
         self.sampler, self.correction, self.outputs = sampler, bool(correction), outputs
 
     def omega(self, y, mask):
@@ -100,4 +103,4 @@ class WideLoss(nn.Module):
 
     def extra_repr(self):
         return (f"n_labels={self.n_labels}, gamma={self.gamma}, w_max={self.w_max}, sampler={self.sampler}, "
-                f"correction={self.correction}, outputs={self.outputs}")
+                f"correction={self.correction}, outputs={self.outputs}, case_share={self.case_share:.4g}")

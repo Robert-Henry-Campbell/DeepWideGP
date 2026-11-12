@@ -189,13 +189,17 @@ def run_training(cfg, trial=None, extra_callbacks=()):
                          enable_model_summary=False)
     trainer.fit(model, dm, ckpt_path=resume)
 
-    # the best checkpoint, scored once more on the validation set
+    # the best checkpoint and its validation metrics (kept from the pass made at that step; scored
+    # again only when this process did not make that pass, as after a resume)
     best_path = best_ckpt.best_model_path or last
     state = torch.load(best_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["state_dict"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logits, y = predict_split(model.to(device), dm, "val", device)
-    m = M.per_label_metrics(logits, y, model.loss_fn.logit_shift.cpu().numpy(), model.label_names)
+    model.to(device)
+    m = runlog.metrics_at.get(int(state.get("global_step", -1)))
+    if m is None:
+        logits, y = predict_split(model, dm, "val", device)
+        m = M.per_label_metrics(logits, y, model.loss_fn.logit_shift.cpu().numpy(), model.label_names)
     out = {"run_dir": run_dir, "best_checkpoint": best_path, "best_val_auroc_mean": float(m["auroc_mean"]),
            "best_step": int(state.get("global_step", 0)), "best_samples_seen": int(state.get("samples_seen", 0)),
            "val": {name: {k: float(m[k][j]) for k in ("auroc", "ap", "bce")} for j, name in enumerate(m["labels"])},

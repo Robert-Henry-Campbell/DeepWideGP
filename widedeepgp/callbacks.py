@@ -98,6 +98,7 @@ class RunLog(pl.Callback):
         self._last_step = -1
         self.history = []                       # (validation, step, samples_seen, mean AUROC)
         self.peak_train_bytes = self.peak_val_bytes = 0     # peak GPU memory, training and validation apart
+        self.metrics_at = {}                    # optimiser step -> the metrics of the validation pass made there
 
     def on_fit_start(self, trainer, pl_module):
         if not os.path.exists(self.path):
@@ -153,6 +154,7 @@ class RunLog(pl.Callback):
             return
         self._last_step = int(trainer.global_step)
         self.n_validations += 1
+        self.metrics_at[int(trainer.global_step)] = m
         ee = pl_module.samples_seen / self.n_train
         with open(self.path, "a", newline="") as f:
             csv.DictWriter(f, self.FIELDS).writerows(M.to_rows(

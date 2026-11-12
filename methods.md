@@ -272,8 +272,8 @@ convolution and the projections and differ only in their state matrices. Computa
 memory grow linearly with the number of SNPs, which is what allows a whole chromosome to be one
 sequence.
 
-**Mamba-3 (candidate).** Mamba-3 (Lahoti et al., 2026) is implemented as an alternative block
-and is being evaluated. Upstream Mamba-3 runs in one direction only, so two blocks are used per
+**Mamba-3 (evaluated, not adopted).** Mamba-3 (Lahoti et al., 2026) is implemented as an
+alternative block. Upstream Mamba-3 runs in one direction only, so two blocks are used per
 layer, one reading the chromosome forwards and one backwards, each with its own weights, and
 their outputs are summed. It is in single-input mode with a state size of 16, the state size of
 the current block (Mamba-3's default of 128 would add parameters that outweigh the rest of a
@@ -286,7 +286,10 @@ block, so its encoders are checkpointed with the re-entrant variant, which gives
 outputs and gradients. The decision rule was fixed in advance: Mamba-3 replaces the current
 block only if it runs at chromosome length and its mean tuning AUROC in the pilot exceeds the
 current block's by more than the seed-to-seed spread at equal GPU-hours; otherwise it is
-dropped.
+dropped. It ran at chromosome length, with one limit (a call with more than about 122
+participants at 105,260 SNPs fails inside the upstream kernel), needed about twice the memory
+per participant without checkpointing, and in the pilot gave the same AUROC as the current
+block at 1.6 times the training time. It was dropped; the code remains behind `--mixer mamba3`.
 
 ### 4.4 Pooling
 
@@ -358,11 +361,14 @@ bound. The pilot bears it out:
   an annotation that marked the causal SNPs without saying which way each acts.
 - Given only the 2,476 SNPs that a GWAS of the training participants selects, the kind of input
   published DeepGP receives, the network learned slowly (0.54 to 0.65 after six
-  epoch-equivalents, levelling off near 0.55 to 0.69 with longer training).
+  epoch-equivalents, peaking at 0.55 to 0.68 with longer training before it overfitted).
 - Given every SNP's signed association *z*-score for each trait as annotation channels, it
   learned on all 157,279 SNPs (0.59 to 0.69). The annotation gain multiplies each SNP's dosage,
   so a signed statistic gives the network what it otherwise lacks: a size and a direction for
-  every SNP.
+  every SNP. The same statistics kept only at clumped lead SNPs did not work: a few hundred
+  marked SNPs are averaged away over a chromosome.
+- The 96 functional annotations, which carry no direction, made no difference on the real
+  labels and little on the simulated traits.
 
 The consequence for the design is that the choice made in section 3, one unselected SNP set
 with no per-disease information, leaves the network without the means to learn SNP effects, at
@@ -517,10 +523,10 @@ confidence intervals and calibration are outside this document.
 | Component | Single phenotype (published) | Multi-phenotype (this model) |
 |---|---|---|
 | SNPs | Chosen per disease: GWAS p-value filter, then clumping | One fixed set for all diseases: 1,258,200 HapMap3+ SNPs |
-| SNP annotations | None | Optional: 96 functional annotations as a per-SNP gain and offset |
+| SNP annotations | None | Optional per-SNP annotation vectors as a gain and offset (96 functional annotations; not adopted after the pilot, see section 4.9) |
 | Labels | One per participant | One per disease per participant |
 | Covariates | Eight | Year of birth, sex, ten principal components |
-| Sequence block | Bidirectional Mamba | The same (Mamba-3 in a bidirectional wrapper is being evaluated) |
+| Sequence block | Bidirectional Mamba | The same (Mamba-3 in a bidirectional wrapper was evaluated and not adopted) |
 | Output | One sigmoid probability | 30 logits from the same hidden layer |
 | Batches | Shuffled | Rotation of disease-balanced batches |
 | Loss | Binary cross-entropy | Cross-entropy corrected for sampling rate, weighted by class, averaged per disease and then across diseases |

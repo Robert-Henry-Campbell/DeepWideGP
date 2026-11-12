@@ -591,3 +591,44 @@ nothing on the simulated traits (0.50 to 0.52).
   the pilot's code, so it holds stale `best.ckpt` and `last.ckpt` beside `best-v1.ckpt` and
   `last-v1.ckpt`; `results.json`, `--snapshots best|last` and `--resume` all pick the `-v1`
   files.
+
+## 2026-11-12 (late evening) — Cleanup and seed 42, at Robert's request
+
+Robert asked to delete the caches that are no longer useful, and to "set the same seed for
+everything, make it 42".
+
+### Code changes
+
+- `main_multilabel.parse_args`: `--seed` defaults to 42 (`SEED`), in the same way as
+  `--snp_stats` defaults to `train`; a `--seed` that is given wins. `args_generator.py` keeps 33
+  for `main_genome.py` (decision A2: the published configuration stays reproducible).
+- `tune_optuna.py`: `--sampler_seed` defaults to 42, and trials train with seed 42 through
+  `parse_args`.
+- `tests/test_ml_train.py` (`test_the_multi_disease_entry_points_scale_snps_on_the_training_split`)
+  checks both defaults; methods.md section 6 ("Seeds": 42, replicates 42, 43, 44) and the README
+  flag table say so.
+- Not changed yet: the cohort split (`build_dataset.py`, seed 20261111) and the proxy draw
+  (`make_proxy_dataset.py`, seed 20261112). Changing them re-splits the cohort and means
+  rebuilding the dataset tables, so Robert was asked first. The pilot's analysis scripts keep
+  their seeds, so they still reproduce the reported numbers.
+- A run started with another seed now resumes only with its own `--seed` (for example
+  `--seed 33` for the dry runs); `check_resume_args` refuses otherwise.
+
+### Environment (cleanup)
+
+- Deleted under `/mnt/sdg/robert/deepwidegp/runs` (2.5 GiB): the snapshot weights of the pilot,
+  control and dry runs (961 files), and the checkpoints and snapshots of the 11 Optuna trials
+  (`sim_selected_tune`). Every run keeps `config.json`, `metrics.csv`, `results.json`, `tb/` and
+  `snapshots.csv` (whose `file` column now names deleted files, so `score_snapshots.py
+  --snapshots all` no longer works on them); the pilot and control runs keep
+  `checkpoints/best*.ckpt` and `last*.ckpt`.
+- Deleted: `DeepWideGP/runs/synthetic` (git-ignored; the Mamba-3 gate run is kept in
+  `runs/gate_evidence/multi6_mamba3_gate5`), the legacy regression test's untracked outputs of
+  12 Nov, and on the root filesystem the review agents' scratch folders and pytest's temporary
+  folders (1.6 GiB; 25 GB free after). `preds.pkl` is back to its committed version.
+- Moved: the genostore equivalence-check outputs of 11 Nov (untracked
+  `DeepGP/{logs,results}/.../genostore_equiv_*`) to
+  `runs/gate_evidence/genostore_equiv_2026-11-11/`.
+- Kept: Robert's own test outputs of 2 April (untracked, in `synthetic_1causal_10case_test`),
+  `docs/`, `.codex`, everything in `data/`, the frozen code copies, and the export
+  `runs/gate_evidence/final_tests_2026-11-12/code_2310856` that the waiting GPU test job uses.

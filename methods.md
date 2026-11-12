@@ -494,6 +494,10 @@ Three switches exist so that the choices above can be tested rather than assumed
   intermediate activations, which are recomputed during the backward pass. Outputs and
   gradients are unchanged; memory is then set by the longest chromosome instead of the genome,
   at the cost of one extra forward pass.
+- **Seeds.** Every random choice in training (initial weights, dropout and the order of the
+  batches) and the sampler of the hyper-parameter search follow one seed, 42 by default;
+  replicate runs use 42, 43 and 44. The published single-disease code keeps its default of 33.
+  The pilot used seeds 1 and 2 (DeepWideGP-Scripts, `scripts/widedeepgp-pilot/methods.md`).
 
 **Measured at full size** (one 48 GB GPU; model width 32, one layer; 1,258,200 SNPs; the
 analysis `widedeepgp-pilot` in DeepWideGP-Scripts, branch `widening`). The largest batch is 21

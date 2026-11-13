@@ -162,9 +162,9 @@ def test_the_multi_disease_defaults():
     import main_multilabel
     from args_generator import args_initial
     cfg = main_multilabel.parse_args(["--label", "x"])
-    assert (cfg.wide, cfg.tune_trials, cfg.tune_trials_linear, cfg.tune_gpus, cfg.val_min_participants,
+    assert (cfg.wide, cfg.wide_kappa, cfg.prs_grid, cfg.tune_trials, cfg.tune_gpus, cfg.val_min_participants,
             cfg.val_max_epoch_equiv, cfg.min_participants, cfg.snapshots_per_decade, cfg.snapshots_max, cfg.seed) == \
-        ("on", 12, 8, "auto", 20000, 1.0, 128000, 6, 40, 1)
+        ("on", 0.1, None, 12, "auto", 20000, 1.0, 128000, 6, 40, 1)
     cfg = main_multilabel.parse_args(["--label", "x", "--wide", "off", "--tune_trials", "0"])
     assert (cfg.wide, cfg.tune_trials) == ("off", 0)
     legacy = args_initial(["--label", "x", "--rd_mode", "x"])       # the published script's parser is unchanged
@@ -177,29 +177,66 @@ def test_a_run_tunes_itself(tmp_path):
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
     argv = ["--data_dir", data_dir, "--label", "multi", "--rd_mode", "store", "--d_model", "16", "--n_heads", "4",
             "--num_workers", "0", "--batch_size", "16", "--run_dir", str(tmp_path / "runs"), "--experiment", "t",
-            "--exp_name", "r", "--wide", "only", "--tune_trials_linear", "3", "--max_epoch_equiv", "1",
-            "--stop_patience", "0"]
+            "--exp_name", "r", "--wide", "only", "--prs_grid", "0.1,1,10", "--max_epoch_equiv", "4",
+            "--val_min_participants", "0", "--min_participants", "0", "--stop_patience", "0"]
     root = tmp_path / "runs" / "t" / "r"
     main_multilabel.main(argv)
     with open(root / "results.json") as f:
         r = json.load(f)
     lin = r["stages"]["linear"]
-    assert r["tuning"] and r["chosen_stage"] == "linear" and lin["n_complete"] == 3
-    assert r["best_trial_dir"] == os.path.join("linear", f"trial_{lin['best_trial']:04d}")
-    assert lin["best_value"] == max(t["value"] for t in lin["trials"])
-    for t in lin["trials"]:                              # the chosen trial keeps its weights, the others do not
-        assert os.path.isdir(os.path.join(t["run_dir"], "checkpoints")) == (t["trial"] == lin["best_trial"])
-        assert set(t["params"]) == {"prs_var", "wide_kappa", "lr"}
-        cfg = json.load(open(os.path.join(t["run_dir"], "config.json")))
-        assert cfg["args"]["wide"] == "only" and cfg["args"]["batch_size"] == 256 and cfg["model"]["lr_wide"] > 0
-    assert len({tuple(sorted(t["params"].items())) for t in lin["trials"]}) == 3
-    rows = score_snapshots.main(["--run", str(root), "--split", "val", "--snapshots", "best"])
-    mean = [x for x in rows if x["snapshot"] == "best" and x["label"] == "MEAN" and x["metric"] == "auroc"][0]
-    assert abs(mean["value"] - r["best_val_auroc_mean"]) < 1e-6      # scoring the run scores its chosen trial
+    assert r["tuning"] and r["chosen_stage"] == "linear" and lin["n_complete"] == 1
+    assert r["best_trial_dir"] == os.path.join("linear", "per_disease")
+    grid_run = json.load(open(root / "linear" / "results.json"))
+    cfg = json.load(open(root / "linear" / "config.json"))
+    assert cfg["args"]["wide"] == "only" and cfg["args"]["batch_size"] == 256 and cfg["model"]["prs_grid"] == [0.1, 1, 10]
+    assert cfg["model"]["lr_schedule"] == "cosine" and cfg["model"]["lr_wide"] > 0
+    rows = grid_run["per_disease"]
+    assert {x["label"] for x in rows} == set(cfg["model"]["label_names"]) and all(x["prs_var"] in (0.1, 1, 10) for x in rows)
+    for x in rows:                                       # scoring the chosen model again gives what it was chosen by
+        assert x["val_auroc_rescored"] == pytest.approx(x["val_auroc"], abs=1e-6)
+    metrics = __import__("pandas").read_csv(root / "linear" / "metrics.csv")
+    auc = metrics[metrics.metric == "auroc"]
+    for x in rows:                                       # each disease's choice is the best over passes and variances
+        mine = auc[auc.label.str.startswith(x["label"] + "@")]
+        assert x["val_auroc"] == pytest.approx(mine.value.max(), abs=1e-9)
+    assert r["best_val_auroc_mean"] == pytest.approx(np.mean([x["val_auroc"] for x in rows]), abs=1e-6)
+    assert not os.path.isdir(root / "linear" / "checkpoints")       # the grid's weights are deleted,
+    assert os.path.isfile(root / "linear" / "per_disease" / "checkpoints" / "best.ckpt")   # the chosen model kept
+    scored = score_snapshots.main(["--run", str(root), "--split", "val", "--snapshots", "best"])
+    mean = [x for x in scored if x["snapshot"] == "best" and x["label"] == "MEAN" and x["metric"] == "auroc"][0]
+    assert abs(mean["value"] - r["best_val_auroc_mean"]) < 1e-6      # scoring the run scores its chosen model
     main_multilabel.main(argv)                                       # rerunning continues: nothing left to do
-    assert json.load(open(root / "results.json"))["stages"]["linear"]["n_trials"] == 3
+    assert json.load(open(root / "results.json"))["best_val_auroc_mean"] == r["best_val_auroc_mean"]
     with pytest.raises(ValueError, match="other arguments"):         # but not with other arguments
         main_multilabel.main(argv + ["--prs_var", "3.0"])
+
+
+def test_each_grid_point_trains_as_a_model_of_its_own(tmp_path):
+    """A grid column follows exactly the path a model with that prior variance alone would take
+    (its penalty and learning rate), so the grid is K runs in one pass over the genotypes."""
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, dm, grid = _build(data_dir, wide="only", prs_var=1.0, prs_grid=[0.3, 3.0], wide_kappa=0.1)
+    singles = [_build(data_dir, wide="only", prs_var=t, wide_kappa=0.1)[2] for t in (0.3, 3.0)]
+    x_all, y = _batch(dm)[:2]
+    opts = [m.configure_optimizers() for m in [grid] + singles]
+    for _ in range(6):
+        for m, opt in zip([grid] + singles, opts):
+            def closure(m=m, opt=opt):                   # what training_step returns (summed over grid points)
+                opt.zero_grad()
+                yy = y.repeat(1, m.n_grid) if m.grid else y
+                loss = (m.loss_fn(m(x_all), yy)[0] + m.penalty()) * m.n_grid
+                loss.backward()
+                return loss
+            m.optimizer_step(0, 0, opt, closure)         # the model's own step (per-column rates)
+    n = grid.n_labels
+    for k, single in enumerate(singles):
+        cols = slice(k * n, (k + 1) * n)
+        for wg, ws in zip(grid.prs, single.prs):
+            assert torch.allclose(wg[:, cols], ws, rtol=1e-4, atol=1e-7)
+        assert torch.allclose(grid.intercept[cols], single.intercept, rtol=1e-5, atol=1e-7)
+        assert torch.allclose(grid.cov_linear[:, cols], single.cov_linear, rtol=1e-4, atol=1e-7)
+    with pytest.raises(ValueError, match="needs --wide only"):
+        _build(data_dir, wide="on", prs_grid=[0.3, 3.0])
 
 
 def test_a_search_replaces_trials_a_crash_left_running(tmp_path):

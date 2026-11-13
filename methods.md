@@ -419,6 +419,24 @@ weights (about 0.6 GB of GPU memory with the optimiser's state) and one matrix p
 which is negligible next to the encoders. Its penalty and learning rate are described in
 sections 5.2 and 6, and how its settings are chosen in section 8.
 
+**Several prior variances in one pass** (`--prs_grid`, with `--wide only`). The linear model can
+be trained for K prior variances τ_1 … τ_K at once: the path then has K × n outputs (column
+k·n + j is disease *j* under τ_k), each with its own weights, penalty (τ_k in place of τ) and
+learning rate (the rule of section 6 at τ_k, applied by scaling each column's AdamW update by
+τ_k/τ), and the training objective is the sum of the K models' objectives. Since the diseases
+and the grid points share no parameter, every column follows exactly the path that a model
+with that τ alone would follow on the same batches (checked to 10⁻⁴ in the tests), so K models
+cost one pass over the genotypes, which is what a step of the linear model costs. At every
+validation pass each disease is scored at every grid point, and each disease keeps the weights
+of its best grid point and pass so far. The run's model is then the linear model that takes,
+for every disease, its own best prior variance and pass: the per-disease tuning that the
+polygenic-score comparators also receive (a threshold, a penalty or a heritability chosen per
+disease on the tuning set). It is written as a run of its own (`per_disease/` inside the grid
+run) and scored again on the tuning set, which reproduces the AUROC each disease was chosen by.
+Before this, one τ was searched for all diseases together; on the simulated traits (section
+8) the trait with 20 causal SNPs and heritability 0.3 trailed the others relative to GBLUP, which
+had each trait's own heritability.
+
 ## 5. Training objective
 
 ### 5.1 Batches
@@ -494,8 +512,8 @@ and γ = 0 the loss is exactly that of published DeepGP.
 **Ridge penalty of the PRS weights** (section 4.10). The PRS weights carry a ridge penalty,
 added to the loss rather than applied as decoupled weight decay, so that the trained PRS
 approximates the posterior mode under a normal prior: θ_sj ~ N(0, τ), so that each SNP's effect
-on the logit scale has prior variance τ/M and the whole PRS prior variance τ (`--prs_var`,
-searched in every run, section 8). For a loss averaged over the N training participants the
+on the logit scale has prior variance τ/M and the whole PRS prior variance τ (`--prs_var`;
+chosen per disease from a grid in every run, sections 4.10 and 8). For a loss averaged over the N training participants the
 posterior mode carries the penalty Σ_s θ_sj² / (2Nτ). The class weights, however, make a
 disease's loss as curved as if it held more information than it does: at the base-rate
 solution, the weighted loss's curvature is π′(1 − π′), with π′ = π c(1)/Z the weighted share of
@@ -557,11 +575,18 @@ Three switches exist so that the choices above can be tested rather than assumed
   lr_θ = κ τ √B / (r̄ √M), with B the effective batch size and r̄ the geometric mean of the
   r_j; under this rule the noise depends on κ alone, and the weights settle in about 1/κ
   epoch-equivalents whatever the training size, the number of SNPs or the batch size (derived
-  from Adam's per-weight step, and checked by simulation in the design review; κ about 0.03
-  for long runs). κ (`--wide_kappa`) is searched in every run. The PRS weights, the covariate
+  from Adam's per-weight step, and checked by simulation in the design review). κ = 0.1
+  (`--wide_kappa`; settled in about 10 epoch-equivalents on the simulated traits); the linear
+  stage of a run's search lets the rates fall on a cosine to zero over its budget, which removes
+  most of the noise that remains at a constant rate. The PRS weights, the covariate
   weights with the intercepts, and the network form three parameter groups of one AdamW
   optimiser: the network keeps its learning rate and weight decay, the other two have no
-  decoupled weight decay (the PRS weights have their ridge penalty instead).
+  decoupled weight decay (the PRS weights have their ridge penalty instead). With a grid
+  (section 4.10) the objective is summed over grid points, not averaged, so that every grid
+  point's weights receive the gradient a model of its own would: AdamW divides by the square
+  root of the gradient's running second moment plus a small constant (10⁻⁸), and gradients
+  shrunk by the number of grid points would come close to that constant for the smallest prior
+  variances.
 
 **Measured at full size** (one 48 GB GPU; model width 32, one layer; 1,258,200 SNPs; the
 analysis `widedeepgp-pilot` in DeepWideGP-Scripts, branch `widening`). The largest batch is 21
@@ -589,8 +614,8 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
 - **Snapshots.** The weights are also saved at steps evenly spaced on a logarithmic axis (six
   per tenfold increase; eight in the pilot) and at every epoch-equivalent, at most 40 per trial
   (the regular ones are thinned first), with the number of updates, participants seen and
-  training time of each. After a run's search only the chosen trial and the first stage's best
-  keep their weights; every trial keeps its records. Every snapshot can be scored afterwards, which gives
+  training time of each. After a run's search only the chosen trial and the first stage's
+  per-disease model keep their weights; every trial keeps its records. Every snapshot can be scored afterwards, which gives
   performance as a function of training compute, and allows the best snapshot to be read off
   for each disease separately as a secondary analysis.
 - **Fixed tables are not saved.** Position tables and annotation matrices are functions of the
@@ -623,24 +648,30 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
 
 Every run tunes itself (Robert's decision of 12 November 2026): the best settings change with
 the size of the training set, which the scaling study varies. A run, for one dataset and
-training set, is a search in two stages, each a set of ordinary training runs (trials) proposed
-by Optuna's tree-structured Parzen estimator (Akiba et al., 2019) and scored by their best mean
-tuning AUROC:
+training set, is a search in two stages:
 
-1. **The linear model alone** (`--wide only`; 8 trials by default). Searched: the PRS prior
-   variance τ (10⁻² to 30, log scale), the pace κ of the PRS weights (0.01 to 0.3, log scale)
-   and the learning rate of the covariate weights and intercepts. Batches of 256, one validation
-   per epoch-equivalent and twice the run's budget of epoch-equivalents (60 by default), with
-   no pruning: the PRS weights settle slowly, so early validations would judge them unfairly.
-2. **The network on top** (`--wide on`; 12 trials). Every trial starts from the first stage's
-   best linear model with its PRS weights fixed (the covariate weights and intercepts keep
-   learning) and searches the network's learning rate, weight decay and embedding dropout.
-   Asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the
-   trials whose mean tuning AUROC trails at each rung.
+1. **The linear model alone** (`--wide only`), one training run over a grid of prior variances
+   (section 4.10; by default τ = 0.03, 0.1, 0.3, 1, 3, 10 and 30, half-decade steps over the
+   range a disease's PRS can take, from a liability-scale heritability of a few percent to well
+   over one half). Each disease keeps its best τ and validation pass, by tuning AUROC. Batches
+   of 256, one validation per epoch-equivalent but at most one per 20,000 participants, the run's
+   budget (30 epoch-equivalents and at least 128,000 participants), the learning rates on a
+   cosine to zero over that budget, and early stopping after ten passes without improvement.
+   Nothing else is searched: κ and the learning rate of the covariate weights and intercepts
+   (10⁻², so that they reach their optimum within the 500 updates of the smallest training
+   sets) only set how fast the same optimum is reached.
+2. **The network on top** (`--wide on`; 12 trials by default), each an ordinary training run
+   proposed by Optuna's tree-structured Parzen estimator (Akiba et al., 2019). Every trial
+   starts from the first stage's per-disease model with its PRS weights fixed (the covariate
+   weights and intercepts keep learning) and searches the network's learning rate, weight decay
+   and embedding dropout. Asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et
+   al., 2020) stops the trials whose mean tuning AUROC trails at each rung.
 
 The run's model is the second stage's best trial if its mean tuning AUROC is strictly higher
-than the first stage's best, and the first stage's otherwise, so the network is reported only
-where it adds to the linear model. Every run therefore also yields the linear model's result
+than the first stage's per-disease model's, and the first stage's otherwise, so the network is
+reported only where it adds to the linear model. The first stage's value is the mean over
+diseases of each one's best, chosen among grid points and passes, while the second stage's is
+the best of its trials' mean; the comparison therefore leans slightly towards the linear model. Every run therefore also yields the linear model's result
 at its training size. With `--wide off` the search is the second stage alone, without the
 linear path; with `--wide only`, the first stage alone. Trials use the run's seed; each
 worker's sampler is seeded with the run's seed plus the worker's index. Trials run in parallel,
@@ -679,7 +710,7 @@ confidence intervals and calibration are outside this document.
 | Validation metric | Mean of per-batch AUROCs | AUROC of each disease over the whole tuning set; their mean for stopping |
 | Validation schedule | Every 300 batches | Four times per epoch-equivalent, but at most once per 20,000 participants and at least once per epoch-equivalent |
 | Saved models | The best | The best, the last, and snapshots along training |
-| Hyper-parameters | Set by hand | Searched inside every run with Optuna: the linear model first, then the network on top |
+| Hyper-parameters | Set by hand | Chosen inside every run: the linear model's prior variance per disease from a grid, then the network on top with Optuna |
 | Precision and memory | 32-bit; all chromosomes' activations held | bf16 encoders with 32-bit pooling, head and loss (adopted for full-size runs after the pilot); optional per-chromosome checkpointing |
 
 **Unchanged:** the dosage input and its standardisation, the convolutional and positional

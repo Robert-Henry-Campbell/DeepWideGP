@@ -5,10 +5,11 @@
         --exp_name <run> --final_pool atten --d_model 32 --e_layers 1 --batch_size 16 ...
 
 A run tunes itself (widedeepgp/tuning.py), on the free GPUs minus one: first the linear model
-alone (PRS and covariates; --tune_trials_linear settings, 8 by default), then the deep network
-on top of its PRS (--tune_trials, 12), keeping whichever is better on the tuning set.
---tune_trials 0 trains the given settings once, on the GPU this process sees. The linear PRS
-path is on by default (--wide on; 'off' is the network alone, 'only' the PRS and covariates).
+alone (PRS and covariates) at every prior variance of --prs_grid in one pass, each disease
+keeping its best, then the deep network on top of that PRS (--tune_trials settings, 12 by
+default), keeping whichever is better on the tuning set. --tune_trials 0 trains the given
+settings once, on the GPU this process sees. The linear PRS path is on by default (--wide on;
+'off' is the network alone, 'only' the PRS and covariates).
 
 The dataset is <data_dir>/<label>/<rd_mode>/ in the genotype-store layout; when its store.json
 names "labels", every named label is predicted (or the subset given with --labels). SNPs are
@@ -34,7 +35,7 @@ _UNSET = "<not given>"
 SEED = 1                                      # the project's single seed (the pilot, its control and tuning used it)
 # what main_multilabel.py sets unless the command line says otherwise (the shared parser's own
 # defaults are kept for main_genome.py)
-DEFAULTS = {"--seed": str(SEED), "--wide": "on", "--tune_trials": "12", "--tune_trials_linear": "8",
+DEFAULTS = {"--seed": str(SEED), "--wide": "on", "--wide_kappa": "0.1", "--tune_trials": "12",
             "--tune_gpus": "auto", "--val_min_participants": "20000", "--val_max_epoch_equiv": "1",
             "--min_participants": "128000", "--snapshots_per_decade": "6", "--snapshots_max": "40"}
 
@@ -42,8 +43,8 @@ DEFAULTS = {"--seed": str(SEED), "--wide": "on", "--tune_trials": "12", "--tune_
 def parse_args(argv=None):
     """The parser of args_generator.py with the multi-disease defaults: datasets under
     pukb/genes, attention pooling, SNP statistics of the training split, and DEFAULTS (seed 1,
-    the linear PRS path, tuning in every run, validation and budget floors for small training
-    sets, at most 40 snapshots). The parser's own defaults are kept for main_genome.py."""
+    the linear PRS path with its weights settling in about 10 epoch-equivalents, tuning in every
+    run, validation and budget floors for small training sets, at most 40 snapshots). The parser's own defaults are kept for main_genome.py."""
     argv = sys.argv[1:] if argv is None else list(argv)
     lead = ["--snp_stats", _UNSET]
     for flag, value in DEFAULTS.items():

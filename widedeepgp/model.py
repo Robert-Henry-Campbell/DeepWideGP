@@ -128,6 +128,17 @@ class WideDeepGP(pl.LightningModule):
         if self.wide != "off" and hp.get("loss_outputs", "all") == "target":
             raise ValueError("the linear PRS path's penalty assumes every output learns from every batch "
                              "(--loss_outputs all)")
+        # --prs_grid: one linear model per prior variance, side by side (see wide_logits); outputs
+        # are grid-major, column k * n_labels + j being disease j under the k-th variance
+        self.grid = [float(t) for t in (hp.get("prs_grid") or [])]
+        if self.grid and self.wide != "only":
+            raise ValueError("--prs_grid trains one linear model per prior variance side by side; it needs --wide only")
+        if any(not t > 0 for t in self.grid):
+            raise ValueError("--prs_grid: prior variances must be positive")
+        self.n_grid = max(1, len(self.grid))
+        self.n_out = self.n_labels * self.n_grid
+        self.out_names = (list(self.label_names) if not self.grid else
+                          [f"{name}@{t:g}" for t in self.grid for name in self.label_names])
         self.bf16 = hp.get("precision", "32") == "bf16"
         self.grad_ckpt = bool(hp.get("grad_ckpt", False))
         # Mamba-3's backward reads its saved tensors more than once, which the non-reentrant
@@ -164,10 +175,25 @@ class WideDeepGP(pl.LightningModule):
         if self.wide != "off":
             self.n_snps = int(sum(len(p) for p in pos))
             self.prs_scale = 1.0 / math.sqrt(self.n_snps)
-            self.prs = nn.ParameterList([nn.Parameter(torch.zeros(len(p), self.n_labels)) for p in pos])
+            self.prs = nn.ParameterList([nn.Parameter(torch.zeros(len(p), self.n_out)) for p in pos])
             if self.use_cov:
-                self.cov_linear = nn.Parameter(torch.zeros(int(hp["n_cov"]), self.n_labels))
-            self.intercept = nn.Parameter(torch.zeros(self.n_labels))    # set to the weighted base rate below
+                self.cov_linear = nn.Parameter(torch.zeros(int(hp["n_cov"]), self.n_out))
+            self.intercept = nn.Parameter(torch.zeros(self.n_out))       # set to the weighted base rate below
+            # with a grid, the PRS weights' update in column c is scaled by s_c = tau_k / prs_var
+            # (optimizer_step): the learning rate the rule sets for tau_k (train.wide_hparams)
+            self.register_buffer("prs_col_scale", torch.tensor(
+                [t / float(hp.get("prs_var", 1.0)) for t in self.grid for _ in self.label_names],
+                dtype=torch.float32) if self.grid else None, persistent=False)
+            if self.grid:                                # per disease: the best grid point and validation so far
+                self.register_buffer("best_auroc", torch.full((self.n_labels,), float("-inf"), dtype=torch.float64))
+                self.register_buffer("best_k", torch.full((self.n_labels,), -1, dtype=torch.long))
+                self.register_buffer("best_step", torch.full((self.n_labels,), -1, dtype=torch.long))
+                self.register_buffer("best_samples", torch.zeros(self.n_labels, dtype=torch.long))
+                for i, p in enumerate(pos):
+                    self.register_buffer(f"best_prs_{i}", torch.zeros(len(p), self.n_labels))
+                if self.use_cov:
+                    self.register_buffer("best_cov", torch.zeros(int(hp["n_cov"]), self.n_labels))
+                self.register_buffer("best_intercept", torch.zeros(self.n_labels))
             if self.wide == "on":
                 # the deep part starts at zero (no random numbers drawn), so the model starts as
                 # the linear model and the deep part only adds what training gives it
@@ -202,14 +228,20 @@ class WideDeepGP(pl.LightningModule):
                                  "(has the annotation file been rewritten?)")
 
         # a model saved before case_share was recorded was trained on even batches: exactly half cases
-        self.loss_fn = WideLoss(counts=hp["label_counts"], gamma=float(hp["gamma"]), w_max=float(hp["w_max"]),
+        counts = hp["label_counts"]
+        if self.grid:                                    # every grid point has the diseases' own constants
+            counts = {"cases": list(counts["cases"]) * self.n_grid, "non_cases": list(counts["non_cases"]) * self.n_grid,
+                      "n": counts["n"]}
+        self.loss_fn = WideLoss(counts=counts, gamma=float(hp["gamma"]), w_max=float(hp["w_max"]),
                                 sampler=hp["sampler"], correction=bool(hp["sampling_correction"]),
                                 outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)))
         self.lr, self.l2 = float(hp["lr"]), float(hp["l2"])
         self.lr_wide = float(hp.get("lr_wide") or 0.0)
         if self.wide != "off":
-            self.register_buffer("prs_lambda", prs_penalty(self.loss_fn, int(hp["label_counts"]["n"]),
-                                                           float(hp.get("prs_var", 1.0))), persistent=False)
+            lam = prs_penalty(self.loss_fn, int(hp["label_counts"]["n"]), float(hp.get("prs_var", 1.0)))
+            if self.grid:                                # r / (2 n tau_k) in column c, with tau_k = s_c * prs_var
+                lam = lam / self.prs_col_scale
+            self.register_buffer("prs_lambda", lam, persistent=False)
             with torch.no_grad():                        # intercepts at the weighted base rate, logit(pi')
                 r = self.loss_fn.pi.double().clamp(1e-6, 1 - 1e-6)
                 pw = r * self.loss_fn.c1.double() / (r * self.loss_fn.c1.double() + 1.0 - r)
@@ -251,7 +283,8 @@ class WideDeepGP(pl.LightningModule):
         return logits if self.wide == "off" else logits.float() + self.wide_logits(x_all)
 
     def wide_logits(self, x_all):
-        """The linear PRS path's contribution [B, n_labels], in float32."""
+        """The linear PRS path's contribution [B, n_labels] (with a grid [B, n_grid * n_labels]),
+        in float32."""
         with torch.autocast("cuda", enabled=False):
             out = None
             for i in range(self.n_seq):
@@ -263,7 +296,7 @@ class WideDeepGP(pl.LightningModule):
             return out
 
     def prs_scores(self, x_all):
-        """Each person's PRS per label [B, n_labels] (the SNP part of the linear path)."""
+        """Each person's PRS per output [B, n_labels] (the SNP part of the linear path)."""
         with torch.autocast("cuda", enabled=False):
             return sum(x_all[i].reshape(x_all[i].shape[0], -1).float() @ self.prs[i]
                        for i in range(self.n_seq)) * self.prs_scale
@@ -307,6 +340,8 @@ class WideDeepGP(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x_all, y, target = batch
         logits = self(x_all)
+        if self.grid:                                    # every grid point learns every disease
+            y = y.repeat(1, self.n_grid)
         loss, per_label = self.loss_fn(logits, y, int(target))
         pen = self.penalty()
         if pen is not None:
@@ -324,7 +359,24 @@ class WideDeepGP(pl.LightningModule):
             self._train_sum += per_label.double()
             self._train_cnt += 1
         self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=False, batch_size=y.shape[0])
+        if self.grid:
+            # the sum over grid points (the loss is their mean): every grid point's weights then get
+            # the gradient a model of its own would, so Adam treats them alike (also near its epsilon)
+            return loss * self.n_grid
         return loss
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure=None):
+        """With a grid, the PRS weights' update in column c is scaled by s_c = tau_k / prs_var:
+        Adam's update is its learning rate times a ratio that does not depend on that rate, so
+        each grid point moves as a model trained alone at the rate the rule sets for its tau_k."""
+        if not self.grid or self.wide_freeze:
+            return super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
+        before = [w.detach().clone() for w in self.prs]
+        out = super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
+        with torch.no_grad():
+            for w, b in zip(self.prs, before):
+                w.sub_(b).mul_(self.prs_col_scale).add_(b)
+        return out
 
     def validation_step(self, batch, batch_idx):
         x_all, y = batch[0], batch[1]
@@ -336,24 +388,91 @@ class WideDeepGP(pl.LightningModule):
         logits = torch.cat([a for a, _ in self._val]).numpy()
         y = torch.cat([b for _, b in self._val]).numpy()
         self._val = []
-        m = M.per_label_metrics(logits, y, self.loss_fn.logit_shift.cpu().numpy(), self.label_names)
+        if self.grid:
+            m = M.per_label_metrics(logits, np.tile(y, (1, self.n_grid)), self.loss_fn.logit_shift.cpu().numpy(),
+                                    self.out_names)
+            self._grid_means(m)
+        else:
+            m = M.per_label_metrics(logits, y, self.loss_fn.logit_shift.cpu().numpy(), self.label_names)
         self.last_val_metrics = m
         self.log("val/auroc_mean", m["auroc_mean"], prog_bar=True)
         self.log("val/ap_mean", m["ap_mean"])
         self.log("val/bce_mean", m["bce_mean"])
         self.log("samples_seen", float(self.samples_seen))
-        for j, name in enumerate(self.label_names):
+        for j, name in enumerate(m["labels"]):
             for key in ("auroc", "ap", "bce"):
                 if not math.isnan(float(m[key][j])):
                     self.log(f"val_{key}/{name}", float(m[key][j]))
         if self._train_sum is not None:
             mean = (self._train_sum / self._train_cnt.clamp_min(1)).cpu().numpy()
             cnt = self._train_cnt.cpu().numpy()
-            for j, name in enumerate(self.label_names):
+            for j, name in enumerate(self.out_names):
                 if cnt[j] > 0:
                     self.log(f"train_loss/{name}", float(mean[j]))
             self._train_sum.zero_()
             self._train_cnt.zero_()
+
+    def _grid_means(self, m):
+        """With a grid: the means are over diseases, each at its best grid point in this pass
+        (by AUROC), and each disease's best grid point and pass so far is kept (best_*)."""
+        n, k = self.n_labels, self.n_grid
+        auc = np.asarray(m["auroc"], dtype=np.float64).reshape(k, n)
+        pick = np.full(n, -1)
+        for j in range(n):
+            if np.isfinite(auc[:, j]).any():
+                pick[j] = int(np.nanargmax(auc[:, j]))
+        ok = pick >= 0
+        cols = pick[ok] * n + np.flatnonzero(ok)
+        for key in ("auroc", "ap", "bce"):
+            v = np.asarray(m[key], dtype=np.float64)[cols]
+            v = v[np.isfinite(v)]
+            m[key + "_mean"] = float(v.mean()) if len(v) else (0.5 if key == "auroc" else float("nan"))
+        m["grid_pick"] = pick.tolist()
+        trainer = getattr(self, "_trainer", None)
+        if trainer is not None and trainer.sanity_checking:
+            return
+        step = int(trainer.global_step) if trainer is not None else -1
+        with torch.no_grad():
+            for j in np.flatnonzero(ok):
+                value = float(auc[pick[j], j])
+                if not value > float(self.best_auroc[j]):    # strictly better: a repeated pass changes nothing
+                    continue
+                c = int(pick[j]) * n + int(j)
+                for i in range(self.n_seq):
+                    getattr(self, f"best_prs_{i}")[:, j] = self.prs[i][:, c]
+                if self.use_cov:
+                    self.best_cov[:, j] = self.cov_linear[:, c]
+                self.best_intercept[j] = self.intercept[c]
+                self.best_auroc[j] = value
+                self.best_k[j] = int(pick[j])
+                self.best_step[j] = step
+                self.best_samples[j] = int(self.samples_seen)
+
+    def per_disease_state(self):
+        """With a grid: the weights of the model that takes, for every disease, its best grid
+        point and validation pass (as weights of a model without a grid), and a table of the
+        choices. A disease never scored (no cases in the tuning set) takes the grid
+        point nearest to prs_var at the end of training."""
+        n = self.n_labels
+        ref = int(np.argmin([abs(math.log(t / float(self.hp.get("prs_var", 1.0)))) for t in self.grid]))
+        state = {f"prs.{i}": getattr(self, f"best_prs_{i}").detach().clone().cpu() for i in range(self.n_seq)}
+        if self.use_cov:
+            state["cov_linear"] = self.best_cov.detach().clone().cpu()
+        state["intercept"] = self.best_intercept.detach().clone().cpu()
+        rows = []
+        for j, name in enumerate(self.label_names):
+            k = int(self.best_k[j])
+            if k < 0:                                    # never scored: the end of training, at the reference variance
+                c = ref * n + j
+                for i in range(self.n_seq):
+                    state[f"prs.{i}"][:, j] = self.prs[i][:, c].detach().cpu()
+                if self.use_cov:
+                    state["cov_linear"][:, j] = self.cov_linear[:, c].detach().cpu()
+                state["intercept"][j] = self.intercept[c].detach().cpu()
+            rows.append({"label": name, "prs_var": self.grid[k if k >= 0 else ref], "grid_index": k if k >= 0 else ref,
+                         "chosen": k >= 0, "step": int(self.best_step[j]), "samples_seen": int(self.best_samples[j]),
+                         "val_auroc": float(self.best_auroc[j]) if k >= 0 else float("nan")})
+        return state, rows
 
     def predict_step(self, batch, batch_idx):
         return self(batch[0]).float().cpu(), batch[1].float().cpu()
@@ -412,7 +531,7 @@ class WideDeepGP(pl.LightningModule):
         """
         own = self.state_dict()
         src = {k: v for k, v in state_dict.items() if not k.endswith("position_embedding.pe")
-               and not k.startswith("loss_fn.")}
+               and not k.startswith("loss_fn.") and not (k.startswith("best_") and k not in own)}
         skipped = []
         per_label = ("prs.", "cov_linear", "intercept")
         if self.wide != "only":

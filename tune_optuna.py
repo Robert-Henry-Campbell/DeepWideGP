@@ -43,13 +43,8 @@ from widedeepgp.train import run_training
 
 
 def suggest(trial, cfg, space):
-    # the two stages of the search inside every run (widedeepgp/tuning.py)
-    if space == "linear":                                # the linear model alone: ridge penalty and its pace
-        cfg.prs_var = trial.suggest_float("prs_var", 1e-2, 30.0, log=True)
-        cfg.wide_kappa = trial.suggest_float("wide_kappa", 1e-2, 3e-1, log=True)
-        cfg.lr = trial.suggest_float("lr", 3e-4, 1e-2, log=True)          # covariate weights and intercepts
-        return
-    if space == "deep":                                  # the deep network (on top of the fixed PRS)
+    if space == "deep":                                  # the search inside every run (widedeepgp/tuning.py):
+        #                                                  the deep network, on top of the fixed PRS
         cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
         cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)

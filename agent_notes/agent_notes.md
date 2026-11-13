@@ -726,3 +726,46 @@ Robert's decisions of 12–13 Nov (Opus 5.5 continuing the Fable session):
   (CPU run `runs/wide_gate/sim_linear_tau1_k0.1` under way), the joint stage on a GPU, then real
   labels at pilot size.
 - The architecture figure does not draw the PRS path yet.
+
+## 2026-11-13 (night, 00:40 UTC) — The linear stage becomes one grid run with a prior variance per disease
+
+Why: the first gate run of the linear model alone (CPU, `runs/wide_gate/sim_linear_tau1_k0.1`:
+τ = 1, κ = 0.1, constant rate, no search) tracked GBLUP on the four polygenic simulated traits
+but the 20-causal-SNP trait (heritability 0.3) stayed behind longest (−0.015 at 11
+epoch-equivalents, −0.006 at 22), and GBLUP had each trait's own heritability. One τ for all 30
+diseases would also tune the linear model less finely than the polygenic-score comparators,
+which each get a per-disease choice. And 8 Optuna trials of the linear model meant 8 passes over
+the genotypes per epoch, the expensive part at full size.
+
+### Code changes
+
+- `widedeepgp/model.py`: `prs_grid` (hp; `--prs_grid`, needs `--wide only`). The path then has
+  K × n outputs (grid-major: column k·n + j), the loss's constants tiled K times, penalty
+  r_j/(2Nτ_k) per column, and `optimizer_step` scales each column's AdamW update by τ_k/prs_var
+  (the rule's learning rate at τ_k); `training_step` returns the sum over grid points (the
+  logged loss stays their mean), so every column gets the gradient a model of its own would.
+  A first version reparametrised θ = sφ instead: then the φ gradients were shrunk by s/K, close
+  to AdamW's epsilon (1e-8) for small τ, and the test below caught 11% deviations. Validation
+  scores every column; `val/auroc_mean` (the monitor) is the mean over diseases of each one's best
+  column in that pass; buffers `best_*` keep, per disease, the weights of its best column and
+  pass so far (strict improvement, float64 AUROC); `per_disease_state()` returns them as weights
+  of a model without a grid.
+- `widedeepgp/train.py`: `parse_grid`; `wide_hparams` adds `prs_grid` (refused unless
+  `--wide only`); `write_per_disease` writes `<run>/per_disease/` (config.json, results.json,
+  per_disease.csv, checkpoints/best.ckpt hard-linked as last.ckpt), from the last checkpoint's
+  `best_*` buffers, and scores it on the tuning set again (`val_auroc_rescored`).
+- `widedeepgp/tuning.py`: the linear stage is one grid run (`linear_run`, `linear_stage`,
+  `linear_summary`; on the first picked GPU through a worker, or here), resumed from its last
+  checkpoint after a crash; default grid 0.03, 0.1, 0.3, 1, 3, 10, 30; covariate learning rate
+  1e-2; cosine to zero over the run's budget (30 epoch-equivalents, ≥128,000 participants); one
+  validation per epoch-equivalent but at most one per 20,000 participants; patience 10; one
+  snapshot. The joint stage starts from `linear/per_disease`. `--tune_trials_linear` removed (it
+  existed only in 9e69019); `tune_optuna.py` loses the "linear" space.
+- `main_multilabel.py`: `--wide_kappa 0.1` by default (the weights settle in about 10
+  epoch-equivalents; 0.03 left them unsettled within a cosine over 30).
+- Tests: `test_each_grid_point_trains_as_a_model_of_its_own` (6 AdamW steps through the model's
+  own `optimizer_step`: every column equals a separate model with its τ to 1e-4);
+  `test_a_run_tunes_itself` rewritten for the grid (choices match metrics.csv, rescoring matches,
+  the grid's weights deleted and the per-disease model kept, score_snapshots scores it). CPU
+  suite: 74 passed, 28 skipped (GPU).
+- methods.md sections 4.10, 5.2, 6, 7, 8, 10; README.

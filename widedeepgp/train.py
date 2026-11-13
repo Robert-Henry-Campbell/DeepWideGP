@@ -115,9 +115,23 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
     }
 
 
+def parse_grid(spec):
+    """--prs_grid as a sorted list of prior variances, or None ('none' or not given)."""
+    if spec is None or isinstance(spec, (list, tuple)):
+        return sorted({float(t) for t in spec}) if spec else None
+    spec = str(spec).strip()
+    if not spec or spec.lower() == "none":
+        return None
+    return sorted({float(t) for t in spec.split(",") if t.strip()})
+
+
 def wide_hparams(cfg, dm):
-    """Settings of the linear PRS path; its learning rate follows from --wide_kappa unless given."""
+    """Settings of the linear PRS path; its learning rate follows from --wide_kappa unless given
+    (for prs_var: with a grid, each grid point's follows from the same rule, model.prs_col_scale)."""
     wide = getattr(cfg, "wide", "off") or "off"
+    grid = parse_grid(getattr(cfg, "prs_grid", None))
+    if grid and wide != "only":
+        raise ValueError("--prs_grid trains one linear model per prior variance side by side; it needs --wide only")
     if wide == "off":
         return {}
     from .losses import WideLoss
@@ -129,7 +143,8 @@ def wide_hparams(cfg, dm):
         lr_wide = wide_learning_rate(kappa, tau, int(cfg.batch_size) * max(1, int(cfg.accumulate)),
                                      curvature_ratios(loss), int(sum(dm.seq_len)))
     return {"prs_var": tau, "wide_kappa": kappa, "lr_wide": float(lr_wide),
-            "wide_freeze": bool(getattr(cfg, "wide_freeze", False)), "snp_stats": getattr(cfg, "snp_stats", None)}
+            "wide_freeze": bool(getattr(cfg, "wide_freeze", False)), "snp_stats": getattr(cfg, "snp_stats", None),
+            "prs_grid": grid}
 
 
 def build_model(cfg, dm, sched=None):
@@ -320,6 +335,51 @@ def check_resume_tables(ckpt_path, hp, loss=None):
                                  "--init_from starts a new run from its weights instead")
 
 
+def write_per_disease(model, dm, run_dir, config, step, device):
+    """The model of a grid run (--prs_grid): every disease at its own best prior variance and
+    validation pass. Written as a run of its own, <run_dir>/per_disease/ (config.json,
+    results.json, per_disease.csv, checkpoints/best.ckpt and last.ckpt, one file), so that
+    score_snapshots.py and --init_wide_from read it as any run; scored once more on the tuning
+    set, which reproduces the AUROC each disease was chosen with."""
+    state, rows = model.per_disease_state()
+    hp = dict(model.hp, prs_grid=None, prs_var_per_label=[r["prs_var"] for r in rows], selected_from_grid=model.grid)
+    pd_model = WideDeepGP(hp, dm.pos_chr)
+    full = pd_model.state_dict()
+    full.update(state)
+    pd_model.load_state_dict(full)
+    pd_model.samples_seen = int(model.samples_seen)
+    pd_model.to(device)
+    logits, y = predict_split(pd_model, dm, "val", device)
+    m = M.per_label_metrics(logits, y, pd_model.loss_fn.logit_shift.cpu().numpy(), pd_model.label_names)
+    n_train = int(config["n_train"])
+    for j, r in enumerate(rows):
+        r.update(epoch_equiv=round(r["samples_seen"] / n_train, 6), val_auroc_rescored=float(m["auroc"][j]))
+    pd_dir = os.path.join(run_dir, "per_disease")
+    os.makedirs(os.path.join(pd_dir, "checkpoints"), exist_ok=True)
+    best = os.path.join(pd_dir, "checkpoints", "best.ckpt")
+    torch.save({"state_dict": {k: v.detach().cpu() for k, v in pd_model.state_dict().items()},
+                "hyper_parameters": {"hp": hp}, "global_step": int(step), "samples_seen": int(model.samples_seen),
+                "per_disease": rows, "pytorch-lightning_version": pl.__version__}, best)
+    last = os.path.join(pd_dir, "checkpoints", "last.ckpt")
+    if os.path.exists(last):
+        os.remove(last)
+    os.link(best, last)                                  # one file: there is nothing to resume
+    with open(os.path.join(pd_dir, "config.json"), "w") as f:
+        json.dump(dict(config, model=hp, per_disease_of=os.path.abspath(run_dir)), f, indent=1)
+    with open(os.path.join(pd_dir, "per_disease.csv"), "w") as f:
+        keys = list(rows[0])
+        f.write(",".join(keys) + "\n")
+        f.writelines(",".join(str(r[k]) for k in keys) + "\n" for r in rows)
+    res = {"run_dir": pd_dir, "best_checkpoint": best, "best_val_auroc_mean": float(m["auroc_mean"]),
+           "val": {name: {k: float(m[k][j]) for k in ("auroc", "ap", "bce")} for j, name in enumerate(m["labels"])},
+           "val_mean": {k: float(m[k + "_mean"]) for k in ("auroc", "ap", "bce")}, "per_disease": rows,
+           "prs_grid": model.grid, "samples_seen": int(model.samples_seen)}
+    with open(os.path.join(pd_dir, "results.json"), "w") as f:
+        json.dump(res, f, indent=1)
+    return {"per_disease_dir": pd_dir, "per_disease_checkpoint": best,
+            "per_disease_val_auroc_mean": float(m["auroc_mean"]), "per_disease": rows}
+
+
 def run_training(cfg, trial=None, extra_callbacks=()):
     """Train one model. Returns a dict with the run directory, the best mean validation AUROC,
     per-label validation metrics of the best checkpoint and the validation history."""
@@ -416,6 +476,12 @@ def run_training(cfg, trial=None, extra_callbacks=()):
            "gpu_peak_train_gib": round(runlog.peak_train_bytes / 2 ** 30, 3),
            "gpu_peak_val_gib": round(runlog.peak_val_bytes / 2 ** 30, 3),
            "n_parameters": int(n_params)}
+    if model.grid:
+        # the grid's own best checkpoint holds every grid point; the run's model is the one that
+        # takes each disease's best grid point and pass, from the end of training's best_* buffers
+        last = torch.load(last_checkpoint(ckpt_dir), map_location="cpu", weights_only=False)
+        model.load_state_dict(last["state_dict"])
+        out.update(write_per_disease(model, dm, run_dir, config, int(last.get("global_step", 0)), device))
     with open(os.path.join(run_dir, "results.json"), "w") as f:
         json.dump(out, f, indent=1)
     flat = {k: v for k, v in model.hp.items() if isinstance(v, (str, int, float, bool))}

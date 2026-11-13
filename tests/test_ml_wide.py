@@ -1,0 +1,309 @@
+"""The linear PRS path (--wide) and the search inside every run (widedeepgp/tuning.py).
+
+Everything runs on the CPU except the tests marked gpu (the Mamba kernels): the linear path
+alone (--wide only) has no encoder. The learning check is marked slow (a few minutes on the CPU).
+    python -m pytest tests/test_ml_wide.py -q
+"""
+import json
+import os
+
+import numpy as np
+import pytest
+import torch
+
+from ml_helpers import have_fork, make_cfg, synthetic_dataset
+
+gpu = pytest.mark.skipif(not (torch.cuda.is_available() and have_fork()),
+                         reason="needs a GPU and the Vision-Mamba fork of mamba_ssm (the published block)")
+
+
+def _build(data_dir, **over):
+    from genostore.datamodule import SNPStoreDataModule
+    from widedeepgp.train import build_model, schedule, train_labels
+    cfg = make_cfg(data_dir, "multi", **over)
+    dm = SNPStoreDataModule(cfg)
+    return cfg, dm, build_model(cfg, dm, schedule(cfg, len(train_labels(dm))))
+
+
+def _batch(dm):
+    return dm.decode_batch(next(iter(dm._loader(dm._dataset(dm.splits["train"]), False))))
+
+
+def test_the_linear_path_is_a_prs_plus_covariates(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, dm, model = _build(data_dir, wide="only")
+    x_all, y = _batch(dm)[:2]
+    assert model.n_snps == 154 and sum(w.numel() for w in model.prs) == 154 * model.n_labels
+    pi, c1 = model.loss_fn.pi.double(), model.loss_fn.c1.double()
+    pw = pi * c1 / (pi * c1 + 1 - pi)
+    assert torch.allclose(model.intercept.double(), torch.log(pw / (1 - pw)), atol=1e-6)   # the weighted base rate
+    with torch.no_grad():
+        assert torch.equal(model(x_all), model.intercept.expand(len(y), -1))     # the PRS and covariates start at zero
+        for w in model.prs:
+            w.normal_()
+        model.cov_linear.normal_()
+        model.intercept.normal_()
+        prs = sum(x_all[i].squeeze(-1) @ model.prs[i] for i in range(model.n_seq)) / np.sqrt(model.n_snps)
+        assert torch.allclose(model(x_all), model.intercept + prs + x_all[-1] @ model.cov_linear, atol=1e-5)
+        assert torch.allclose(model.prs_scores(x_all), prs, atol=1e-5)
+
+
+def test_the_ridge_penalty(tmp_path):
+    from widedeepgp.model import prs_penalty
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, _, model = _build(data_dir, wide="only", prs_var=0.2)
+    n = int(model.hp["label_counts"]["n"])
+    pi, c1 = model.loss_fn.pi.double(), model.loss_fn.c1.double()
+    pw = pi * c1 / (pi * c1 + 1 - pi)
+    expect = (pw * (1 - pw)) / (pi * (1 - pi)) / (2 * n * 0.2)
+    assert torch.allclose(model.prs_lambda.double(), expect, rtol=1e-6)
+    order = torch.argsort(pi)
+    assert model.prs_lambda[order[0]] > model.prs_lambda[order[-1]]           # the rarest label is shrunk most
+    assert torch.allclose(prs_penalty(model.loss_fn, n, 0.8), model.prs_lambda / 4)
+    with torch.no_grad():
+        for w in model.prs:
+            w.fill_(0.5)
+    sq = torch.full((model.n_labels,), 0.25 * model.n_snps)
+    assert torch.allclose(model.penalty(), (model.prs_lambda * sq).mean())
+
+
+
+def test_the_penalty_correction_is_the_curvature_ratio():
+    """At the base-rate solution a label's class-weighted loss is r = c/Z^2 times as curved as the
+    unweighted likelihood (section 5.2 of methods.md), the factor the ridge penalty carries."""
+    import math
+    from widedeepgp.losses import WideLoss
+    from widedeepgp.model import curvature_ratios
+    g = torch.Generator().manual_seed(1)
+    n, m = 20000, 4
+    x = torch.randn(n, m, generator=g)
+    for prevalence in (0.04, 0.1, 0.3):
+        y = (torch.rand(n, 1, generator=g) < prevalence).float()
+        cases = float(y.sum())
+        loss = WideLoss(counts={"cases": [cases], "non_cases": [n - cases], "n": n}, sampler="shuffled")
+        pi, c = float(loss.pi[0]), float(loss.c1[0])
+        pw = pi * c / (pi * c + 1 - pi)
+        weighted = lambda w: loss((math.log(pw / (1 - pw)) + x @ w).unsqueeze(1), y, 0)[0]
+        plain = lambda w: torch.nn.functional.binary_cross_entropy_with_logits(math.log(pi / (1 - pi)) + x @ w, y[:, 0])
+        hw = torch.autograd.functional.hessian(weighted, torch.zeros(m)).diagonal().sum()
+        hp = torch.autograd.functional.hessian(plain, torch.zeros(m)).diagonal().sum()
+        assert float(hw / hp) == pytest.approx(float(curvature_ratios(loss)[0]), rel=0.05)
+
+def test_the_optimiser_groups(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    for mode, n_groups in (("only", 2), ("on", 3)):
+        _, _, model = _build(data_dir, wide=mode, lr=3e-4, lr_wide=2e-2, l2=1e-4)
+        opt = model.configure_optimizers()
+        groups = (opt["optimizer"] if isinstance(opt, dict) else opt).param_groups
+        assert len(groups) == n_groups
+        if mode == "on":                                 # the deep network first: RunLog reports its rate
+            assert (groups[0]["lr"], groups[0]["weight_decay"]) == (3e-4, 1e-4)
+        assert (groups[-2]["lr"], groups[-2]["weight_decay"]) == (3e-4, 0.0)      # covariate weights, intercepts
+        assert {id(p) for p in groups[-1]["params"]} == {id(p) for p in model.prs}
+        assert (groups[-1]["lr"], groups[-1]["weight_decay"]) == (2e-2, 0.0)      # the PRS: own rate, ridge in the loss
+        assert sum(p.numel() for g in groups for p in g["params"]) == sum(p.numel() for p in model.parameters())
+
+
+def test_older_weights_load_with_the_path_at_zero(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, _, old = _build(data_dir, wide="off")
+    _, _, new = _build(data_dir, wide="on")
+    left = new.load_weights(old.state_dict())
+    assert left and all(k.startswith(("prs.", "cov_linear", "intercept")) for k in left)
+    assert all(float(w.abs().sum()) == 0 for w in new.prs) and float(new.cov_linear.abs().sum()) == 0
+    assert float(new.intercept.abs().sum()) == 0                     # the old head holds the intercepts
+    a, b = old.state_dict(), new.state_dict()
+    assert all(torch.equal(a[k], b[k]) for k in a if not k.startswith("loss_fn."))
+
+
+def test_the_path_starts_afresh_for_other_diseases(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, _, ab = _build(data_dir, wide="only", labels="solo_d,null_f")
+    _, _, ba = _build(data_dir, wide="only", labels="null_f,solo_d")
+    with torch.no_grad():
+        for w in ab.prs:
+            w.fill_(1.0)
+    left = ba.load_weights(ab.state_dict(), allow_new_head=True, source_labels=ab.label_names)
+    assert {k.split(".")[0] for k in left} == {"prs", "cov_linear", "intercept"}
+    assert all(float(w.abs().sum()) == 0 for w in ba.prs)
+
+
+def test_combinations_that_are_refused(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    with pytest.raises(ValueError, match="every output learns"):
+        _build(data_dir, wide="on", loss_outputs="target")
+    with pytest.raises(ValueError, match="wide must be one of"):
+        _build(data_dir, wide="sideways")
+
+
+def test_validation_interval_and_budget_floors():
+    from widedeepgp.train import schedule
+    cfg = make_cfg("x", "x", batch_size=16, accumulate=4, val_per_epoch=4.0, max_epoch_equiv=30.0)
+    assert schedule(cfg, 2160)["batches_per_validation"] == 36       # a quarter of 135, in whole optimiser steps
+    full = schedule(cfg, 215872)
+    cfg.val_min_participants, cfg.min_participants = 20000, 400000
+    s = schedule(cfg, 2160)
+    assert s["batches_per_validation"] * 16 >= 20000 and s["batches_per_validation"] % 4 == 0
+    assert s["validations"] * s["batches_per_validation"] * 16 >= 400000
+    assert schedule(cfg, 215872) == full                             # at full size the floors do nothing
+    cfg.val_max_epoch_equiv = 1.0                                    # but never fewer than one pass per epoch-equivalent
+    assert schedule(cfg, 2160)["batches_per_validation"] == 136      # 135 batches, in whole optimiser steps
+
+
+def test_snapshot_cap():
+    from widedeepgp.callbacks import snapshot_steps
+    steps = snapshot_steps(100000, per_decade=6, every=3000)
+    capped = snapshot_steps(100000, per_decade=6, every=3000, max_count=40)
+    assert len(steps) > 40 >= len(capped) and 100000 in capped
+    assert set(snapshot_steps(100000, per_decade=6)) <= set(capped)  # every log-spaced step is kept
+
+
+def test_the_multi_disease_defaults():
+    import main_multilabel
+    from args_generator import args_initial
+    cfg = main_multilabel.parse_args(["--label", "x"])
+    assert (cfg.wide, cfg.tune_trials, cfg.tune_trials_linear, cfg.tune_gpus, cfg.val_min_participants,
+            cfg.val_max_epoch_equiv, cfg.min_participants, cfg.snapshots_per_decade, cfg.snapshots_max, cfg.seed) == \
+        ("on", 12, 8, "auto", 20000, 1.0, 128000, 6, 40, 1)
+    cfg = main_multilabel.parse_args(["--label", "x", "--wide", "off", "--tune_trials", "0"])
+    assert (cfg.wide, cfg.tune_trials) == ("off", 0)
+    legacy = args_initial(["--label", "x", "--rd_mode", "x"])       # the published script's parser is unchanged
+    assert (legacy.wide, legacy.tune_trials, legacy.gpus, legacy.snapshots_per_decade) == ("off", 0, 1, 8)
+
+
+def test_a_run_tunes_itself(tmp_path):
+    import main_multilabel
+    import score_snapshots
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    argv = ["--data_dir", data_dir, "--label", "multi", "--rd_mode", "store", "--d_model", "16", "--n_heads", "4",
+            "--num_workers", "0", "--batch_size", "16", "--run_dir", str(tmp_path / "runs"), "--experiment", "t",
+            "--exp_name", "r", "--wide", "only", "--tune_trials_linear", "3", "--max_epoch_equiv", "1",
+            "--stop_patience", "0"]
+    root = tmp_path / "runs" / "t" / "r"
+    main_multilabel.main(argv)
+    with open(root / "results.json") as f:
+        r = json.load(f)
+    lin = r["stages"]["linear"]
+    assert r["tuning"] and r["chosen_stage"] == "linear" and lin["n_complete"] == 3
+    assert r["best_trial_dir"] == os.path.join("linear", f"trial_{lin['best_trial']:04d}")
+    assert lin["best_value"] == max(t["value"] for t in lin["trials"])
+    for t in lin["trials"]:                              # the chosen trial keeps its weights, the others do not
+        assert os.path.isdir(os.path.join(t["run_dir"], "checkpoints")) == (t["trial"] == lin["best_trial"])
+        assert set(t["params"]) == {"prs_var", "wide_kappa", "lr"}
+        cfg = json.load(open(os.path.join(t["run_dir"], "config.json")))
+        assert cfg["args"]["wide"] == "only" and cfg["args"]["batch_size"] == 256 and cfg["model"]["lr_wide"] > 0
+    assert len({tuple(sorted(t["params"].items())) for t in lin["trials"]}) == 3
+    rows = score_snapshots.main(["--run", str(root), "--split", "val", "--snapshots", "best"])
+    mean = [x for x in rows if x["snapshot"] == "best" and x["label"] == "MEAN" and x["metric"] == "auroc"][0]
+    assert abs(mean["value"] - r["best_val_auroc_mean"]) < 1e-6      # scoring the run scores its chosen trial
+    main_multilabel.main(argv)                                       # rerunning continues: nothing left to do
+    assert json.load(open(root / "results.json"))["stages"]["linear"]["n_trials"] == 3
+    with pytest.raises(ValueError, match="other arguments"):         # but not with other arguments
+        main_multilabel.main(argv + ["--prs_var", "3.0"])
+
+
+def test_a_search_replaces_trials_a_crash_left_running(tmp_path):
+    import optuna
+    import tune_optuna
+    from widedeepgp.tuning import fail_stale
+    study = tune_optuna.open_study("r", str(tmp_path))
+    study.ask()                                                      # a trial that never finished
+    assert fail_stale(study) == 1
+    assert study.trials[0].state == optuna.trial.TrialState.FAIL
+
+
+def test_the_gpus_a_search_uses(monkeypatch):
+    from widedeepgp import tuning
+    assert tuning.pick_gpus(None) == tuning.pick_gpus("none") == tuning.pick_gpus("cpu") == []
+    assert tuning.pick_gpus("1, 3") == ["1", "3"]
+    free = iter([["4"], ["0", "2", "3"]])                           # one free GPU: wait; three: use two of them
+    monkeypatch.setattr(tuning, "free_gpus", lambda: next(free))
+    assert tuning.pick_gpus("auto", poll_seconds=0) == ["2", "3"]
+
+
+def test_the_learning_rate_of_the_prs_follows_kappa(tmp_path):
+    from widedeepgp.model import curvature_ratios, wide_learning_rate
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, _, model = _build(data_dir, wide="only", prs_var=2.0, wide_kappa=0.05, batch_size=16, accumulate=4)
+    r = curvature_ratios(model.loss_fn)
+    rbar = float(torch.exp(torch.log(r).mean()))
+    assert model.hp["lr_wide"] == pytest.approx(0.05 * 2.0 * np.sqrt(64) / (rbar * np.sqrt(154)))
+    assert wide_learning_rate(0.05, 2.0, 64, r, 4 * 154) == pytest.approx(model.hp["lr_wide"] / 2)   # 1/sqrt(M)
+    _, _, given = _build(data_dir, wide="only", lr_wide=1e-3)
+    assert given.hp["lr_wide"] == 1e-3                                # an explicit rate wins
+
+
+def test_a_run_can_start_from_a_fixed_linear_path(tmp_path):
+    from widedeepgp.train import load_wide_init
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, _, lin = _build(data_dir, wide="only")
+    with torch.no_grad():
+        for w in lin.prs:
+            w.normal_()
+        lin.cov_linear.normal_()
+    path = str(tmp_path / "linear.ckpt")
+    torch.save({"hyper_parameters": {"hp": lin.hp}, "state_dict": lin.state_dict()}, path)
+    _, _, joint = _build(data_dir, wide="on", wide_freeze=True)
+    load_wide_init(joint, path)
+    for a, b in zip(lin.prs, joint.prs):
+        assert torch.equal(a, b) and not b.requires_grad             # copied and fixed
+    assert torch.equal(lin.cov_linear, joint.cov_linear) and torch.equal(lin.intercept, joint.intercept)
+    assert joint.penalty() is None                                   # a fixed PRS carries no penalty
+    groups = joint.configure_optimizers()
+    groups = (groups["optimizer"] if isinstance(groups, dict) else groups).param_groups
+    assert not any(p is w for g in groups for p in g["params"] for w in joint.prs)
+    _, _, other = _build(data_dir, wide="on", labels="solo_d,null_f")
+    with pytest.raises(ValueError, match="other label_names"):
+        load_wide_init(other, path)
+
+
+def test_resuming_with_the_path_switched_is_refused(tmp_path):
+    from widedeepgp.train import check_resume_tables
+    path = str(tmp_path / "old.ckpt")
+    torch.save({"hyper_parameters": {"hp": {"pos_digest": "p", "seq_len": [3]}}, "state_dict": {}}, path)
+    with pytest.raises(ValueError, match="need --wide off"):
+        check_resume_tables(path, {"pos_digest": "p", "seq_len": [3], "wide": "on"})
+
+@pytest.mark.slow
+def test_the_linear_path_alone_learns_the_synthetic_traits(tmp_path):
+    from widedeepgp.train import run_training
+    data_dir, _ = synthetic_dataset(tmp_path)                       # 1,200 people, 132 SNPs, six traits
+    cfg = make_cfg(data_dir, "multi", wide="only", lr=3e-3, lr_wide=1e-2, prs_var=0.3, run_dir=str(tmp_path / "runs"),
+                   experiment="t", exp_name="w", val_per_epoch=2, max_epoch_equiv=8, stop_patience=0)
+    au = {k: v["auroc"] for k, v in run_training(cfg)["val"].items()}
+    assert np.mean([v for k, v in au.items() if k != "null_f"]) > 0.70
+    assert 0.40 < au["null_f"] < 0.60
+
+
+@gpu
+def test_with_the_path_at_zero_the_network_is_unchanged(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, dm, off = _build(data_dir, wide="off")
+    _, _, on = _build(data_dir, wide="on")
+    on.load_weights(off.state_dict())
+    off, on = off.cuda().eval(), on.cuda().eval()
+    x_all = [t.cuda() for t in _batch(dm)[0]]
+    with torch.no_grad():
+        assert torch.allclose(off(x_all).float(), on(x_all), atol=1e-6)
+
+
+@gpu
+def test_bf16_keeps_the_path_in_float32(tmp_path):
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    _, dm, model = _build(data_dir, wide="on", precision="bf16")
+    model = model.cuda()
+    x_all = [t.cuda() for t in _batch(dm)[0]]
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        assert model.wide_logits(x_all).dtype == torch.float32
+        assert model(x_all).dtype == torch.float32
+
+
+@gpu
+def test_a_run_with_the_path_trains_it(tmp_path):
+    from widedeepgp.train import load_model, run_training
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    cfg = make_cfg(data_dir, "multi", wide="on", lr_wide=1e-2, run_dir=str(tmp_path / "runs"), experiment="t",
+                   exp_name="on", steps_per_epoch_equiv=12, val_per_epoch=2, max_epoch_equiv=1.0, stop_patience=0)
+    out = run_training(cfg)
+    model, _ = load_model(out["best_checkpoint"], out["datamodule"])
+    assert np.isfinite(out["best_val_auroc_mean"]) and sum(float(w.abs().sum()) for w in model.prs) > 0

@@ -136,22 +136,23 @@ The single-disease code above (`main_genome.py`, `models/`, `layers/`, `utils.py
 [methods.md](methods.md) describes the data, the model and the training, and lists every
 difference from the single-disease model.
 
-**Read [methods.md](methods.md) section 4.9 before training at full size.** In the pilot on real
-data (DeepWideGP-Scripts, branch `widening`, `scripts/widedeepgp-pilot/results.md`) the network
-ended slightly below a logistic model on the covariates and learned nothing detectable from
-unselected SNPs unless each SNP carried signed association statistics (then about a third of
-what a clumped polygenic score adds); on simulated traits it learned from the SNPs only when
-each SNP came with signed association statistics, or slowly when the SNPs had been selected by a
-GWAS.
+**Read [methods.md](methods.md) sections 4.9, 4.10 and 8 before training at full size.** In
+the pilot on real data (DeepWideGP-Scripts, branch `widening`,
+`scripts/widedeepgp-pilot/results.md`) the network alone ended slightly below a logistic model
+on the covariates and learned nothing detectable from unselected SNPs. Since 13 November 2026
+the model therefore contains a linear PRS path (one weight per SNP and disease, with a ridge
+penalty) beside the network, and every run tunes itself: first the linear model alone, then the
+network on top of its PRS, keeping the network only where it does better on the tuning set.
 
 ```bash
 # a dataset <data_dir>/<dataset>/<variant>/ whose store.json names its "labels" and "covariates"
 # (genostore/README.md); without --data_dir, datasets are looked for in pukb/genes
-CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
+# a run: the search of methods.md section 8 on the free GPUs minus one, then the chosen model
+python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
     --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --batch_size 16 --exp_name <run>
-python score_snapshots.py --run runs/default/<run> --split val      # every snapshot, with a covariates-only baseline
-CUDA_VISIBLE_DEVICES=<gpu> python tune_optuna.py --study <name> --n_trials 20 -- \
-    --data_dir <data_dir> --label <dataset> --rd_mode <variant> <the other training arguments>
+python score_snapshots.py --run runs/default/<run> --split val --snapshots best   # the chosen trial
+# one fixed setting, no search, on the GPU this process sees
+CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py ... --tune_trials 0 --prs_var 1 --wide_kappa 0.03
 tensorboard --logdir runs/
 
 # three-minute check on six synthetic traits (generated on first use)
@@ -173,13 +174,23 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--val_per_epoch`, `--stop_patience`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, budget | 4, 8, 30 |
 | `--eval_batch_size` | batch size for validation and scoring | the training batch size |
 | `--seed` | random seed (initial weights, dropout, batch order) | 1 (`main_genome.py`: 33) |
+| `--wide` | linear PRS path: `on` (beside the network), `off` (the network alone), `only` (PRS and covariates alone) | `on` |
+| `--prs_var`, `--wide_kappa` | the PRS's ridge penalty (prior variance of the PRS) and the pace of its weights (sets their learning rate) | searched; 1, 0.03 with `--tune_trials 0` |
+| `--tune_trials_linear`, `--tune_trials` | trials of the two stages of a run's search (linear model; network on top); 0 = no search | 8, 12 |
+| `--tune_gpus` | GPUs for the trials: `auto` (the free ones minus one) or a list | `auto` |
+| `--val_min_participants`, `--val_max_epoch_equiv`, `--min_participants` | validate at most once per this many participants, at least once per this many epoch-equivalents; train at least this many participants | 20,000, 1, 128,000 |
 | `--resume`, `--init_from <snapshot>` | continue a run on the same data with the same settings (it may train longer); start a new run from saved weights (new output layer if the diseases differ in number, names or order) | |
 
-A run directory holds `config.json` (every setting, plus the code directory, its git commit
+A run that tunes itself holds one folder per stage (`linear/`, `joint/`, or `deep/` with
+`--wide off`), each with its Optuna study and one folder per trial, plus `results.json` (the
+chosen stage and trial, every trial's settings, value and cost) and `search.json` (its
+arguments). Rerunning the command continues the search. Each trial's folder holds `config.json`
+(every setting, plus the code directory, its git commit
 (none for a copy outside git), a `git_dirty` flag for uncommitted changes to tracked .py files,
 and the Python interpreter), TensorBoard files, `metrics.csv`, weight snapshots with
 `snapshots.csv` (what each cost), `checkpoints/best.ckpt` and `last.ckpt`, and `results.json`.
-Tests: `python -m pytest tests/test_ml_*.py -q` (the model and training tests need a GPU).
+Tests: `python -m pytest tests/test_ml_*.py -q` (the model and training tests need a GPU; the
+linear path's tests, `tests/test_ml_wide.py`, run on the CPU).
 
 ## License
 BSD 3-Clause License

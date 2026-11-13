@@ -632,3 +632,97 @@ everything, make it 42".
 - Kept: Robert's own test outputs of 2 April (untracked, in `synthetic_1causal_10case_test`),
   `docs/`, `.codex`, everything in `data/`, the frozen code copies, and the export
   `runs/gate_evidence/final_tests_2026-11-12/code_2310856` that the waiting GPU test job uses.
+
+## 2026-11-13 (night, about 00:30 UTC) — One seed (1); a linear PRS inside the model; a search inside every run; stores without the withdrawn participants
+
+Robert's decisions of 12–13 Nov (Opus 5.5 continuing the Fable session):
+
+- "nix the 42 seed thing ... if you already did substantial work with a single seed (not 42)
+  revert to that": the project's single seed is **1**, the seed the pilot, its positive control
+  and its tuning ran with (commit 7ba8b09). This supersedes the seed-42 entry above. The cohort
+  split (20261111) and the proxy draw (20261112) are unchanged.
+- Rebuild the genotype stores without the withdrawn participants (see "Data" below).
+- Remove the two single-participant maxima from the committed history of DeepWideGP-Scripts.
+- Every run of WideDeepGP redoes its hyper-parameter search, because the scaling study trains
+  on nested subsets of the training split and regularisation should change with training size.
+- A linear PRS inside the model. Robert then suggested REGENIE/plink2 for it; after the
+  explanation (an external GWAS on the same participants would leak the training labels into a
+  fixed input and differ from the deep part's fit; the PRS comparators of the other plan use
+  REGENIE already) he agreed to the in-model path.
+
+### Code changes (this repository, branch `widening`)
+
+- `widedeepgp/model.py`: the linear PRS path, `--wide off|on|only`. For disease j,
+  logit_j = deep_j + b_j + M^(-1/2) Σ_s x_s θ_sj + Σ_k u_k v_kj, with x the standardised dosages
+  the encoders read (M = 1,258,200 at full size, so θ holds 37.7M weights for 30 diseases),
+  computed in float32 outside bf16 autocast. θ and v start at zero, b_j at logit(π′_j) (the
+  weighted prevalence, π′ = πc/Z); with `--wide on` the deep head's last layer also starts at
+  zero, so a run starts as the linear model. Ridge penalty added to the loss (not AdamW decay):
+  mean over diseases of λ_j‖θ_j‖², λ_j = r_j/(2Nτ), r_j = π′(1−π′)/(π(1−π)) = c_j/Z_j² (the
+  loss's curvature relative to an unweighted logistic loss; 1.11–3.82 for the 30 diseases), τ =
+  `--prs_var`, the prior variance of the PRS on the logit scale. Own parameter group with
+  learning rate κτ√B/(r̄√M) (`--wide_kappa`, geometric-mean r̄) unless `--lr_wide` is given;
+  `--wide_freeze` keeps θ fixed. `load_weights` treats the path's parameters as optional (older
+  checkpoints load with the path at zero) and per-disease (a new label set starts it afresh).
+  `--wide only` builds no encoders, so it trains on the CPU; it refuses annotations and
+  `--loss_outputs target`.
+- `widedeepgp/tuning.py` (new): the search inside every run. `--wide on`: stage "linear"
+  (`--wide only`; batch ≥ 256, accumulate 1, twice the budget, patience 10, one validation per
+  epoch-equivalent, no pruning; prs_var 1e-2–30, wide_kappa 1e-2–0.3, lr 3e-4–1e-2, all log),
+  then stage "joint" (deep network on top, started from the linear stage's best with θ fixed:
+  lr 1e-4–3e-3, l2 1e-6–1e-2, dropout 0–0.4, successive halving). The joint model is the run's
+  model only if strictly better than the linear one. `--wide only`: the linear stage alone;
+  `--wide off`: stage "deep". TPE, 5 random start-up trials, sampler seeded with the run's seed
+  plus the worker's index; one worker process per GPU (`--tune_gpus auto` = free GPUs minus one,
+  waits for two free, picked again for each stage; a list; or `none`); exact trial counts per
+  worker; a lock file (one search per run) and `search.json` (a rerun with other arguments is
+  refused); trials a crash left running are marked failed and redone; afterwards every trial's
+  weights are deleted except the chosen trial's and the linear stage's best. `results.json` at
+  the run level names the chosen stage and trial (relative path).
+- `widedeepgp/train.py`: `wide_hparams` (τ, κ, the learning rate, freezing, the SNP statistics);
+  `load_wide_init` for `--init_wide_from` (checks positions, sequence lengths, labels, label
+  counts and SNP statistics); the validation interval in participants seen (at least every
+  `--val_min_participants`, at most every `--val_max_epoch_equiv`) and a budget floor
+  (`--min_participants`); the snapshot cap; resume checks refuse a switched `--wide`.
+- `widedeepgp/callbacks.py`: `snapshot_steps(..., max_count)`; RunLog logs the PRS learning
+  rate, gradient norm and penalty; RunCheckpoint keeps ModelCheckpoint's state key and re-roots
+  saved paths when the run folder is reached through another path; EarlyStoppingOnce keeps the
+  run's patience on resume.
+- `main_multilabel.py`: defaults `--wide on`, `--tune_trials 12`, `--tune_trials_linear 8`,
+  `--tune_gpus auto`, `--val_min_participants 20000`, `--val_max_epoch_equiv 1`,
+  `--min_participants 128000`, `--snapshots_max 40`; a run without `--exp_name` gets one (so its
+  workers share the folder); `--tune_trials 0` trains the given settings once.
+- `tune_optuna.py`: search spaces "linear" and "deep"; `open_study(..., n_startup_trials,
+  prune)`. `args_generator.py`: the new flags, inert for `main_genome.py` (its `--gpus` int is
+  untouched, hence `--tune_gpus`). `score_snapshots.py`: a tuned run is scored through its chosen
+  trial. `scripts/multilabel_synthetic.sh`: `--tune_trials 0 --wide off` (the published check).
+- `tests/test_ml_wide.py` (new, 20 tests: 16 CPU, 1 slow CPU learning check, 3 GPU). CPU suite
+  `tests/test_ml_*.py tests/test_genostore*.py -m "not slow"`: 73 passed, 28 skipped (GPU),
+  13 Nov 00:20 UTC.
+- `methods.md` (new section 4.10; sections 5.2, 6, 7, 8 and 10 updated) and `README.md`.
+
+### DeepWideGP-Scripts (branch `widening`; nothing pushed)
+
+- History rewritten to drop the two single-participant maxima: 3861ac5→cf662eb,
+  e06fb7c→9b987ff, d206659→2deff11, 7a1d789→d1a3511. The old commits survive only in the local
+  reflog of `widening` until git expires them; no branch reaches them, so a push would not
+  carry them.
+- New (committed separately): `build-ard30-dataset/rebuild_stores_without_withdrawn.sh` and
+  `check_rebuilt_store.py`.
+
+### Data
+
+- Genotype stores rebuilt without the participants on the withdrawal list of 25 April 2024:
+  the Asian/Black store is done (17,055 → 17,039 participants; the converter's own audit
+  found 0 mismatches on all 22 chromosomes; against the old store, 0 of 407 million genotypes
+  differ for 2,000 participants on chromosomes 1, 6 and 22, the variant lists are identical
+  and no withdrawn participant is left; old copy deleted). The main HapMap3+ store
+  (333,444 → 333,324) was converting at the time of writing.
+
+### Pending
+
+- GPU tests of this commit (all five GPUs held by another user's jobs since about 22:15 UTC).
+- Gates before the first real run: the linear model on the simulated traits against GBLUP
+  (CPU run `runs/wide_gate/sim_linear_tau1_k0.1` under way), the joint stage on a GPU, then real
+  labels at pilot size.
+- The architecture figure does not draw the PRS path yet.

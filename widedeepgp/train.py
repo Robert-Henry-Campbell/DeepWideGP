@@ -70,13 +70,23 @@ def load_annotations(dm):
 
 
 def schedule(cfg, n_train):
-    """Batches per epoch-equivalent and per validation interval, and the number of intervals."""
+    """Batches per epoch-equivalent and per validation interval, and the number of intervals.
+
+    A validation pass costs the same whatever the training size, so with --val_min_participants
+    the interval is at least that many participants (small training sets would otherwise spend
+    most of their time validating), and with --min_participants the budget is at least that
+    many participants, so that early stopping has room to act."""
     acc = max(1, int(cfg.accumulate))
     per_ee = int(cfg.steps_per_epoch_equiv or math.ceil(n_train / cfg.batch_size))
     per_val = max(1, int(math.ceil(per_ee / float(cfg.val_per_epoch))))    # rounded up, so that
-    per_val = int(math.ceil(per_val / acc) * acc)        # val_per_epoch intervals cover an epoch-equivalent;
-    #                                                      a multiple of acc: the optimiser also steps on an epoch's last batch
+    #                                                      val_per_epoch intervals cover an epoch-equivalent
+    per_val = max(per_val, int(math.ceil(int(getattr(cfg, "val_min_participants", 0) or 0) / cfg.batch_size)))
+    cap = float(getattr(cfg, "val_max_epoch_equiv", 0) or 0)
+    if cap > 0:                                          # but at least once per `cap` epoch-equivalents
+        per_val = min(per_val, max(1, int(math.ceil(cap * per_ee))))
+    per_val = int(math.ceil(per_val / acc) * acc)        # a multiple of acc: the optimiser also steps on an epoch's last batch
     n_val = max(1, int(math.ceil(float(cfg.max_epoch_equiv) * per_ee / per_val - 1e-9)))
+    n_val = max(n_val, int(math.ceil(int(getattr(cfg, "min_participants", 0) or 0) / cfg.batch_size / per_val - 1e-9)))
     return {"batches_per_epoch_equiv": per_ee, "batches_per_validation": per_val, "validations": n_val,
             "optimizer_steps": n_val * per_val // acc, "accumulate": acc}
 
@@ -101,7 +111,25 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
         "precision": str(cfg.precision), "grad_ckpt": bool(cfg.grad_ckpt),
         "lr": float(cfg.lr), "l2": float(cfg.l2), "warmup_steps": int(cfg.warmup_steps),
         "lr_schedule": cfg.lr_schedule, "total_optimizer_steps": int(sched["optimizer_steps"]) if sched else 0,
+        "wide": getattr(cfg, "wide", "off") or "off", **wide_hparams(cfg, dm),
     }
+
+
+def wide_hparams(cfg, dm):
+    """Settings of the linear PRS path; its learning rate follows from --wide_kappa unless given."""
+    wide = getattr(cfg, "wide", "off") or "off"
+    if wide == "off":
+        return {}
+    from .losses import WideLoss
+    from .model import curvature_ratios, wide_learning_rate
+    tau, kappa = float(cfg.prs_var), float(cfg.wide_kappa)
+    lr_wide = getattr(cfg, "lr_wide", None)
+    if not lr_wide:
+        loss = WideLoss(counts=label_counts(train_labels(dm)), gamma=float(cfg.gamma), w_max=float(cfg.w_max))
+        lr_wide = wide_learning_rate(kappa, tau, int(cfg.batch_size) * max(1, int(cfg.accumulate)),
+                                     curvature_ratios(loss), int(sum(dm.seq_len)))
+    return {"prs_var": tau, "wide_kappa": kappa, "lr_wide": float(lr_wide),
+            "wide_freeze": bool(getattr(cfg, "wide_freeze", False)), "snp_stats": getattr(cfg, "snp_stats", None)}
 
 
 def build_model(cfg, dm, sched=None):
@@ -173,7 +201,8 @@ RESUMABLE = ("total_optimizer_steps", "grad_ckpt")
 # a resumed run must keep them. The dataset is checked through the saved position and
 # annotation digests, label names and counts and number of covariates, so the path it is named
 # by may differ.
-RUN_ARGS = ("snp_stats", "scaling", "batch_size", "accumulate", "seed", "steps_per_epoch_equiv", "val_per_epoch")
+RUN_ARGS = ("snp_stats", "scaling", "batch_size", "accumulate", "seed", "steps_per_epoch_equiv", "val_per_epoch",
+            "val_min_participants", "val_max_epoch_equiv")
 
 
 def last_checkpoint(ckpt_dir):
@@ -199,6 +228,25 @@ def last_checkpoint(ckpt_dir):
                          f"name but {', '.join(newer)} was written after it (copied without the files' times?); move "
                          "the stale checkpoints out of the folder")
     return latest
+
+
+WIDE_KEYS = ("prs.", "cov_linear", "intercept")
+
+
+def load_wide_init(model, path):
+    """Start the linear PRS path (PRS weights, covariate weights, intercepts) from a run that
+    trained it: the first stage of a run's search. It must have the same SNPs, labels, training
+    split and SNP scaling, so that a fit on other participants can never come in."""
+    src = torch.load(path, map_location="cpu", weights_only=False)
+    old = src["hyper_parameters"]["hp"]
+    for key in ("pos_digest", "seq_len", "label_names", "label_counts", "snp_stats"):
+        if old.get(key) != model.hp.get(key) and not (isinstance(old.get(key), list) and list(old[key]) == list(model.hp[key])):
+            raise ValueError(f"--init_wide_from {path}: it was trained with other {key}")
+    state = {k: v for k, v in src["state_dict"].items() if k.startswith(WIDE_KEYS)}
+    need = [k for k in model.state_dict() if k.startswith(WIDE_KEYS)]
+    if sorted(state) != sorted(need):
+        raise ValueError(f"--init_wide_from {path}: it holds no linear PRS path of this shape")
+    model.load_state_dict(state, strict=False)
 
 
 def check_resume_args(config_path, cfg):
@@ -233,6 +281,9 @@ def check_resume_tables(ckpt_path, hp, loss=None):
     import warnings
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     old = ckpt["hyper_parameters"]["hp"]
+    if old.get("wide", "off") != hp.get("wide", "off"):
+        raise ValueError(f"cannot resume from {ckpt_path}: it was trained with --wide {old.get('wide', 'off')}, this run "
+                         f"has --wide {hp.get('wide', 'off')} (runs made before the linear PRS path need --wide off)")
     if old.get("pos_digest") != hp.get("pos_digest") or list(old.get("seq_len", [])) != list(hp["seq_len"]):
         raise ValueError(f"cannot resume from {ckpt_path}: it was trained on other SNP positions")
     if int(old.get("annot_dim", 0)) != int(hp.get("annot_dim", 0)):
@@ -291,6 +342,9 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         src_labels = (src.get("hyper_parameters") or {}).get("hp", {}).get("label_names")
         left_out = model.load_weights(src["state_dict"], allow_new_head=True, source_labels=src_labels)
         print(f"initialised from {cfg.init_from}; not loaded: {left_out or 'nothing'}", flush=True)
+    if getattr(cfg, "init_wide_from", None):
+        load_wide_init(model, cfg.init_wide_from)
+        print(f"linear PRS path from {cfg.init_wide_from}{' (fixed)' if model.hp.get('wide_freeze') else ''}", flush=True)
 
     run_dir = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name or "run")
     ckpt_dir = os.path.join(run_dir, "checkpoints")
@@ -319,7 +373,8 @@ def run_training(cfg, trial=None, extra_callbacks=()):
 
     acc = sched["accumulate"]
     snaps = Snapshots(run_dir, snapshot_steps(sched["optimizer_steps"], int(cfg.snapshots_per_decade),
-                                              every=max(1, sched["batches_per_epoch_equiv"] // acc)), n_train)
+                                              every=max(1, sched["batches_per_epoch_equiv"] // acc),
+                                              max_count=int(getattr(cfg, "snapshots_max", 0) or 0)), n_train)
     runlog = RunLog(run_dir, n_train, n_snps)
     best_ckpt = RunCheckpoint(dirpath=ckpt_dir, filename="best", monitor=MONITOR, mode="max", save_top_k=1,
                                 save_last=True, save_on_train_epoch_end=False, auto_insert_metric_name=False)

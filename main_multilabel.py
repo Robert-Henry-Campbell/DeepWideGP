@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
 """Train the multi-disease DeepGP (WideDeepGP).
 
-    CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py --label <dataset> --rd_mode <variant> \
+    python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
         --exp_name <run> --final_pool atten --d_model 32 --e_layers 1 --batch_size 16 ...
+
+A run tunes itself (widedeepgp/tuning.py), on the free GPUs minus one: first the linear model
+alone (PRS and covariates; --tune_trials_linear settings, 8 by default), then the deep network
+on top of its PRS (--tune_trials, 12), keeping whichever is better on the tuning set.
+--tune_trials 0 trains the given settings once, on the GPU this process sees. The linear PRS
+path is on by default (--wide on; 'off' is the network alone, 'only' the PRS and covariates).
 
 The dataset is <data_dir>/<label>/<rd_mode>/ in the genotype-store layout; when its store.json
 names "labels", every named label is predicted (or the subset given with --labels). SNPs are
@@ -10,6 +16,7 @@ standardised with statistics of the training split unless --snp_stats says other
 single-disease script, main_genome.py, is unchanged. See methods.md for what the model does and
 widedeepgp/train.py for what a run writes.
 """
+import os
 import sys
 import time
 
@@ -25,16 +32,23 @@ from widedeepgp.train import run_training
 
 _UNSET = "<not given>"
 SEED = 1                                      # the project's single seed (the pilot, its control and tuning used it)
+# what main_multilabel.py sets unless the command line says otherwise (the shared parser's own
+# defaults are kept for main_genome.py)
+DEFAULTS = {"--seed": str(SEED), "--wide": "on", "--tune_trials": "12", "--tune_trials_linear": "8",
+            "--tune_gpus": "auto", "--val_min_participants": "20000", "--val_max_epoch_equiv": "1",
+            "--min_participants": "128000", "--snapshots_per_decade": "6", "--snapshots_max": "40"}
 
 
 def parse_args(argv=None):
     """The parser of args_generator.py with the multi-disease defaults: datasets under
-    pukb/genes, attention pooling, seed 1, and SNP statistics of the training split unless
-    --snp_stats is given (the parser's own defaults, kept for main_genome.py, are seed 33 and
-    all store samples)."""
+    pukb/genes, attention pooling, SNP statistics of the training split, and DEFAULTS (seed 1,
+    the linear PRS path, tuning in every run, validation and budget floors for small training
+    sets, at most 40 snapshots). The parser's own defaults are kept for main_genome.py."""
     argv = sys.argv[1:] if argv is None else list(argv)
-    # a --snp_stats or --seed in argv comes later and wins
-    cfg = args_initial(["--snp_stats", _UNSET, "--seed", str(SEED)] + argv)
+    lead = ["--snp_stats", _UNSET]
+    for flag, value in DEFAULTS.items():
+        lead += [flag, value]
+    cfg = args_initial(lead + argv)                      # what argv gives comes later and wins
     if cfg.snp_stats == _UNSET:
         cfg.snp_stats = "train"
     if cfg.data_dir is None:
@@ -45,9 +59,17 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
     cfg = parse_args(argv)
     if cfg.exp_name is None:
         cfg.exp_name = time.strftime("run_%Y%m%d_%H%M%S")
+        argv = argv + ["--exp_name", cfg.exp_name]      # so that a search's workers share the run's folder
+    if cfg.tune_worker:
+        from widedeepgp import tuning
+        return tuning.worker_from_env(cfg)
+    if cfg.tune_trials > 0:
+        from widedeepgp import tuning
+        return tuning.tune_run(cfg, argv, os.path.abspath(__file__))
     out = run_training(cfg)
     print(f"\nrun directory: {out['run_dir']}")
     print(f"best mean validation AUROC {out['best_val_auroc_mean']:.4f} at step {out['best_step']} "

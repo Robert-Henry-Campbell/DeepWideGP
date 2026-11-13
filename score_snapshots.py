@@ -79,9 +79,21 @@ def pick_snapshots(run, which):
     return [(r["file"], r) for r in table if int(r["step"]) in want]
 
 
+def chosen_trial(run):
+    """The folder to score: a run that tuned itself (widedeepgp/tuning.py) holds one folder per
+    trial, and its results.json names the chosen one, which lies inside the run's folder."""
+    path = os.path.join(run, "results.json")
+    if os.path.exists(path) and not os.path.exists(os.path.join(run, "config.json")):
+        with open(path) as f:
+            r = json.load(f)
+        if r.get("tuning"):
+            return os.path.join(run, r["best_trial_dir"])    # relative to the run's folder
+    return run
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", required=True, help="run directory (holds config.json)")
+    ap.add_argument("--run", required=True, help="run directory (holds config.json), or a run that tuned itself")
     ap.add_argument("--split", default="val", help="val, test, train, or the name of an extra evaluation table")
     ap.add_argument("--snapshots", default="all", help="all, best, last, or comma-separated optimiser steps")
     ap.add_argument("--unlock_test", action="store_true", help="required to score the test split; the access is logged")
@@ -90,6 +102,7 @@ def main(argv=None):
     ap.add_argument("--batch_size", type=int, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args(argv)
+    a.run = chosen_trial(a.run)
 
     with open(os.path.join(a.run, "config.json")) as f:
         config = json.load(f)

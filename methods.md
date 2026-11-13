@@ -210,8 +210,8 @@ covers 1,250,863 of the 1,258,200 SNPs (99.4%); the others get zeros and a 97th 
 
 ## 4. Model
 
-The network maps a participant's genotypes and covariates to one logit per disease. Only
-sections 4.2 and 4.7 differ in kind from published DeepGP; section 10 lists every difference.
+The network maps a participant's genotypes and covariates to one logit per disease. Sections
+4.2, 4.7 and 4.10 differ in kind from published DeepGP; section 10 lists every difference.
 
 ![Figure 1. WideDeepGP](figures/widedeepgp_architecture.png)
 
@@ -228,7 +228,8 @@ drawn. The annotation step is optional and is off in the base model. Its gain an
 computed from 96 functional annotations and a no-annotation flag per SNP (97 channels) by one
 pair of maps shared by all chromosomes, so that box is drawn once, outside the stack. (Vector
 version and the component table: `figures/widedeepgp_architecture.pdf`,
-`figures/widedeepgp_architecture_data.csv`; drawn by `scripts/make_architecture_figure.py`.)
+`figures/widedeepgp_architecture_data.csv`; drawn by `scripts/make_architecture_figure.py`.) The
+linear PRS path of section 4.10, added on 13 November 2026, is not yet drawn.
 
 ### 4.1 Input and token embedding
 
@@ -387,10 +388,36 @@ heuristic, not a bound. The pilot bears it out:
 
 The consequence for the design is that the choice made in section 3, one unselected SNP set
 with no per-disease information, leaves the network without the means to learn SNP effects, at
-least at the scale tested. How SNP-specific information should enter (association statistics
-as annotation, GWAS-based selection of SNPs, or parameters of its own for each SNP) is an open
-design decision, to be settled on the simulated-trait control of the pilot before a full-size
-run.
+least at the scale tested. Of the ways SNP-specific information could enter (association
+statistics as annotation, GWAS-based selection of SNPs, or parameters of its own for each SNP),
+the third was chosen on 12 November 2026, keeping all SNPs and no GWAS: the linear PRS path of
+section 4.10.
+
+### 4.10 Linear PRS path
+
+The linear PRS path gives the model a parameter of its own for every SNP and disease, beside
+the network. For disease *j*
+
+    logit_j = deep_j + b_j + M^(-1/2) Σ_s x_s θ_sj + Σ_k u_k v_kj
+
+where x_s is the standardised dosage of SNP *s* (the input the encoders read), M the number of
+SNPs (1,258,200), θ one weight per SNP and disease (37.7 million in all), u the twelve
+covariates, v one weight per covariate and disease, b an intercept per disease, and deep_j the
+network's output. The model therefore contains a logistic regression on a genome-wide PRS and
+the covariates, and the network only has to add what that misses. No GWAS and no SNP selection
+are involved: the weights are learned with the rest of the model, from the training
+participants alone. The path is computed in 32-bit arithmetic, also when the encoders run in
+bf16. Its PRS and covariate weights start at zero and its intercepts at each disease's weighted
+base rate, logit(π′_j) (section 5.2); when the path is on, the network's last layer also starts
+at zero, so that at the first step the model is the base-rate model and the network adds only
+what training gives it. Older weights load with the path at zero.
+
+Three settings of `--wide`: `on`, the default (network and path); `off`, the network alone (the
+model of the pilot); `only`, the path alone, with no network (a linear comparator inside
+WideDeepGP, trained by the same code; it also runs without a GPU). The path costs 151 MB of
+weights (about 0.6 GB of GPU memory with the optimiser's state) and one matrix product per step,
+which is negligible next to the encoders. Its penalty and learning rate are described in
+sections 5.2 and 6, and how its settings are chosen in section 8.
 
 ## 5. Training objective
 
@@ -464,6 +491,30 @@ Because the objective is a class-weighted cross-entropy over the training cohort
 the population scale is obtained by subtracting log c_j(1). With one disease, uniform sampling
 and γ = 0 the loss is exactly that of published DeepGP.
 
+**Ridge penalty of the PRS weights** (section 4.10). The PRS weights carry a ridge penalty,
+added to the loss rather than applied as decoupled weight decay, so that the trained PRS
+approximates the posterior mode under a normal prior: θ_sj ~ N(0, τ), so that each SNP's effect
+on the logit scale has prior variance τ/M and the whole PRS prior variance τ (`--prs_var`,
+searched in every run, section 8). For a loss averaged over the N training participants the
+posterior mode carries the penalty Σ_s θ_sj² / (2Nτ). The class weights, however, make a
+disease's loss as curved as if it held more information than it does: at the base-rate
+solution, the weighted loss's curvature is π′(1 − π′), with π′ = π c(1)/Z the weighted share of
+cases, against π(1 − π) for the likelihood. The penalty is therefore multiplied by
+
+    r_j = π′_j (1 − π′_j) / (π_j (1 − π_j)) = c_j(1) / Z_j²,
+
+which restores the shrinkage a disease's real information calls for: from 1.11 for
+hypertension (31.6%) to 3.82 for myocardial infarction (3.7%), geometric mean 2.53. The penalty
+is averaged over diseases, as the loss is:
+
+    penalty = (1/n) Σ_j r_j ‖θ_j‖² / (2Nτ).
+
+The sampling-rate correction does not change it (the expected loss is the cohort's); the
+covariate weights and intercepts are not penalised. N is the run's own number of training
+participants, so the shrinkage grows as the training set shrinks. The test
+`test_the_penalty_correction_is_the_curvature_ratio` checks the curvature ratio numerically at
+three prevalences.
+
 ### 5.3 Variants kept for comparison
 
 Three switches exist so that the choices above can be tested rather than assumed: uniform
@@ -499,6 +550,18 @@ Three switches exist so that the choices above can be tested rather than assumed
   control and its hyper-parameter search ran with it (the pilot's arms also once with seed 2,
   to measure seed-to-seed spread). The published single-disease code keeps its default of 33.
   The train/tune/test split was drawn once, with seed 20261111 (section 2).
+- **Learning rate of the PRS weights.** With Adam each weight moves by about its learning
+  rate per step whatever the size of its gradient, so for 37.7 million PRS weights the rate
+  sets how much noise they keep around the penalised optimum, and the network's rate (about
+  10⁻³) would leave the PRS mostly noise. The rate is therefore set by
+  lr_θ = κ τ √B / (r̄ √M), with B the effective batch size and r̄ the geometric mean of the
+  r_j; under this rule the noise depends on κ alone, and the weights settle in about 1/κ
+  epoch-equivalents whatever the training size, the number of SNPs or the batch size (derived
+  from Adam's per-weight step, and checked by simulation in the design review; κ about 0.03
+  for long runs). κ (`--wide_kappa`) is searched in every run. The PRS weights, the covariate
+  weights with the intercepts, and the network form three parameter groups of one AdamW
+  optimiser: the network keeps its learning rate and weight decay, the other two have no
+  decoupled weight decay (the PRS weights have their ridge penalty instead).
 
 **Measured at full size** (one 48 GB GPU; model width 32, one layer; 1,258,200 SNPs; the
 analysis `widedeepgp-pilot` in DeepWideGP-Scripts, branch `widening`). The largest batch is 21
@@ -513,15 +576,21 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
 
 ## 7. Model selection and snapshots
 
-- **Validation.** Four times per epoch-equivalent, every output is scored on the whole tuning
-  set: AUROC, average precision, and cross-entropy on the population scale. Metrics are
-  computed over all tuning participants at once, never per batch.
+- **Validation.** Four times per epoch-equivalent, but at most once per 20,000 participants
+  seen and at least once per epoch-equivalent, every output is scored on the whole tuning set:
+  AUROC, average precision, and cross-entropy on the population scale. (A pass over the 20,000
+  tuning participants costs 7 to 10 minutes at full size whatever the training size, so small
+  training sets would otherwise spend most of their time validating.) Metrics are computed
+  over all tuning participants at once, never per batch.
 - **Stopping and the model kept.** Training stops when the mean AUROC across diseases has not
-  improved for eight validation passes, or after 30 epoch-equivalents. The checkpoint with the
-  best mean tuning AUROC is the model reported.
-- **Snapshots.** The weights are also saved at steps evenly spaced on a logarithmic axis (eight
-  per tenfold increase) and at every epoch-equivalent, with the number of updates, participants
-  seen and training time of each. Every snapshot can be scored afterwards, which gives
+  improved for eight validation passes, or after 30 epoch-equivalents and at least 128,000
+  participants seen (about 2,000 updates of 64). The checkpoint with the best mean tuning AUROC
+  is the trial's model; section 8 says which trial is the run's.
+- **Snapshots.** The weights are also saved at steps evenly spaced on a logarithmic axis (six
+  per tenfold increase; eight in the pilot) and at every epoch-equivalent, at most 40 per trial
+  (the regular ones are thinned first), with the number of updates, participants seen and
+  training time of each. After a run's search only the chosen trial and the first stage's best
+  keep their weights; every trial keeps its records. Every snapshot can be scored afterwards, which gives
   performance as a function of training compute, and allows the best snapshot to be read off
   for each disease separately as a secondary analysis.
 - **Fixed tables are not saved.** Position tables and annotation matrices are functions of the
@@ -530,6 +599,9 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   load against tables that differ from those it was trained with (an annotated model saved
   before the annotation digest was added, such as the pilot's annotation and GWAS-annotation
   runs, loads with a warning).
+- **Continuing a search.** Rerunning a run's command continues its search: finished trials
+  are kept, trials that a crash left running are replaced, and a search continued with other
+  arguments than it was started with is refused (only the number of trials may grow).
 - **Resuming, and starting from saved weights.** `--resume` continues a run from its last
   checkpoint (`last.ckpt`, or the highest `last-vN.ckpt` where Lightning wrote one, as in a run
   directory the pilot's code copied and resumed); a copy of a run directory (made while nothing
@@ -549,22 +621,39 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
 
 ## 8. Hyper-parameter search
 
-Hyper-parameters are searched with Optuna (Akiba et al., 2019): a tree-structured Parzen
-estimator proposes configurations, each is trained by the same code as a final run, and
-asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the
-configurations whose mean tuning AUROC trails at each rung. Searched: learning rate, weight
-decay, embedding dropout, accumulation and warm-up; optionally the class-weight exponent and
-cap, the sampler and the head's width. Model width, depth, the sequence block and the use of
-annotations are experimental factors and are never searched. Because a full-size
-epoch-equivalent costs several GPU-hours, the search was planned to run first on a proxy (a
-contiguous eighth of each chromosome and 40,000 training participants) and to compare its best
-configurations at full size. The pilot showed that a search on the real labels of that proxy is
+Every run tunes itself (Robert's decision of 12 November 2026): the best settings change with
+the size of the training set, which the scaling study varies. A run, for one dataset and
+training set, is a search in two stages, each a set of ordinary training runs (trials) proposed
+by Optuna's tree-structured Parzen estimator (Akiba et al., 2019) and scored by their best mean
+tuning AUROC:
+
+1. **The linear model alone** (`--wide only`; 8 trials by default). Searched: the PRS prior
+   variance τ (10⁻² to 30, log scale), the pace κ of the PRS weights (0.01 to 0.3, log scale)
+   and the learning rate of the covariate weights and intercepts. Batches of 256, one validation
+   per epoch-equivalent and twice the run's budget of epoch-equivalents (60 by default), with
+   no pruning: the PRS weights settle slowly, so early validations would judge them unfairly.
+2. **The network on top** (`--wide on`; 12 trials). Every trial starts from the first stage's
+   best linear model with its PRS weights fixed (the covariate weights and intercepts keep
+   learning) and searches the network's learning rate, weight decay and embedding dropout.
+   Asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the
+   trials whose mean tuning AUROC trails at each rung.
+
+The run's model is the second stage's best trial if its mean tuning AUROC is strictly higher
+than the first stage's best, and the first stage's otherwise, so the network is reported only
+where it adds to the linear model. Every run therefore also yields the linear model's result
+at its training size. With `--wide off` the search is the second stage alone, without the
+linear path; with `--wide only`, the first stage alone. Trials use the run's seed; each
+worker's sampler is seeded with the run's seed plus the worker's index. Trials run in parallel,
+one per GPU, on the free GPUs minus one (`--tune_gpus auto`), or one after another without a
+GPU. Model width, depth, the sequence block and the use of annotations are experimental factors
+and are never searched.
+
+The search inside every run replaces the plan's search on a proxy followed by a comparison at
+full size. In the pilot, on the network alone, a search on the real labels of the proxy was
 uninformative: every training scheme ended slightly below a logistic model on the covariates
-(section 4.9). What the search optimises, and at which stage it runs, therefore depend on the
-open decision of section 4.9 about how SNP-specific information reaches the network. The first
-gate for any design or configuration is the pilot's simulated-trait control, whose ceilings are
-known; an eleven-trial search there (one trial completed, nine pruned, one stopped by hand), on
-GWAS-selected SNPs, found no setting that learned faster than the pilot's settings.
+(section 4.9); and an eleven-trial search on the simulated-trait control (one trial completed,
+nine pruned, one stopped by hand), on GWAS-selected SNPs, found no setting that learned faster
+than the pilot's settings.
 
 ## 9. Evaluation outputs
 
@@ -579,6 +668,7 @@ confidence intervals and calibration are outside this document.
 | Component | Single phenotype (published) | Multi-phenotype (this model) |
 |---|---|---|
 | SNPs | Chosen per disease: GWAS p-value filter, then clumping | One fixed set for all diseases: 1,258,200 HapMap3+ SNPs |
+| SNP effects | Learned by the network from the selected SNPs | A linear PRS path inside the model (one weight per SNP and disease, ridge penalty) with the network on top; the network is kept only where it adds (section 8) |
 | SNP annotations | None | Optional per-SNP annotation vectors as a gain and offset (96 functional annotations; not adopted after the pilot, see section 4.9) |
 | Labels | One per participant | One per disease per participant |
 | Covariates | Eight | Year of birth, sex, ten principal components |
@@ -587,9 +677,9 @@ confidence intervals and calibration are outside this document.
 | Batches | Shuffled | Rotation of disease-balanced batches |
 | Loss | Binary cross-entropy | Cross-entropy corrected for sampling rate, weighted by class, averaged per disease and then across diseases |
 | Validation metric | Mean of per-batch AUROCs | AUROC of each disease over the whole tuning set; their mean for stopping |
-| Validation schedule | Every 300 batches | Four times per epoch-equivalent |
+| Validation schedule | Every 300 batches | Four times per epoch-equivalent, but at most once per 20,000 participants and at least once per epoch-equivalent |
 | Saved models | The best | The best, the last, and snapshots along training |
-| Hyper-parameters | Set by hand | Searched with Optuna |
+| Hyper-parameters | Set by hand | Searched inside every run with Optuna: the linear model first, then the network on top |
 | Precision and memory | 32-bit; all chromosomes' activations held | bf16 encoders with 32-bit pooling, head and loss (adopted for full-size runs after the pilot); optional per-chromosome checkpointing |
 
 **Unchanged:** the dosage input and its standardisation, the convolutional and positional

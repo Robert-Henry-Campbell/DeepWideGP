@@ -14,7 +14,9 @@ into it. What differs:
 * each sequence's encoder can run under activation checkpointing;
 * fixed tables (positions, annotations) are not written into saved models; a digest of each
   is, and a model is not rebuilt with tables that differ from the ones it was trained with;
-* optional per-SNP annotation vectors scale and shift the token embedding.
+* optional per-SNP annotation vectors scale and shift the token embedding;
+* an optional linear PRS path (``wide``): one weight per SNP and disease, and one per covariate
+  and disease, added to the logits, with a ridge penalty (see ``prs_penalty``).
 """
 import hashlib
 import math
@@ -36,6 +38,7 @@ from .blocks import make_block
 from .losses import WideLoss
 
 POOLS = ("atten", "mean", "last")
+WIDE_MODES = ("off", "on", "only")
 
 
 def positions_digest(pos):
@@ -54,6 +57,41 @@ def annotations_digest(annot):
         h.update(str(a.shape).encode())
         h.update(a.tobytes())
     return h.hexdigest()[:16]
+
+
+def curvature_ratios(loss_fn):
+    """r_j = pi'(1 - pi') / (pi(1 - pi)) = c_j / Z_j^2 per label: how much the class weights
+    inflate the curvature of a label's loss (pi' = pi c / Z, the weighted case share)."""
+    pi = loss_fn.pi.double().clamp(1e-6, 1 - 1e-6)
+    c1 = loss_fn.c1.double()
+    pw = pi * c1 / (pi * c1 + 1.0 - pi)
+    return (pw * (1.0 - pw)) / (pi * (1.0 - pi))
+
+
+def wide_learning_rate(kappa, prs_var, batch_eff, ratios, n_snps):
+    """Adam learning rate of the PRS weights theta: kappa * tau * sqrt(B) / (rbar * sqrt(M)).
+
+    With Adam, each weight moves about lr per step whatever its gradient's size, so the rate
+    sets the noise the weights keep around the ridge optimum. Simulated (M up to 60,000, N up
+    to 9,000, B 16-256, prevalence 0.05-0.2) the noise depends on kappa alone under this rule,
+    with kappa about 0.03 best for a long run; the number of epoch-equivalents needed to settle
+    is about 1/kappa whatever N, M or B. (For weights on the logit scale, W = theta / sqrt(M),
+    the same rule reads kappa tau sqrt(B) / (rbar M).) rbar: geometric mean of the r_j."""
+    rbar = float(torch.exp(torch.log(ratios.double()).mean()))
+    return float(kappa) * float(prs_var) * math.sqrt(float(batch_eff)) / (rbar * math.sqrt(float(n_snps)))
+
+
+def prs_penalty(loss_fn, n_train, prs_var):
+    """Ridge coefficient of each label's PRS weights [n_labels], on the scale of the loss.
+
+    The PRS is scale * x . theta with scale = 1/sqrt(M), so a prior variance ``prs_var`` per
+    theta is a per-SNP prior variance prs_var / M on the logit scale, and ``prs_var`` the prior
+    variance of the whole PRS. For a loss averaged over ``n_train`` people the posterior mode then
+    carries the penalty theta^2 / (2 n_train prs_var). The class weights make a rare disease's
+    weighted loss as curved as if it held more information than it does; r_j, the ratio of the
+    weighted loss's curvature (pi'(1 - pi'), pi' the weighted case share) to the likelihood's
+    (pi(1 - pi)), restores the shrinkage its real information calls for."""
+    return (curvature_ratios(loss_fn) / (2.0 * float(n_train) * float(prs_var))).float()
 
 
 def _drop_from_state(module, name):
@@ -82,6 +120,14 @@ class WideDeepGP(pl.LightningModule):
         if self.final_pool not in POOLS:
             raise ValueError(f"final_pool must be one of {POOLS} (the parser's default 'concat' is not implemented "
                              f"in the published model either)")
+        self.wide = hp.get("wide", "off") or "off"
+        if self.wide not in WIDE_MODES:
+            raise ValueError(f"wide must be one of {WIDE_MODES}")
+        if self.wide == "only" and int(hp.get("annot_dim", 0)):
+            raise ValueError("annotation vectors act on the deep network's input; --wide only has no deep network")
+        if self.wide != "off" and hp.get("loss_outputs", "all") == "target":
+            raise ValueError("the linear PRS path's penalty assumes every output learns from every batch "
+                             "(--loss_outputs all)")
         self.bf16 = hp.get("precision", "32") == "bf16"
         self.grad_ckpt = bool(hp.get("grad_ckpt", False))
         # Mamba-3's backward reads its saved tensors more than once, which the non-reentrant
@@ -93,7 +139,7 @@ class WideDeepGP(pl.LightningModule):
 
         # built in the order the published class builds them, so one seed gives the same initial weights
         encoders, data_embed, norms = [], [], []
-        for p in pos:
+        for p in (pos if self.wide != "only" else []):
             encoders.append(nn.ModuleList([make_block(d, hp.get("mixer", "bimamba1"), bool(hp.get("bi_direct", False)),
                                                       hp.get("m3_d_state")) for _ in range(int(hp["e_layers"]))]))
             data_embed.append(embed(int(hp["enc_in"]), d, np.asarray(p), float(hp["dropout"])))
@@ -101,17 +147,36 @@ class WideDeepGP(pl.LightningModule):
         self.encoders = nn.ModuleList(encoders)
         self.dataEmbed = nn.ModuleList(data_embed)
         self.norm_f = nn.ModuleList(norms)
-        self.mhsa = EncoderLayer(AttentionLayer(FullAttention(mask_flag=False), d_model=d, n_heads=int(hp["n_heads"])),
-                                 d_model=d)
-        n_vec = self.n_seq
-        if self.use_cov:
-            self.covariate_encoder = FCN(int(hp["n_cov"]), d)
-            self.cov_norm = RMSNorm(d, eps=1e-5)
-            n_vec += 1
-        self.combine = FCN(n_vec * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
-                           hidden_layers=int(hp["n_fcn"]))
+        if self.wide != "only":
+            self.mhsa = EncoderLayer(AttentionLayer(FullAttention(mask_flag=False), d_model=d,
+                                                    n_heads=int(hp["n_heads"])), d_model=d)
+            n_vec = self.n_seq
+            if self.use_cov:
+                self.covariate_encoder = FCN(int(hp["n_cov"]), d)
+                self.cov_norm = RMSNorm(d, eps=1e-5)
+                n_vec += 1
+            self.combine = FCN(n_vec * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
+                               hidden_layers=int(hp["n_fcn"]))
         for emb in self.dataEmbed:                       # position tables are a function of the SNP list
             _drop_from_state(emb.position_embedding, "pe")
+
+        # linear PRS path: logit_j += scale * sum_s x_s theta_sj + sum_k cov_k v_kj, from zero
+        if self.wide != "off":
+            self.n_snps = int(sum(len(p) for p in pos))
+            self.prs_scale = 1.0 / math.sqrt(self.n_snps)
+            self.prs = nn.ParameterList([nn.Parameter(torch.zeros(len(p), self.n_labels)) for p in pos])
+            if self.use_cov:
+                self.cov_linear = nn.Parameter(torch.zeros(int(hp["n_cov"]), self.n_labels))
+            self.intercept = nn.Parameter(torch.zeros(self.n_labels))    # set to the weighted base rate below
+            if self.wide == "on":
+                # the deep part starts at zero (no random numbers drawn), so the model starts as
+                # the linear model and the deep part only adds what training gives it
+                nn.init.zeros_(self.combine.layers[-1].weight)
+                nn.init.zeros_(self.combine.layers[-1].bias)
+            self.wide_freeze = bool(hp.get("wide_freeze", False))
+            if self.wide_freeze:                         # stage 2 of a run's search: the PRS of stage 1, fixed
+                for w in self.prs:
+                    w.requires_grad_(False)
 
         # per-SNP annotation vectors: one gain map and one offset map shared by all sequences
         self.annot_dim = int(hp.get("annot_dim", 0))
@@ -141,6 +206,14 @@ class WideDeepGP(pl.LightningModule):
                                 sampler=hp["sampler"], correction=bool(hp["sampling_correction"]),
                                 outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)))
         self.lr, self.l2 = float(hp["lr"]), float(hp["l2"])
+        self.lr_wide = float(hp.get("lr_wide") or 0.0)
+        if self.wide != "off":
+            self.register_buffer("prs_lambda", prs_penalty(self.loss_fn, int(hp["label_counts"]["n"]),
+                                                           float(hp.get("prs_var", 1.0))), persistent=False)
+            with torch.no_grad():                        # intercepts at the weighted base rate, logit(pi')
+                r = self.loss_fn.pi.double().clamp(1e-6, 1 - 1e-6)
+                pw = r * self.loss_fn.c1.double() / (r * self.loss_fn.c1.double() + 1.0 - r)
+                self.intercept.copy_(torch.log(pw / (1.0 - pw)).float())
         self._val, self._train_sum, self._train_cnt = [], None, None
         self.last_val_metrics = None
         self.samples_seen = 0
@@ -172,6 +245,37 @@ class WideDeepGP(pl.LightningModule):
 
     def forward(self, x_all):
         """x_all: the input sequences, then the covariates. Returns logits [B, n_labels]."""
+        if self.wide == "only":
+            return self.wide_logits(x_all)
+        logits = self._deep_logits(x_all)
+        return logits if self.wide == "off" else logits.float() + self.wide_logits(x_all)
+
+    def wide_logits(self, x_all):
+        """The linear PRS path's contribution [B, n_labels], in float32."""
+        with torch.autocast("cuda", enabled=False):
+            out = None
+            for i in range(self.n_seq):
+                t = x_all[i].reshape(x_all[i].shape[0], -1).float() @ self.prs[i]
+                out = t if out is None else out + t
+            out = out * self.prs_scale + self.intercept
+            if self.use_cov:
+                out = out + x_all[-1].float() @ self.cov_linear
+            return out
+
+    def prs_scores(self, x_all):
+        """Each person's PRS per label [B, n_labels] (the SNP part of the linear path)."""
+        with torch.autocast("cuda", enabled=False):
+            return sum(x_all[i].reshape(x_all[i].shape[0], -1).float() @ self.prs[i]
+                       for i in range(self.n_seq)) * self.prs_scale
+
+    def penalty(self):
+        """The ridge penalty of the linear PRS path, on the scale of the loss (0 without the path)."""
+        if self.wide == "off" or self.wide_freeze:
+            return None
+        sq = sum((w.float() ** 2).sum(dim=0) for w in self.prs)
+        return (self.prs_lambda * sq).mean()
+
+    def _deep_logits(self, x_all):
         x_seq = x_all[:self.n_seq]
         pooled = []
         ckpt = self.grad_ckpt and self.training
@@ -204,6 +308,10 @@ class WideDeepGP(pl.LightningModule):
         x_all, y, target = batch
         logits = self(x_all)
         loss, per_label = self.loss_fn(logits, y, int(target))
+        pen = self.penalty()
+        if pen is not None:
+            loss = loss + pen
+            self.log("train/prs_penalty", pen, on_step=True, on_epoch=False, batch_size=y.shape[0])
         self.samples_seen += int(y.shape[0])
         if self._train_sum is None:
             self._train_sum = torch.zeros_like(per_label, dtype=torch.float64)
@@ -251,7 +359,20 @@ class WideDeepGP(pl.LightningModule):
         return self(batch[0]).float().cpu(), batch[1].float().cpu()
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.l2)
+        if self.wide == "off":
+            opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.l2)
+        else:
+            # the PRS weights carry an explicit ridge penalty instead of AdamW's decoupled decay,
+            # so that their optimum is the penalised one; the covariate weights and the intercept
+            # are few and unpenalised
+            prs = [] if self.wide_freeze else list(self.prs)
+            small = ([self.cov_linear] if self.use_cov else []) + [self.intercept]
+            taken = {id(p) for p in list(self.prs) + small}
+            deep = [p for p in self.parameters() if id(p) not in taken]
+            groups = ([{"params": deep, "lr": self.lr, "weight_decay": self.l2}] if deep else []) + \
+                [{"params": small, "lr": self.lr, "weight_decay": 0.0}] + \
+                ([{"params": prs, "lr": self.lr_wide, "weight_decay": 0.0}] if prs else [])
+            opt = torch.optim.AdamW(groups, lr=self.lr)
         warm = int(self.hp.get("warmup_steps", 0) or 0)
         sched = self.hp.get("lr_schedule", "constant")
         total = int(self.hp.get("total_optimizer_steps", 0) or 0)
@@ -281,24 +402,28 @@ class WideDeepGP(pl.LightningModule):
         """Load weights saved by this class or by the published one.
 
         Fixed tables in the source are ignored and the loss's constants are kept as configured.
-        With allow_new_head, the output layer is left at its initial values when the source was
-        trained for other diseases: a layer of a different size, or, when ``source_labels`` (the
-        source's label names) is given, other names or another order, since each row of the
-        layer belongs to one disease. Everything else must match.
+        With allow_new_head, the weights that belong to labels (the output layer and the linear
+        PRS path) are left at their initial values when the source was trained for other
+        diseases: weights of a different size, or, when ``source_labels`` (the source's label
+        names) is given, other names or another order, since each row belongs to one disease.
+        Annotation maps and the linear PRS path may be absent from the source (older models);
+        they then stay at zero. Everything else must match.
         Returns the names that were not loaded.
         """
         own = self.state_dict()
         src = {k: v for k, v in state_dict.items() if not k.endswith("position_embedding.pe")
                and not k.startswith("loss_fn.")}
         skipped = []
-        last = f"combine.layers.{len(self.combine.layers) - 1}."
+        per_label = ("prs.", "cov_linear", "intercept")
+        if self.wide != "only":
+            per_label += (f"combine.layers.{len(self.combine.layers) - 1}.",)
         other_labels = source_labels is not None and list(source_labels) != self.label_names
         for k in list(src):
-            if allow_new_head and other_labels and k.startswith(last):
+            if allow_new_head and other_labels and k.startswith(per_label):
                 skipped.append(k)
                 del src[k]
             elif k in own and own[k].shape != src[k].shape:
-                if allow_new_head and k.startswith(last):
+                if allow_new_head and k.startswith(per_label):
                     skipped.append(k)
                     del src[k]
                 else:
@@ -307,8 +432,11 @@ class WideDeepGP(pl.LightningModule):
         if unknown:
             raise KeyError(f"weights not in this model: {unknown[:5]}")
         missing = [k for k in own if k not in src and not k.startswith("loss_fn.") and k not in skipped]
-        annot_only = all(k.startswith(("annot_gain.", "annot_offset.")) for k in missing)
-        if missing and not annot_only:
+        optional = ("annot_gain.", "annot_offset.", "prs.", "cov_linear", "intercept")
+        if missing and not all(k.startswith(optional) for k in missing):
             raise KeyError(f"weights missing from the source: {missing[:5]}")
         self.load_state_dict(src, strict=False)
+        if "intercept" in missing:                       # a source without the PRS path keeps its intercepts in its head
+            with torch.no_grad():
+                self.intercept.zero_()
         return skipped + missing

@@ -12,21 +12,27 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from . import metrics as M
 
 
-def snapshot_steps(max_steps, per_decade=8, every=None):
+def snapshot_steps(max_steps, per_decade=8, every=None, max_count=0):
     """Optimiser steps at which weights are saved: evenly spaced on a log axis (``per_decade``
-    per tenfold increase), plus every ``every`` steps (one epoch-equivalent), plus the last."""
-    steps = set()
+    per tenfold increase), plus every ``every`` steps (one epoch-equivalent), plus the last.
+    With ``max_count``, the regular ones are thinned (every second, third, ... epoch-equivalent)
+    until the total fits; the log-spaced ones and the last are kept."""
+    logged = set()
     k = 0
-    while True:
+    while per_decade > 0:                                # per_decade <= 0: no log-spaced snapshots
         s = int(round(10 ** (k / float(per_decade))))
         if s > max_steps:
             break
-        steps.add(s)
+        logged.add(s)
         k += 1
-    if every:
-        steps.update(range(int(every), int(max_steps) + 1, int(every)))
-    steps.add(int(max_steps))
-    return sorted(s for s in steps if s >= 1)
+    logged.add(int(max_steps))
+    regular = list(range(int(every), int(max_steps) + 1, int(every))) if every else []
+    if max_count and regular:
+        stride = 1
+        while stride < len(regular) and len(logged | set(regular[stride - 1::stride])) > max_count:
+            stride += 1
+        regular = regular[stride - 1::stride]
+    return sorted(s for s in logged | set(regular) if s >= 1)
 
 
 class Snapshots(pl.Callback):
@@ -134,8 +140,12 @@ class RunLog(pl.Callback):
             self._t, self._n = now, 0
         elif self._writes_now(trainer) and now > self._t:
             rate = self._n / (now - self._t)
+            groups = trainer.optimizers[0].param_groups
             log = {"perf/samples_per_s": rate, "perf/million_sample_snps_per_s": rate * self.n_snps / 1e6,
-                   "train/lr": trainer.optimizers[0].param_groups[0]["lr"]}
+                   "train/lr": groups[0]["lr"]}             # the deep network's (or, with --wide only, the covariates')
+            prs = {id(p) for p in getattr(pl_module, "prs", [])}
+            if prs and any(id(p) in prs for g in groups for p in g["params"]):
+                log["train/lr_wide"] = [g["lr"] for g in groups if any(id(p) in prs for p in g["params"])][0]
             if torch.cuda.is_available():
                 log["perf/gpu_peak_gib"] = self.peak_train_bytes / 2 ** 30
             pl_module.log_dict(log)
@@ -143,8 +153,13 @@ class RunLog(pl.Callback):
 
     def on_before_optimizer_step(self, trainer, pl_module, optimizer):
         if self._writes_now(trainer):
-            sq = sum(float(p.grad.detach().float().pow(2).sum()) for p in pl_module.parameters() if p.grad is not None)
-            pl_module.log("train/grad_norm", sq ** 0.5)
+            prs = {id(p) for p in getattr(pl_module, "prs", [])}
+            sq = sum(float(p.grad.detach().float().pow(2).sum()) for p in pl_module.parameters()
+                     if p.grad is not None and id(p) not in prs)
+            pl_module.log("train/grad_norm", sq ** 0.5)    # everything but the PRS weights, which would dominate it
+            if prs:
+                sq = sum(float(p.grad.detach().float().pow(2).sum()) for p in pl_module.prs if p.grad is not None)
+                pl_module.log("train/grad_norm_wide", sq ** 0.5)
 
     def on_validation_start(self, trainer, pl_module):
         if torch.cuda.is_available():

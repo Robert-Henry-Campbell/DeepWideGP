@@ -43,6 +43,17 @@ from widedeepgp.train import run_training
 
 
 def suggest(trial, cfg, space):
+    # the two stages of the search inside every run (widedeepgp/tuning.py)
+    if space == "linear":                                # the linear model alone: ridge penalty and its pace
+        cfg.prs_var = trial.suggest_float("prs_var", 1e-2, 30.0, log=True)
+        cfg.wide_kappa = trial.suggest_float("wide_kappa", 1e-2, 3e-1, log=True)
+        cfg.lr = trial.suggest_float("lr", 3e-4, 1e-2, log=True)          # covariate weights and intercepts
+        return
+    if space == "deep":                                  # the deep network (on top of the fixed PRS)
+        cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
+        cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
+        cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
+        return
     cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
     cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
     cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
@@ -55,13 +66,16 @@ def suggest(trial, cfg, space):
         cfg.head_hidden = trial.suggest_categorical("head_hidden", [128, 256, 512])
 
 
-def open_study(name, run_dir, min_validations=2, reduction=3, seed=None):
+def open_study(name, run_dir, min_validations=2, reduction=3, seed=None, n_startup_trials=10, prune=True):
     os.makedirs(os.path.join(run_dir, name), exist_ok=True)
     storage = JournalStorage(JournalFileBackend(os.path.join(run_dir, name, "optuna_journal.log")))
+    pruner = (optuna.pruners.SuccessiveHalvingPruner(min_resource=min_validations, reduction_factor=reduction)
+              if prune else optuna.pruners.NopPruner())
     return optuna.create_study(
         study_name=name, storage=storage, direction="maximize", load_if_exists=True,
-        sampler=optuna.samplers.TPESampler(multivariate=True, constant_liar=True, seed=seed),
-        pruner=optuna.pruners.SuccessiveHalvingPruner(min_resource=min_validations, reduction_factor=reduction))
+        sampler=optuna.samplers.TPESampler(multivariate=True, constant_liar=True, seed=seed,
+                                           n_startup_trials=n_startup_trials),
+        pruner=pruner)
 
 
 def load_study(name, run_dir):

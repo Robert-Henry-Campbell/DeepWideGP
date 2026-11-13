@@ -20,10 +20,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "figures")
 NAME = "widedeepgp_architecture"
 MM = 1 / 25.4
-W, H = 183.0, 97.0                                   # figure size in mm
+W, H = 183.0, 117.0                                  # figure size in mm
 INK, INK2, MUTED, EDGE = "#0b0b0b", "#52514e", "#898781", "#c3c2b7"
 BLUE, BLUE_TINT, PLAIN = "#2a78d6", "#cde2fb", "#f6f5f1"
-Y_CHR = 71                                           # bottom edge of the per-chromosome row (mm)
+Y_CHR = 91                                           # bottom edge of the per-chromosome row (mm)
 
 # name, x, y, width, height (mm), status, title, lines, copies drawn behind (one per chromosome)
 BOXES = [
@@ -32,13 +32,18 @@ BOXES = [
     ("encoder", 98.5, Y_CHR, 26, 16, "same", "Sequence encoder", ["bidirectional Mamba,", "one or more layers"], 2),
     ("pool", 130.5, Y_CHR, 21, 16, "same", "Mean pool", ["over the SNPs", "(32-bit)"], 2),
     # one pair of maps serves every chromosome, so the box is drawn once, below the per-chromosome row
-    ("annotation", 49, 52, 62, 16, "new", "Annotation gain and offset",
+    ("annotation", 49, 72, 62, 16, "new", "Annotation gain and offset",
      ["from 96 functional annotations and a no-annotation", "flag (97 channels per SNP); one pair of maps,",
       "shared by all chromosomes (optional)"], 0),
-    ("covariates", 4, 34, 26, 16, "changed", "Covariates", ["year of birth, sex,", "10 genetic PCs"], 0),
-    ("cov_encoder", 130.5, 34, 21, 16, "same", "Covariate MLP", ["two layers"], 0),
-    ("attention", 157.5, 34, 22.5, Y_CHR + 16 - 34, "same", "Attention",
+    ("covariates", 4, 54, 26, 16, "changed", "Covariates", ["year of birth, sex,", "10 genetic PCs"], 0),
+    ("cov_encoder", 130.5, 54, 21, 16, "same", "Covariate MLP", ["two layers"], 0),
+    ("attention", 157.5, 54, 22.5, Y_CHR + 16 - 54, "same", "Attention",
      ["across the 23", "vectors: 22", "chromosomes", "and the", "covariates"], 0),
+    # beside the network: one weight per SNP and disease, reading every SNP of every chromosome
+    ("prs", 35.5, 32, 89, 16, "new", "Linear PRS path",
+     ["one weight per SNP and disease (1,258,200 × 30), ridge penalty;",
+      "one per covariate and disease; 32-bit; 30 logits added to the head's",
+      "(off: the network alone; only: the path alone, a linear model)"], 0),
     ("batches", 4, 8, 57.5, 18, "new", "Batches: a rotation over the diseases",
      ["each batch is half cases and half non-cases of", "one target disease; every disease is the target", "in turn"], 0),
     ("loss", 67, 8, 57.5, 18, "new", "Loss: all 30 outputs learn from every batch",
@@ -65,10 +70,15 @@ COMPONENTS = [
     ("Attention across vectors", "[B, 23, d]", "[B, 23, d]", 12704, "same"),
     ("Output head", "[B, 23 d]", "[B, 30] logits", 196382,
      "changed: 30 outputs instead of 1 (257 parameters per disease); logits instead of probabilities"),
+    ("Linear PRS path", "[B, 1,258,200] standardised dosages and [B, 12] covariates",
+     "[B, 30] logits, added to the head's", 37746390,
+     "new: 1,258,200 x 30 SNP weights with a ridge penalty, 12 x 30 covariate weights and 30 intercepts "
+     "(--wide on; off: the network alone; only: the path alone)"),
     ("Batches", "training split", "B participants, a target disease", 0, "new: rotation of disease-balanced batches"),
     ("Loss", "[B, 30] logits, [B, 30] labels", "scalar", 0,
      "new: sampling-rate correction, class weights, per-disease normalisation"),
-    ("Total (without annotations)", "", "", 465662, ""),
+    ("Total network (without annotations)", "", "", 465662, ""),
+    ("Total with the linear PRS path", "", "", 38212052, ""),
 ]
 
 LEGEND = """**Figure 1. WideDeepGP.** Each of the 22 chromosomes is a sequence of standardised SNP dosages
@@ -82,8 +92,12 @@ draws batches that are balanced on one disease at a time, in rotation, and every
 from every batch through a loss that corrects for how often each participant is drawn. The
 annotation step is optional and is off in the base model. Its gain and offset are computed from
 96 functional annotations and a no-annotation flag per SNP (97 channels) by one pair of maps
-shared by all chromosomes, so that box is drawn once, outside the stack. With a model width of
-32 and one encoder layer the network has 465,662 trainable parameters (table:
+shared by all chromosomes, so that box is drawn once, outside the stack. Beside the network, the
+linear PRS path gives every SNP and disease a weight of its own, with a ridge penalty, and every
+covariate and disease a weight; its 30 logits are added to the head's, so the network only has
+to add what a genome-wide PRS and the covariates miss (`--wide on`, the default; `off` is the
+network alone, `only` the path alone). With a model width of 32 and one encoder layer the
+network has 465,662 trainable parameters and the path 37,746,390 (table:
 `widedeepgp_architecture_data.csv`).
 """
 
@@ -147,6 +161,17 @@ def draw():
     line(ax, [(b["batches"][0], mid("batches")), (x_rail, mid("batches")), (x_rail, mid("genotypes"))])
     arrow(ax, (x_rail, mid("covariates")), (b["covariates"][0], mid("covariates")))
     arrow(ax, (x_rail, mid("genotypes")), (b["genotypes"][0], mid("genotypes")))
+    # the linear PRS path reads every SNP and the covariates from the batch; its logits join the head's
+    arrow(ax, (x_rail, mid("prs")), (b["prs"][0], mid("prs")))
+    ax.text((x_rail + b["prs"][0]) / 2 + 0.8, mid("prs") + 0.9, "all SNPs,", fontsize=7, color=MUTED, ha="center",
+            va="bottom")
+    ax.text((x_rail + b["prs"][0]) / 2 + 0.8, mid("prs") - 0.9, "covariates", fontsize=7, color=MUTED, ha="center",
+            va="top")
+    x_join = b["head"][0] + 9
+    line(ax, [(right("prs"), mid("prs")), (x_join, mid("prs"))])
+    arrow(ax, (x_join, mid("prs")), (x_join, b["head"][1] + b["head"][3]))
+    ax.text(x_join + 1.2, (mid("prs") + b["head"][1] + b["head"][3]) / 2, "+ logits", fontsize=7, color=MUTED,
+            ha="left", va="center")
 
     # labels on the long arrows
     ax.text((right("batches") + b["loss"][0]) / 2, mid("batches") + 1.2, "labels", fontsize=7, color=MUTED, ha="center",

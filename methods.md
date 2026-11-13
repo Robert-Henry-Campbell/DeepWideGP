@@ -226,10 +226,14 @@ Training draws batches that are balanced on one disease at a time, in rotation, 
 output learns from every batch through a loss that corrects for how often each participant is
 drawn. The annotation step is optional and is off in the base model. Its gain and offset are
 computed from 96 functional annotations and a no-annotation flag per SNP (97 channels) by one
-pair of maps shared by all chromosomes, so that box is drawn once, outside the stack. (Vector
+pair of maps shared by all chromosomes, so that box is drawn once, outside the stack. Beside the network, the
+linear PRS path (section 4.10) gives every SNP and disease a weight of its own, with a ridge
+penalty, and every covariate and disease a weight; its 30 logits are added to the head's, so the
+network only has to add what a genome-wide PRS and the covariates miss (`--wide on`, the
+default; `off` is the network alone, `only` the path alone). With a model width of 32 and one
+encoder layer the network has 465,662 trainable parameters and the path 37,746,390. (Vector
 version and the component table: `figures/widedeepgp_architecture.pdf`,
-`figures/widedeepgp_architecture_data.csv`; drawn by `scripts/make_architecture_figure.py`.) The
-linear PRS path of section 4.10, added on 13 November 2026, is not yet drawn.
+`figures/widedeepgp_architecture_data.csv`; drawn by `scripts/make_architecture_figure.py`.)
 
 ### 4.1 Input and token embedding
 

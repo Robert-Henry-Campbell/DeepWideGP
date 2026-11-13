@@ -779,3 +779,19 @@ the genotypes per epoch, the expensive part at full size.
   starts from a copy of the linear stage computed on the CPU (identical settings).
 - `tests/test_ml_wide.py` `test_a_run_tunes_itself`: also continues a run whose `linear/` was
   moved. CPU: 17 passed, 3 skipped (GPU) in test_ml_wide.py.
+
+## 2026-11-13 (01:30 UTC) — The schematic draws the linear PRS path; stores rebuilt
+
+- `scripts/make_architecture_figure.py`: a "Linear PRS path" box (all SNPs and covariates in,
+  30 logits added to the head's), the figure 117 mm tall instead of 97 (183 mm wide, 7 pt), the
+  component table with the path (37,746,390 parameters: 1,258,200 × 30 SNP weights, 12 × 30
+  covariate weights, 30 intercepts) and totals with and without it; the legend and the caption
+  in methods.md say so (the "not yet drawn" sentence is gone). Redrawn:
+  `figures/widedeepgp_architecture.{png,pdf}`, `_data.csv`, `_legend.md`.
+- Data: both genotype stores were rebuilt without the withdrawn participants and swapped in at
+  01:19 UTC (333,324 and 17,039 participants; every check passed; DeepWideGP-Scripts `widening`
+  67aba7f). Store rows shifted, so the cached training-split SNP statistics are recomputed once
+  per dataset (new cache files; the old ones are unused).
+- Gate G1, fixed τ = 1 (CPU, 40 epoch-equivalents, finished 00:58): best mean tuning AUROC
+  0.7166 against GBLUP 0.7132; the 20-SNP trait −0.003, the others +0.003 to +0.008. Training
+  took 266 s of the 52 min wall time: the linear model is bound by reading genotypes.

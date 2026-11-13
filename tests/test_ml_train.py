@@ -467,7 +467,8 @@ def test_the_tuner_runs_shared_trials_and_prunes(tmp_path):
     base = ["--study", "tune", "--n_trials", "2", "--run_dir", str(tmp_path / "runs"), "--min_validations", "1", "--",
             "--data_dir", data_dir, "--label", "multi", "--rd_mode", "store", "--final_pool", "atten", "--d_model", "16",
             "--n_heads", "4", "--batch_size", "16", "--num_workers", "0", "--steps_per_epoch_equiv", "8",
-            "--val_per_epoch", "2", "--max_epoch_equiv", "1.5", "--stop_patience", "0"]
+            "--val_per_epoch", "2", "--max_epoch_equiv", "1.5", "--stop_patience", "0",
+            "--min_participants", "0", "--val_min_participants", "0"]   # the floors are for real training sets
     env = dict(os.environ, PYTHONPATH=REPO)
     workers = [subprocess.Popen([sys.executable, os.path.join(REPO, "tune_optuna.py")] + base, cwd=REPO, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for _ in range(2)]

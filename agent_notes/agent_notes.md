@@ -816,3 +816,17 @@ the genotypes per epoch, the expensive part at full size.
   section 8 and README say so. A rerun of the real-label linear stage with this grid is queued
   (`real_linear_grid9`); the GPU gate on real labels starts from it. The GPU-test export
   (code_81ded30) differs from this commit only in that constant and documents.
+
+## 2026-11-13 (04:00 UTC) — GPU tests of 81ded30: all pass but one tuner test, which timed out
+
+- Ran 02:55–03:22 UTC on GPUs 1–4 (all five were free at 02:54), export
+  `runs/gate_evidence/final_tests_2026-11-13/code_81ded30`: test_ml_wide.py 21 passed (with the
+  three GPU tests of the PRS path and the slow CPU learning check), test_ml_model.py 9 passed,
+  test_ml_train.py slow 2 passed (1 skipped), capacity probe 4 of 4 for both code versions;
+  test_ml_train.py quick 19 passed, 1 failed: `test_the_tuner_runs_shared_trials_and_prunes`
+  timed out (900 s). Its trials go through `main_multilabel.parse_args`, whose new
+  `--min_participants 128000` floor turned 1.5 epoch-equivalents of 600 synthetic people into
+  about 1,000 validation passes. Fixed in the test (`--min_participants 0
+  --val_min_participants 0`, as the other small tests); the rerun of that test waits for free GPUs
+  (`runs/gate_evidence/final_tests_2026-11-13/rerun_tuner_test_when_free.sh`), and the GPU gates
+  wait for it.

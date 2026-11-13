@@ -795,3 +795,24 @@ the genotypes per epoch, the expensive part at full size.
 - Gate G1, fixed τ = 1 (CPU, 40 epoch-equivalents, finished 00:58): best mean tuning AUROC
   0.7166 against GBLUP 0.7132; the 20-SNP trait −0.003, the others +0.003 to +0.008. Training
   took 266 s of the 52 min wall time: the linear model is bound by reading genotypes.
+
+## 2026-11-13 (03:55 UTC) — Gates on the proxy: the linear stage passes; the default grid reaches down to 0.003
+
+- G1 with the grid stage (simulated traits; `runs/wide_gate/sim_linear_grid`, CPU, 01:19–02:03):
+  per-disease mean tuning AUROC 0.7187 against GBLUP 0.7132 (sim20 −0.0055, the others +0.007 to
+  +0.010; τ 3 for four traits, 1 for sim200); at one τ (3) at the end of training 0.7185, so
+  selection adds next to nothing there; covariates alone 0.505 (they have no effect on these
+  traits). Rescoring reproduces every choice exactly.
+- G3, linear half (real labels of the pilot's proxy, 30 diseases; `runs/wide_gate/real_linear_grid`,
+  CPU, 02:03–03:46): covariates alone 0.6607 (as in the pilot); the linear model at one τ (0.1)
+  at the end of training 0.6616 (+0.0009, 24 of 30 diseases above their covariates-only AUROC);
+  with τ and pass chosen per disease 0.6641 (+0.0034, optimistic: chosen on the tuning set). The
+  pilot's network ended at 0.6593 (−0.0014) and the pilot's clumped PRS added +0.0014. Table:
+  `real_linear_grid/linear/per_disease/gate_g3_linear_vs_covariates.csv` (aggregate). Best τ on
+  real labels is small (0.03–0.3; mean-best 0.1), and 6 of 30 diseases chose the lowest grid
+  value, 0.03.
+- Code: `widedeepgp/tuning.py` `DEFAULT_PRS_GRID` now 0.003, 0.01, …, 30 (nine values), so that a
+  disease whose SNPs carry nothing usable can fall back to (almost) its covariates; methods.md
+  section 8 and README say so. A rerun of the real-label linear stage with this grid is queued
+  (`real_linear_grid9`); the GPU gate on real labels starts from it. The GPU-test export
+  (code_81ded30) differs from this commit only in that constant and documents.

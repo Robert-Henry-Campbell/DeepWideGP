@@ -655,9 +655,12 @@ the size of the training set, which the scaling study varies. A run, for one dat
 training set, is a search in two stages:
 
 1. **The linear model alone** (`--wide only`), one training run over a grid of prior variances
-   (section 4.10; by default τ = 0.03, 0.1, 0.3, 1, 3, 10 and 30, half-decade steps over the
-   range a disease's PRS can take, from a liability-scale heritability of a few percent to well
-   over one half). Each disease keeps its best τ and validation pass, by tuning AUROC. Batches
+   (section 4.10; by default τ = 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10 and 30, half-decade steps
+   over the range a disease's PRS can take, from a liability-scale heritability of a few percent
+   to well over one half, and below, where the PRS is negligible and a disease whose SNPs give
+   the model nothing usable falls back to its covariates; the first grid stopped at 0.03, which
+   6 of the 30 diseases chose on the pilot's proxy region). Each disease keeps its best τ and
+   validation pass, by tuning AUROC. Batches
    of 256, one validation per epoch-equivalent but at most one per 20,000 participants, the run's
    budget (30 epoch-equivalents and at least 128,000 participants), the learning rates on a
    cosine to zero over that budget, and early stopping after ten passes without improvement.

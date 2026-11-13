@@ -55,8 +55,11 @@ FINISHED = (TrialState.COMPLETE, TrialState.PRUNED)
 # arguments that may change when a search is continued
 FREE_ARGS = {"tune_gpus", "tune_worker", "num_workers", "eval_batch_size", "resume", "tune_trials"}
 # prior variances of the PRS (on the logit scale) for the linear stage: half-decade steps over
-# the range a disease's PRS can have (a liability-scale heritability of a few percent to well over one half)
-DEFAULT_PRS_GRID = "0.03,0.1,0.3,1,3,10,30"
+# the range a disease's PRS can have (a liability-scale heritability of a few percent to well over
+# one half), down to values at which the PRS is negligible, so that a disease whose SNPs give the
+# model nothing usable falls back to its covariates (on the pilot's proxy region, 6 of 30 diseases
+# chose 0.03, then the lowest value)
+DEFAULT_PRS_GRID = "0.003,0.01,0.03,0.1,0.3,1,3,10,30"
 # learning rate of the linear stage's covariate weights and intercepts (the network's default,
 # 1e-4, would leave them short of their optimum on the smallest training sets: about 500 steps)
 LINEAR_LR = 1e-2

@@ -142,7 +142,7 @@ the pilot on real data (DeepWideGP-Scripts, branch `widening`,
 on the covariates and learned nothing detectable from unselected SNPs. Since 13 November 2026
 the model therefore contains a linear PRS path (one weight per SNP and disease, with a ridge
 penalty) beside the network, and every run tunes itself: first the linear model alone, at
-seven prior variances side by side with each disease keeping its best, then the network on top
+nine prior variances side by side with each disease keeping its best, then the network on top
 of that PRS, keeping the network only where it does better on the tuning set.
 
 ```bash
@@ -178,7 +178,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--wide` | linear PRS path: `on` (beside the network), `off` (the network alone), `only` (PRS and covariates alone) | `on` |
 | `--prs_var`, `--wide_kappa` | the PRS's ridge penalty (prior variance of the PRS) and the pace of its weights (sets their learning rate) | 1 (a grid in a search), 0.1 |
 | `--tune_trials` | trials of the second stage of a run's search (network on top of the linear model); 0 = no search, train the given settings once | 12 |
-| `--prs_grid` | prior variances of the linear stage, trained side by side; each disease keeps its best (`none`: one variance, `--prs_var`) | 0.03,0.1,0.3,1,3,10,30 in a search |
+| `--prs_grid` | prior variances of the linear stage, trained side by side; each disease keeps its best (`none`: one variance, `--prs_var`) | 0.003,0.01,…,10,30 (half-decade steps) in a search |
 | `--tune_gpus` | GPUs for the trials: `auto` (the free ones minus one), a list, or `none` (here, one after another) | `auto` |
 | `--val_min_participants`, `--val_max_epoch_equiv`, `--min_participants` | validate at most once per this many participants, at least once per this many epoch-equivalents; train at least this many participants | 20,000, 1, 128,000 |
 | `--resume`, `--init_from <snapshot>` | continue a run on the same data with the same settings (it may train longer); start a new run from saved weights (new output layer if the diseases differ in number, names or order) | |

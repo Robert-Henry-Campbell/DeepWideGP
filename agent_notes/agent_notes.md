@@ -769,3 +769,13 @@ the genotypes per epoch, the expensive part at full size.
   the grid's weights deleted and the per-disease model kept, score_snapshots scores it). CPU
   suite: 74 passed, 28 skipped (GPU).
 - methods.md sections 4.10, 5.2, 6, 7, 8, 10; README.
+
+## 2026-11-13 (00:50 UTC) — A moved run folder: the linear stage is read where it is
+
+- `widedeepgp/tuning.py` `linear_summary`: the per-disease model and the checkpoints are located
+  inside the stage's folder (`linear/per_disease/checkpoints/<name>`), not at the absolute paths
+  recorded when the stage ran, so a run folder that was moved or copied still continues. The
+  overnight GPU gates rely on this: the joint stage of the simulated-trait and real-label gates
+  starts from a copy of the linear stage computed on the CPU (identical settings).
+- `tests/test_ml_wide.py` `test_a_run_tunes_itself`: also continues a run whose `linear/` was
+  moved. CPU: 17 passed, 3 skipped (GPU) in test_ml_wide.py.

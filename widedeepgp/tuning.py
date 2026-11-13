@@ -228,11 +228,14 @@ def linear_summary(base):
         raise RuntimeError(f"the linear stage in {d} did not finish; see its folder and workers/linear_gpu*.log")
     with open(path) as f:
         r = json.load(f)
+    # paths inside the stage's folder, not those recorded when it ran: the folder may have moved
     if r.get("per_disease_checkpoint"):
-        best_dir, ckpt, value = r["per_disease_dir"], r["per_disease_checkpoint"], r["per_disease_val_auroc_mean"]
+        best_dir, value = os.path.join(d, "per_disease"), r["per_disease_val_auroc_mean"]
+        ckpt = os.path.join(best_dir, "checkpoints", os.path.basename(r["per_disease_checkpoint"]))
         params = {"prs_var_per_label": {row["label"]: row["prs_var"] for row in r["per_disease"]}}
     else:                                                # --prs_grid none: one prior variance for every disease
-        best_dir, ckpt, value = d, r["best_checkpoint"], r["best_val_auroc_mean"]
+        best_dir, value = d, r["best_val_auroc_mean"]
+        ckpt = os.path.join(d, "checkpoints", os.path.basename(r["best_checkpoint"]))
         with open(os.path.join(d, "config.json")) as f:
             params = {"prs_var": json.load(f)["model"]["prs_var"]}
     row = {"trial": 0, "state": "complete", "value": value, "params": params, "run_dir": os.path.abspath(d),

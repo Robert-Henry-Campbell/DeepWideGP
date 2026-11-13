@@ -207,6 +207,14 @@ def test_a_run_tunes_itself(tmp_path):
     assert abs(mean["value"] - r["best_val_auroc_mean"]) < 1e-6      # scoring the run scores its chosen model
     main_multilabel.main(argv)                                       # rerunning continues: nothing left to do
     assert json.load(open(root / "results.json"))["best_val_auroc_mean"] == r["best_val_auroc_mean"]
+    import shutil                                                    # a run folder that moved is read where it is
+    moved = tmp_path / "runs" / "t" / "moved"
+    shutil.copytree(root / "linear", moved / "linear")
+    shutil.rmtree(root / "linear")
+    main_multilabel.main([a if a != "r" else "moved" for a in argv])
+    m = json.load(open(moved / "results.json"))
+    assert m["best_val_auroc_mean"] == r["best_val_auroc_mean"]
+    assert m["stages"]["linear"]["best_checkpoint"] == str(moved / "linear" / "per_disease" / "checkpoints" / "best.ckpt")
     with pytest.raises(ValueError, match="other arguments"):         # but not with other arguments
         main_multilabel.main(argv + ["--prs_var", "3.0"])
 

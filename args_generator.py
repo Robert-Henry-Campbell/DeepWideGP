@@ -101,6 +101,7 @@ def args_initial(argv=None):
     parser.add_argument('--prs_grid', type=str, default=None, help="with --wide only: comma-separated prior variances (as --prs_var); one linear model per value is trained in the same pass, and each disease keeps the value and validation pass with its best tuning AUROC ('none': no grid)")
     parser.add_argument('--tune_trials', type=int, default=0, help='hyper-parameter search of this many trials inside the run (0: train the given settings once)')
     parser.add_argument('--tune_space', type=str, default='run', help="'run': the two-stage search of widedeepgp/tuning.py")
+    parser.add_argument('--tune_first_given', action='store_true', default=False, help='the first trial of a search (network stage) uses the given --lr, --l2 and --dropout, e.g. published settings')
     parser.add_argument('--tune_gpus', type=str, default=None, help="GPUs for the trials of a search: 'auto' (the free ones minus one), a list such as 1,2,3, or 'none' (one after another in this process)")
     parser.add_argument('--tune_worker', action='store_true', default=False, help=argparse.SUPPRESS)
     parser.add_argument('--val_min_participants', type=int, default=0, help='validate at most once per this many participants seen')

@@ -370,6 +370,10 @@ def tune_run(base, argv, script):
                 init = summaries[stage]["best_checkpoint"]
                 continue
             study = open_stage_study(base, stage)
+            if getattr(base, "tune_first_given", False) and not study.trials:
+                # the settings given on the command line (for the classic DeepGP, its published ones) are tried first
+                study.enqueue_trial({"lr": float(base.lr), "l2": float(base.l2), "dropout": float(base.dropout)},
+                                    user_attrs={"given": True})
             stale = fail_stale(study)
             if stale:
                 print(f"{stage}: {stale} trial(s) left running by an earlier attempt marked failed", flush=True)

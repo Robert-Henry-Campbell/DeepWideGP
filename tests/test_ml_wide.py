@@ -369,6 +369,31 @@ def test_a_trial_a_crash_interrupted_carries_on_from_its_checkpoint(tmp_path, mo
     assert len(done) == 2 and done[0].user_attrs["resumes_trial"] == 0
 
 
+def test_a_search_can_try_the_given_settings_first(tmp_path, monkeypatch):
+    """--tune_first_given: the first trial of the network stage uses --lr, --l2 and --dropout as
+    given (the classic DeepGP comparator's published settings), the rest are the search's."""
+    import main_multilabel
+    from widedeepgp import train, tuning
+    seen = []
+
+    def fake_run_training(cfg, trial=None):
+        seen.append((cfg.lr, cfg.l2, cfg.dropout))
+        d = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name)
+        os.makedirs(os.path.join(d, "checkpoints"), exist_ok=True)
+        with open(os.path.join(d, "results.json"), "w") as f:
+            json.dump({"val": {}, "val_mean": {}}, f)
+        return {"best_val_auroc_mean": 0.6 + 0.01 * len(seen), "epoch_equivalents": 1.0, "train_seconds": 1.0,
+                "best_checkpoint": os.path.join(d, "checkpoints", "best.ckpt")}
+
+    monkeypatch.setattr(train, "run_training", fake_run_training)
+    argv = ["--label", "x", "--run_dir", str(tmp_path), "--experiment", "t", "--exp_name", "r", "--wide", "off",
+            "--tune_trials", "3", "--tune_gpus", "none", "--tune_first_given", "--lr", "7e-4", "--l2", "1e-4",
+            "--dropout", "0.2"]
+    out = main_multilabel.main(argv)
+    assert seen[0] == pytest.approx((7e-4, 1e-4, 0.2)) and len(seen) == 3
+    assert len({tuple(x) for x in seen}) == 3 and out["chosen_stage"] == "deep"
+
+
 def test_the_pruner_sees_a_resumed_run_s_pass_numbers():
     from widedeepgp.callbacks import OptunaPruning
 

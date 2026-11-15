@@ -157,8 +157,13 @@ def objective(trial, base, stage, init):
     import tune_optuna
     from widedeepgp.train import run_training
     cfg = stage_cfg(base, stage, init)
-    tune_optuna.suggest(trial, cfg, "deep")
-    cfg.exp_name = os.path.join(base.exp_name or "run", stage, f"trial_{trial.number:04d}")
+    tune_optuna.suggest(trial, cfg, "deep")             # an enqueued trial gets its queued settings back
+    resume_from = trial.user_attrs.get("resume_from")
+    if resume_from:                                      # a trial a crash interrupted: carry on in its folder
+        cfg.exp_name = os.path.relpath(resume_from, os.path.abspath(os.path.join(cfg.run_dir, cfg.experiment)))
+        cfg.resume = True
+    else:
+        cfg.exp_name = os.path.join(base.exp_name or "run", stage, f"trial_{trial.number:04d}")
     trial_dir = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name)
     trial.set_user_attr("run_dir", os.path.abspath(trial_dir))
     try:
@@ -251,10 +256,24 @@ def linear_summary(base):
 
 
 def fail_stale(study):
-    """Trials still marked running when a search starts were left by a crash: mark them failed."""
+    """Trials still marked running when a search starts were left by a crash: mark them failed,
+    and queue each again with the same settings. A trial that had written a checkpoint carries
+    on from its last checkpoint in its own folder (resume_from), so a crash at full size, where a
+    trial can run for days, loses only the time since that checkpoint."""
+    from widedeepgp.train import last_checkpoint
     stale = study.get_trials(deepcopy=False, states=(TrialState.RUNNING,))
     for t in stale:
         study.tell(t.number, state=TrialState.FAIL)
+        if not t.params:
+            continue
+        attrs = {"resumes_trial": t.number}
+        d = t.user_attrs.get("run_dir")
+        try:
+            if d and last_checkpoint(os.path.join(d, "checkpoints")):
+                attrs["resume_from"] = d
+        except ValueError:                               # an ambiguous checkpoint folder: start afresh
+            pass
+        study.enqueue_trial(dict(t.params), user_attrs=attrs)
     return len(stale)
 
 

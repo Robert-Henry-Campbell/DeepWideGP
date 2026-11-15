@@ -896,3 +896,34 @@ Robert: "I want the recorded result to be ridge + widedeepgp no matter which doe
 - A project-wide `/mnt/sdg/robert/deepwidegp/CLAUDE.md` (outside git) now holds the reusable
   lessons for every session in the project, first among them that long jobs must be launched
   detached (setsid nohup, with a log and a completion line), never as session background tasks.
+
+## 2026-11-15 (21:40 UTC) — Trial resume; no time limits; Robert's answers on the open questions
+
+Robert's decisions: model size is varied later, several times, at the largest training size only
+(each ladder varies one factor); drop the single-disease WideDeepGP comparators (E11, I25, I48,
+M17, K80 and any like them): the single-disease comparator is the classic DeepGP, for I10 (the
+highest N_eff of the 30) at the five sizes; the headline model is WideDeepGP; add trial resume
+and remove every time limit; nothing is to start on 29 Nov.
+
+### Code changes
+
+- `widedeepgp/tuning.py` `fail_stale`: a trial a crash left running is marked failed and queued
+  again (`enqueue_trial`) with the same settings; if its folder holds a last checkpoint, the
+  queued trial carries `resume_from` and `objective` continues it in that folder (`cfg.resume`),
+  otherwise it starts again afresh. Before, it was replaced by a new trial from scratch.
+- `widedeepgp/callbacks.py` `OptunaPruning(steps_per_pass=...)` (passed by `run_training`):
+  reports a pass's number in the run (optimiser steps over steps per pass), so a resumed trial
+  is compared at the right rung of successive halving.
+- Tests: `test_a_trial_a_crash_interrupted_carries_on_from_its_checkpoint` (run_training
+  replaced by a stub: the same settings come back, the one with a checkpoint resumes in its own
+  folder, the other starts afresh) and `test_the_pruner_sees_a_resumed_run_s_pass_numbers`.
+  CPU suite: 78 passed, 28 skipped (GPU).
+- methods.md: section 7 (continuing a search, no time limits; snapshots give test performance
+  against compute after the unlock, FLOPs computed afterwards), section 9 (the classic DeepGP
+  comparator as specified: PGI arm's I10 GWAS, p < 0.05, plink2 clumping at r² 0.1 within 250 kb,
+  published model and training, 12-trial search with the published settings first, seed 1; model
+  size varied later at the largest size).
+- The ladder chain (`runs/ladder/run_ladder_2026-11-15.sh`, restarted 21:22 UTC) has no time
+  limit, runs each rung from a frozen export of `widening` (`runs/ladder/code_<commit>`), and
+  runs the classic DeepGP comparator after each rung when `runs/classic_deepgp/run_rung.sh`
+  exists.

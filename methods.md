@@ -642,9 +642,15 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   per tenfold increase; eight in the pilot) and at every epoch-equivalent, at most 40 per trial
   (the regular ones are thinned first), with the number of updates, participants seen and
   training time of each. After a run's search only the chosen trial and the first stage's
-  per-disease model keep their weights; every trial keeps its records. Every snapshot can be scored afterwards, which gives
-  performance as a function of training compute, and allows the best snapshot to be read off
-  for each disease separately as a secondary analysis.
+  per-disease model keep their weights; every trial keeps its records. Every snapshot can be
+  scored afterwards, which gives performance as a function of training compute (as Kaplan et
+  al., 2020, report loss against compute), and allows the best snapshot to be read off for each
+  disease separately as a secondary analysis. The tuning set is scored at every validation pass
+  as training runs; the test set is never scored during training: once it is unlocked (section
+  9), the snapshots are scored on it, which gives test performance against compute without the
+  test set ever informing a choice. The compute of a snapshot in floating-point operations
+  follows from the model's size, the number of SNPs and the participants seen, which are all
+  recorded, so it is computed afterwards rather than logged.
 - **Fixed tables are not saved.** Position tables and annotation matrices are functions of the
   SNP list and are rebuilt from the dataset; a saved model holds its weights and its
   configuration, with a digest of its positions and of its annotation matrices, and refuses to
@@ -652,8 +658,12 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   before the annotation digest was added, such as the pilot's annotation and GWAS-annotation
   runs, loads with a warning).
 - **Continuing a search.** Rerunning a run's command continues its search: finished trials
-  are kept, trials that a crash left running are replaced, and a search continued with other
-  arguments than it was started with is refused (only the number of trials may grow).
+  are kept; a trial that a crash left running is queued again with the same settings and
+  carries on from its last checkpoint in its own folder (one that had written none starts again
+  with the same settings), which matters at full size, where one trial can run for days; and a
+  search continued with other arguments than it was started with is refused (only the number of
+  trials may grow). The pruner sees a resumed trial's validation passes by their number in the
+  run, so it is compared at the right rung. No run has a time limit (Robert, 15 November 2026).
 - **Resuming, and starting from saved weights.** `--resume` continues a run from its last
   checkpoint (`last.ckpt`, or the highest `last-vN.ckpt` where Lightning wrote one, as in a run
   directory the pilot's code copied and resumed); a copy of a run directory (made while nothing
@@ -761,21 +771,40 @@ covariates-only reference is the same regression without a score. The test set i
 for both arms together, after every choice at every training size is recorded; the metrics,
 intervals and learning curves are those of that document.
 
-**The published DeepGP as an additional comparator** (Robert's decision of 15 November 2026,
-for one disease only). For the disease with the highest effective sample size, hypertension
-(I10; N_eff 186,775 in the full training set), the published single-disease DeepGP
-(`main_genome.py` with its published settings: model width 32, one encoder layer, four attention
-heads, attention pooling, a two-layer head, batch 64, learning rate 7 × 10⁻⁴, weight decay
-10⁻⁴, dropout 0.2) is trained at each of the five training sizes on the SNPs its pipeline
-selects from a GWAS of that size's training participants (the PGI arm's REGENIE analysis of the
-same participants): SNPs with *p* < 0.05, then LD clumping (parameters as published; to be
-confirmed before the runs). It uses the project's single seed (1) rather than the script's
-default (33), stops early on the tuning set, and is evaluated with the protocol above.
+**The classic DeepGP as the single-disease comparator** (Robert's decisions of 15 November
+2026). The headline model is WideDeepGP. The only single-disease comparator is the classic
+DeepGP (the published single-disease model on GWAS-selected SNPs), for one disease, the one
+with the highest effective sample size of the 30, hypertension (I10; N_eff 186,775 in the full
+training set), at each of the five training sizes; the single-disease WideDeepGP runs of the
+original plan (E11, I25, I48, M17, K80) are dropped. At each size:
+
+- **SNPs**, as the published pipeline selects them: from the PGI arm's REGENIE GWAS of I10 on
+  that size's training participants, the SNPs with *p* < 0.05, LD-clumped with plink2 at
+  r² 0.1 within 250 kb (the published clumping parameters were not available; these are the
+  standard ones and the strictest of the PGI arm's C+T options), LD computed on the same
+  training participants.
+- **Model and training as published**: model width 32, one encoder layer, four attention
+  heads, attention pooling, a two-layer head with 256 hidden units, 32-bit arithmetic, batches
+  of 64 drawn at random, AdamW with learning rate 7 × 10⁻⁴ and weight decay 10⁻⁴, dropout 0.2,
+  and an unweighted cross-entropy loss; with the twelve covariates of every other model.
+- **Run under the study's protocol**: seed 1; the same per-run search as WideDeepGP's network
+  (12 Optuna trials over learning rate, weight decay and dropout, the published settings being
+  the first), early stopping on the tuning set, the tuning set scored as a whole; the test set
+  only at the joint unlock. The published script itself is not used as it stands: it fixes the
+  seed (33) and the data folder, scores the test set at the end of every run and writes
+  per-person predictions into the repository. Its network and training are reproduced by the
+  model code (the same output to within 10⁻⁶ and the same initial weights from the same seed;
+  section 12), with one disease, no class weights (γ = 0) and shuffled batches.
+
 Consequences: for I10 the comparison holds three kinds of model at every size (the seven PGIs,
-DeepGP on GWAS-selected SNPs, and WideDeepGP on all HapMap3+ SNPs); the selection uses only
-training participants of that size, so no tuning or test label enters it; each size needs its
-own SNP set and genotype dataset; and with one disease it says nothing about the other 29.
-Status: planned, not run.
+the classic DeepGP on GWAS-selected SNPs, and WideDeepGP on all HapMap3+ SNPs); the selection
+uses only training participants of that size, so no tuning or test label enters it; each size
+needs its own SNP set and genotype dataset; and with one disease it says nothing about the
+other 29. The runs follow each WideDeepGP size in the ladder's chain.
+
+**Model size** (Robert, 15 November 2026). Each ladder varies one factor and holds the others
+fixed. The training-size ladder above keeps the model at width 32 and one layer; model size is
+varied later, several times, at the largest training size only.
 
 ## 10. What changed from single-phenotype DeepGP
 

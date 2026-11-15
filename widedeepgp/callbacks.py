@@ -267,10 +267,13 @@ class RunCheckpoint(ModelCheckpoint):
 
 class OptunaPruning(pl.Callback):
     """Report the watched validation metric to an Optuna trial after every validation pass and
-    stop the run when the trial's pruner says so."""
+    stop the run when the trial's pruner says so. The step reported is the pass's number in the
+    run (optimiser steps over steps per pass), so a run resumed after a crash carries on counting
+    where it stopped and the pruner compares it at the right rung."""
 
-    def __init__(self, trial, monitor="val/auroc_mean"):
+    def __init__(self, trial, monitor="val/auroc_mean", steps_per_pass=None):
         self.trial, self.monitor = trial, monitor
+        self.steps_per_pass = steps_per_pass
         self.n = 0
         self._last_step = -1
 
@@ -282,6 +285,8 @@ class OptunaPruning(pl.Callback):
             return
         self._last_step = int(trainer.global_step)
         self.n += 1
+        if self.steps_per_pass:
+            self.n = max(1, int(round(int(trainer.global_step) / float(self.steps_per_pass))))
         self.trial.report(float(value), step=self.n)
         if self.trial.should_prune():
             import optuna

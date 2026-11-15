@@ -442,7 +442,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
     if int(cfg.stop_patience) > 0:
         callbacks.append(EarlyStoppingOnce(monitor=MONITOR, mode="max", patience=int(cfg.stop_patience)))
     if trial is not None:
-        callbacks.append(OptunaPruning(trial, MONITOR))
+        callbacks.append(OptunaPruning(trial, MONITOR, steps_per_pass=sched["batches_per_validation"] // acc))
     logger = TensorBoardLogger(save_dir=run_dir, name="", version="tb", default_hp_metric=False)
     trainer = pl.Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
                          max_epochs=sched["validations"], accumulate_grad_batches=acc, callbacks=callbacks,

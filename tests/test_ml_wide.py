@@ -324,6 +324,76 @@ def test_a_search_replaces_trials_a_crash_left_running(tmp_path):
     assert study.trials[0].state == optuna.trial.TrialState.FAIL
 
 
+def test_a_trial_a_crash_interrupted_carries_on_from_its_checkpoint(tmp_path, monkeypatch):
+    """At full size a trial can run for days: after a crash, a search must not throw it away.
+    The interrupted trial is queued again with its settings and continues from its last
+    checkpoint in its own folder; one that had written no checkpoint starts again afresh."""
+    from types import SimpleNamespace
+    import optuna
+    import tune_optuna
+    from widedeepgp import train, tuning
+    import main_multilabel
+    base = main_multilabel.parse_args(["--label", "x", "--run_dir", str(tmp_path), "--experiment", "t",
+                                       "--exp_name", "r", "--wide", "off"])
+    study = tuning.open_stage_study(base, "deep")
+    crashed = []
+    for i, with_ckpt in enumerate((True, False)):           # two trials a crash left running
+        t = study.ask()
+        tune_optuna.suggest(t, SimpleNamespace(), "deep")
+        d = tmp_path / "t" / "r" / "deep" / f"trial_{t.number:04d}"
+        (d / "checkpoints").mkdir(parents=True)
+        if with_ckpt:
+            (d / "checkpoints" / "last.ckpt").write_text("state")
+        t.set_user_attr("run_dir", str(d))
+        crashed.append((dict(t.params), str(d), with_ckpt))
+    calls = []
+
+    def fake_run_training(cfg, trial=None):
+        calls.append({"exp_name": cfg.exp_name, "resume": cfg.resume, "lr": cfg.lr, "l2": cfg.l2, "dropout": cfg.dropout})
+        d = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name)
+        os.makedirs(os.path.join(d, "checkpoints"), exist_ok=True)
+        return {"best_val_auroc_mean": 0.6, "epoch_equivalents": 1.0, "train_seconds": 1.0,
+                "best_checkpoint": os.path.join(d, "checkpoints", "best.ckpt")}
+
+    monkeypatch.setattr(train, "run_training", fake_run_training)
+    assert tuning.fail_stale(study) == 2
+    assert [t.state for t in study.trials[:2]] == [optuna.trial.TrialState.FAIL] * 2
+    tuning.worker(base, "deep", 2)
+    for (params, d, with_ckpt), call in zip(crashed, calls):
+        assert {k: call[k] for k in params} == pytest.approx(params)          # the same settings again
+        if with_ckpt:                                                          # in its own folder, resumed
+            assert call["resume"] and call["exp_name"] == os.path.relpath(d, str(tmp_path / "t"))
+        else:                                                                  # afresh, in a new folder
+            assert not call["resume"] and call["exp_name"] != os.path.relpath(d, str(tmp_path / "t"))
+    done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    assert len(done) == 2 and done[0].user_attrs["resumes_trial"] == 0
+
+
+def test_the_pruner_sees_a_resumed_run_s_pass_numbers():
+    from widedeepgp.callbacks import OptunaPruning
+
+    class Trial:
+        def __init__(self):
+            self.reported = []
+
+        def report(self, value, step):
+            self.reported.append(step)
+
+        def should_prune(self):
+            return False
+
+    class Tr:
+        sanity_checking = False
+        callback_metrics = {"val/auroc_mean": torch.tensor(0.6)}
+
+    t = Trial()
+    cb, tr = OptunaPruning(t, steps_per_pass=25), Tr()
+    for step in (250, 275, 300):                          # a run resumed after pass 10 (25 steps a pass)
+        tr.global_step = step
+        cb.on_validation_end(tr, None)
+    assert t.reported == [10, 11, 12]
+
+
 def test_the_gpus_a_search_uses(monkeypatch):
     from widedeepgp import tuning
     assert tuning.pick_gpus(None) == tuning.pick_gpus("none") == tuning.pick_gpus("cpu") == []

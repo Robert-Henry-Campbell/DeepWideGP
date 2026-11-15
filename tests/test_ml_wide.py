@@ -219,6 +219,37 @@ def test_a_run_tunes_itself(tmp_path):
         main_multilabel.main(argv + ["--prs_var", "3.0"])
 
 
+def test_a_resumed_run_scores_the_whole_tuning_set(tmp_path):
+    """A resumed run repeats the validation pass its checkpoint was written in, and Lightning
+    restores that pass part-way through (on 13 Nov a resumed grid run took every disease's choice
+    from one batch of the tuning set). Every pass must be scored on the whole tuning set, so the
+    repeat changes nothing: the choices still rescore exactly and the best checkpoint is a pass of
+    metrics.csv."""
+    import pandas as pd
+    import pytorch_lightning as pl
+    from widedeepgp.train import run_training
+    data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
+    scored = []
+
+    class Count(pl.Callback):
+        def on_validation_end(self, trainer, pl_module):
+            scored.append(int(max(pl_module.last_val_metrics["n"])))
+
+    cfg = make_cfg(data_dir, "multi", wide="only", prs_grid=[0.1, 1, 10], batch_size=16, eval_batch_size=16,
+                   run_dir=str(tmp_path / "runs"), experiment="t", exp_name="r", val_per_epoch=1, max_epoch_equiv=2,
+                   stop_patience=0, lr=3e-3)
+    run_training(cfg, extra_callbacks=[Count()])
+    cfg.max_epoch_equiv, cfg.resume = 3, True
+    out = run_training(cfg, extra_callbacks=[Count()])
+    n_val = len(out["datamodule"].splits["val"]["y"])
+    assert len(scored) == 4 and set(scored) == {n_val}                # the repeated pass included
+    for r in out["per_disease"]:
+        assert r["val_auroc_rescored"] == pytest.approx(r["val_auroc"], abs=1e-9)
+    m = pd.read_csv(tmp_path / "runs" / "t" / "r" / "metrics.csv")
+    mean = m[(m.label == "MEAN") & (m.metric == "auroc")]
+    assert out["best_step"] in set(mean.step) and out["best_val_auroc_mean"] == pytest.approx(mean.value.max(), abs=1e-9)
+
+
 def test_each_grid_point_trains_as_a_model_of_its_own(tmp_path):
     """A grid column follows exactly the path a model with that prior variance alone would take
     (its penalty and learning rate), so the grid is K runs in one pass over the genotypes."""

@@ -388,6 +388,14 @@ class WideDeepGP(pl.LightningModule):
         logits = torch.cat([a for a, _ in self._val]).numpy()
         y = torch.cat([b for _, b in self._val]).numpy()
         self._val = []
+        full = self._tuning_set_size()
+        if full is not None and len(y) < full:
+            # A resumed run repeats the validation pass its checkpoint was written in, and
+            # Lightning restores that pass part-way through, so only its last batches are scored
+            # (16 of 90 participants in the test). Scores of a part of the tuning set must never
+            # reach the best checkpoint, early stopping or the grid's choices: score all of it.
+            from .train import predict_split
+            logits, y = predict_split(self, self.trainer.datamodule, "val", self.device)
         if self.grid:
             m = M.per_label_metrics(logits, np.tile(y, (1, self.n_grid)), self.loss_fn.logit_shift.cpu().numpy(),
                                     self.out_names)
@@ -411,6 +419,15 @@ class WideDeepGP(pl.LightningModule):
                     self.log(f"train_loss/{name}", float(mean[j]))
             self._train_sum.zero_()
             self._train_cnt.zero_()
+
+    def _tuning_set_size(self):
+        """Participants in the tuning set the trainer validates on (None outside a trainer)."""
+        trainer = getattr(self, "_trainer", None)
+        dm = getattr(trainer, "datamodule", None) if trainer is not None else None
+        splits = getattr(dm, "splits", None)
+        if not splits or "val" not in splits:
+            return None
+        return int(len(splits["val"]["y"]))
 
     def _grid_means(self, m):
         """With a grid: the means are over diseases, each at its best grid point in this pass

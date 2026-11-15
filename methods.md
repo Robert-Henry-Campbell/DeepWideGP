@@ -162,6 +162,26 @@ With 20,000 tuning participants the rarest phenotype has 730 tuning cases, which
 standard error of its tuning AUROC near 0.011 (Hanley and McNeil, 1982, at an AUROC of 0.6);
 the mean over 30 phenotypes is correspondingly steadier.
 
+**Training sizes (the ladder), the same as the PGI arm's.** WideDeepGP is trained on exactly the
+run specifications of the linear polygenic-index (PGI) comparators (`PGI/methods.md` section 2.5,
+in `/mnt/sdg/robert/deepwidegp/PGI`; Robert's decision of 15 November 2026: "the same in every
+way so we can compare results directly"): five nested training sets defined by the median over
+the 30 diseases of the effective sample size, N_eff = 4 / (1/cases + 1/non-cases), halving from
+the full training set: 13,199, 26,287, 53,498, 107,743 and 215,872 participants (median N_eff
+3,372 to 53,908). Each is a prefix of one permutation of the sorted training identifiers (seed
+1), so smaller sets lie inside larger ones and every disease keeps its prevalence. The tuning
+and test sets are the same at every size and for both arms. The datasets are
+`data/datasets/ard30/hm3plus_n13199`, `_n26287`, `_n53498`, `_n107743` and `hm3plus`.
+Consequences: the two arms are compared size by size on identical participants, SNPs,
+covariates, tuning and test sets, with no re-weighting; an earlier draft ladder (2,160 to 68,200
+participants) is not used; and the smallest size, 13,199, is where the median disease's PGI
+first becomes detectable in the test set (PGI arm's power calculation), so the bottom of the
+learning curves is not a size at which nothing can be measured. Runs go from the smallest
+training set to the largest (Robert, 15 November 2026), so that each size's results can be
+examined before the next, twice as large and about twice as costly, starts; with a search
+inside every run, the five sizes together cost a few hundred GPU-hours, most of it at the two
+largest.
+
 ### 2.6 Limitations of the phenotypes
 
 These are the limitations recorded by the selection analysis that bear on the labels:
@@ -647,6 +667,14 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   when the source records its diseases (every WideDeepGP snapshot and checkpoint does), other
   names or another order. A single-disease model saved by `main_genome.py` records none, so a
   one-disease run loads its output layer as it is.
+- **A resumed run's repeated validation pass.** A resumed run repeats the validation pass at
+  which its checkpoint was written, and Lightning restores that pass part-way through, so only
+  its last batches are scored (found on 15 November 2026: a resumed grid run took every
+  disease's choice, and its best checkpoint, from one batch of the tuning set). Every pass
+  therefore checks that it scored the whole tuning set and otherwise scores all of it before
+  its metrics are used, so a repeated pass reproduces the original exactly and can be neither a
+  new best nor a new choice. The pilot's one resumed run is unaffected: its best checkpoint is a
+  complete pass that its metrics record.
 
 ## 8. Hyper-parameter search
 
@@ -686,6 +714,23 @@ one per GPU, on the free GPUs minus one (`--tune_gpus auto`), or one after anoth
 GPU. Model width, depth, the sequence block and the use of annotations are experimental factors
 and are never searched.
 
+**Checks on the pilot's proxy** (gates; methods, results and tables in
+`DeepWideGP-Scripts/scripts/widedeepgp-gates/`). On five traits simulated on the proxy's real
+genotypes, the linear stage reached a mean tuning AUROC of 0.7187 against 0.7132 for GBLUP given
+each trait's true heritability, and the network on top added nothing (its best trial 0.7187,
+below the linear model's in the fifth decimal, so the linear model was kept). On the 30
+diseases, the linear model at one prior variance for all reached 0.6616 against 0.6607 for the
+covariates alone (0.6641 with prior variance and pass chosen per disease on the tuning set,
+which is optimistic); the pilot's network alone had reached 0.6593. The network-on-top check on
+the 30 diseases has not been run (section 7: its first attempt was stopped when the resume
+problem was found).
+
+**Open (15 November 2026).** Robert asked whether the linear stage makes WideDeepGP partly a
+simple linear PGI, overlapping the PGI arm, which is the study's linear comparator. As built, a
+run reports the linear model when the network does not improve on it, so WideDeepGP could be
+reported as a ridge-regression PGI. How the linear path is reported, or whether it stays, is
+to be planned with Robert before any run of the ladder.
+
 The search inside every run replaces the plan's search on a proxy followed by a comparison at
 full size. In the pilot, on the network alone, a search on the real labels of the proxy was
 uninformative: every training scheme ended slightly below a logistic model on the covariates
@@ -698,8 +743,32 @@ than the pilot's settings.
 For any snapshot and split the scoring script writes, per disease: AUROC, average precision and
 population-scale cross-entropy; the same for a logistic model on the twelve covariates alone,
 fitted on the training split; and the difference between the two AUROCs. Per-participant scores
-are written only on request and only beside the dataset. Comparisons with polygenic scores,
-confidence intervals and calibration are outside this document.
+are written only on request and only beside the dataset. These are WideDeepGP's own checks.
+
+**The comparison with the PGI arm** follows the protocol written for both arms
+(`PGI/methods.md` sections 6 and 8): every model's final prediction for a disease is a logistic
+regression, fitted on the tuning set, of disease status on the model's score (for WideDeepGP its
+logit for that disease) plus a covariate basis (a natural cubic spline of year of birth with
+four degrees of freedom, separately by sex, and the ten principal components); the
+covariates-only reference is the same regression without a score. The test set is opened once,
+for both arms together, after every choice at every training size is recorded; the metrics,
+intervals and learning curves are those of that document.
+
+**The published DeepGP as an additional comparator** (Robert's decision of 15 November 2026,
+for one disease only). For the disease with the highest effective sample size, hypertension
+(I10; N_eff 186,775 in the full training set), the published single-disease DeepGP
+(`main_genome.py` with its published settings: model width 32, one encoder layer, four attention
+heads, attention pooling, a two-layer head, batch 64, learning rate 7 × 10⁻⁴, weight decay
+10⁻⁴, dropout 0.2) is trained at each of the five training sizes on the SNPs its pipeline
+selects from a GWAS of that size's training participants (the PGI arm's REGENIE analysis of the
+same participants): SNPs with *p* < 0.05, then LD clumping (parameters as published; to be
+confirmed before the runs). It uses the project's single seed (1) rather than the script's
+default (33), stops early on the tuning set, and is evaluated with the protocol above.
+Consequences: for I10 the comparison holds three kinds of model at every size (the seven PGIs,
+DeepGP on GWAS-selected SNPs, and WideDeepGP on all HapMap3+ SNPs); the selection uses only
+training participants of that size, so no tuning or test label enters it; each size needs its
+own SNP set and genotype dataset; and with one disease it says nothing about the other 29.
+Status: planned, not run.
 
 ## 10. What changed from single-phenotype DeepGP
 
@@ -750,6 +819,24 @@ error when a model without covariates is asked for (`--dm snps`, or `--use_cov`,
 the covariates off) or the dataset names no covariates.
 
 ## 12. Tests
+
+`tests/test_ml_wide.py` checks the linear PRS path and the search inside every run: the
+path's arithmetic (a PRS plus a logistic model on the covariates, intercepts at the weighted base
+rate); the penalty and its curvature correction (against the Hessian from automatic
+differentiation, within 5%); the parameter groups and the learning-rate rule; that with the path
+at zero the network's output is unchanged, and that bf16 leaves the path in 32-bit (both on a
+GPU); older weights and a new set of diseases; the refused combinations; the validation floors
+and the snapshot cap; that every grid point trains exactly as a model of its own (six AdamW
+steps through the model's own optimiser step, to 10⁻⁴); a search end to end (each disease's
+choice is the best of metrics.csv over passes and prior variances, rescoring reproduces it, the
+grid's weights are deleted and the chosen model kept, the scoring script scores it, a rerun
+continues, a rerun with other arguments is refused, a moved run folder continues); trials left
+running by a crash are replaced; which GPUs a search takes; and that a resumed run scores the
+whole tuning set at every pass. On 13 November 2026 every GPU suite passed on commit 81ded30
+(test_ml_wide 21 tests, test_ml_model 9, the slow training tests, and the capacity probe on the
+current and the pilot's code), except one test of the standalone tuner, which timed out under
+the new 128,000-participant budget floor; with the small-data floors of the other tests it
+passed (197741a).
 
 `tests/test_ml_*.py` check, among other things, that: only named label and covariate columns are
 read; the rotation sampler draws each participant at exactly the rate ω that the loss divides

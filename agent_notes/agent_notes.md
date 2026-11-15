@@ -830,3 +830,36 @@ the genotypes per epoch, the expensive part at full size.
   --val_min_participants 0`, as the other small tests); the rerun of that test waits for free GPUs
   (`runs/gate_evidence/final_tests_2026-11-13/rerun_tuner_test_when_free.sh`), and the GPU gates
   wait for it.
+
+## 2026-11-15 (20:30 UTC) — A resumed run scores the whole tuning set; methods brought up to date
+
+What happened since 13 Nov 04:00: the tuner test's GPU rerun passed (13 Nov 08:44); the GPU gate
+on the simulated traits ran (`runs/wide_gate/sim_joint`, 13 Nov 08:46–11:26, four GPUs): the
+network on top added nothing (best of 12 trials 0.71869 against the linear model's 0.71873; the
+linear model kept). The nine-value real-label linear stage (`real_linear_grid9`) was killed at
+pass 28 of 30 by a session restart (it ran as a session-bound background job); resumed on 15 Nov
+(detached), it finished, but its per-disease choices were all taken at the resumed pass, which
+gave the chosen model 0.6573 on the whole tuning set (covariates alone 0.6607). The real-label
+network gate started from it was stopped after four minutes.
+
+### Code changes
+
+- `widedeepgp/model.py` `on_validation_epoch_end`: Lightning restores the validation pass a
+  checkpoint was written in part-way through, so a resumed run's repeated pass scored only its
+  last batch (16 of 90 participants in a reproduction; one batch of the tuning set in the real
+  run). A pass that scored fewer participants than the tuning set holds (`_tuning_set_size`) now
+  scores the whole tuning set with `train.predict_split` before its metrics reach the best
+  checkpoint, early stopping or the grid's choices; a repeated pass then reproduces the original.
+  RunLog had already kept the partial pass out of metrics.csv, and the pilot's one resumed run
+  (`pilot_sim/selected_long_s1`) is unaffected (its best checkpoint is a recorded pass).
+- `tests/test_ml_wide.py` `test_a_resumed_run_scores_the_whole_tuning_set` (fails without the
+  fix: one pass over 16 participants). CPU suite: 75 passed, 28 skipped (GPU).
+- `methods.md`: section 2.5 the ladder shared with the PGI arm (Robert, 15 Nov: "the same in every
+  way"), run from small to large, and its consequences; section 7 the resume problem and its fix;
+  section 8 the gate results and the open question Robert raised (the linear stage overlaps the
+  PGI arm; to be planned before any ladder run, not changed yet); section 9 the comparison
+  protocol shared with the PGI arm and the published DeepGP as an extra comparator for I10 (Robert,
+  15 Nov; planned, not run); section 12 the tests of the PRS path and the search, and the GPU
+  results of 13 Nov.
+- Gate documentation: `DeepWideGP-Scripts/scripts/widedeepgp-gates/` (methods, results, tables,
+  the run scripts).

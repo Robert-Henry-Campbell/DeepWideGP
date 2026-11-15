@@ -702,12 +702,15 @@ training set, is a search in two stages:
    and embedding dropout. Asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et
    al., 2020) stops the trials whose mean tuning AUROC trails at each rung.
 
-The run's model is the second stage's best trial if its mean tuning AUROC is strictly higher
-than the first stage's per-disease model's, and the first stage's otherwise, so the network is
-reported only where it adds to the linear model. The first stage's value is the mean over
-diseases of each one's best, chosen among grid points and passes, while the second stage's is
-the best of its trials' mean; the comparison therefore leans slightly towards the linear model. Every run therefore also yields the linear model's result
-at its training size. With `--wide off` the search is the second stage alone, without the
+The run's model is always the second stage's best trial, the network on top of the linear
+model, whatever its mean tuning AUROC relative to the linear model alone (Robert's decision of 15
+November 2026). WideDeepGP is therefore always reported as the whole model, never as the
+ridge-regression PGI inside it, which would duplicate the PGI arm. The first stage's
+per-disease model is recorded beside it in the run's `results.json` as an ablation
+(`linear_only`: WideDeepGP without its network, with the difference between the two), so every
+run also shows what the network adds at its training size. (Until 15 November the linear model
+was the run's model when the network did not beat it; the simulated-trait check of section 8 ran
+under that rule.) With `--wide off` the search is the second stage alone, without the
 linear path; with `--wide only`, the first stage alone. Trials use the run's seed; each
 worker's sampler is seeded with the run's seed plus the worker's index. Trials run in parallel,
 one per GPU, on the free GPUs minus one (`--tune_gpus auto`), or one after another without a
@@ -718,18 +721,19 @@ and are never searched.
 `DeepWideGP-Scripts/scripts/widedeepgp-gates/`). On five traits simulated on the proxy's real
 genotypes, the linear stage reached a mean tuning AUROC of 0.7187 against 0.7132 for GBLUP given
 each trait's true heritability, and the network on top added nothing (its best trial 0.7187,
-below the linear model's in the fifth decimal, so the linear model was kept). On the 30
+below the linear model alone in the fifth decimal; under the rule of that day the linear model
+was kept, under the rule decided on 15 November the network on top is the run's model). On the 30
 diseases, the linear model at one prior variance for all reached 0.6616 against 0.6607 for the
 covariates alone (0.6641 with prior variance and pass chosen per disease on the tuning set,
 which is optimistic); the pilot's network alone had reached 0.6593. The network-on-top check on
 the 30 diseases has not been run (section 7: its first attempt was stopped when the resume
 problem was found).
 
-**Open (15 November 2026).** Robert asked whether the linear stage makes WideDeepGP partly a
-simple linear PGI, overlapping the PGI arm, which is the study's linear comparator. As built, a
-run reports the linear model when the network does not improve on it, so WideDeepGP could be
-reported as a ridge-regression PGI. How the linear path is reported, or whether it stays, is
-to be planned with Robert before any run of the ladder.
+**Decided (15 November 2026).** Robert asked whether the linear stage made WideDeepGP partly a
+simple linear PGI, overlapping the PGI arm, the study's linear comparator: as first built, a run
+reported the linear model whenever the network did not improve on it. He decided that the
+reported result is always the linear model with the network on top, whichever does better; the
+linear model alone is kept only as a labelled ablation (above).
 
 The search inside every run replaces the plan's search on a proxy followed by a comparison at
 full size. In the pilot, on the network alone, a search on the real labels of the proxy was
@@ -775,7 +779,7 @@ Status: planned, not run.
 | Component | Single phenotype (published) | Multi-phenotype (this model) |
 |---|---|---|
 | SNPs | Chosen per disease: GWAS p-value filter, then clumping | One fixed set for all diseases: 1,258,200 HapMap3+ SNPs |
-| SNP effects | Learned by the network from the selected SNPs | A linear PRS path inside the model (one weight per SNP and disease, ridge penalty) with the network on top; the network is kept only where it adds (section 8) |
+| SNP effects | Learned by the network from the selected SNPs | A linear PRS path inside the model (one weight per SNP and disease, ridge penalty) with the network on top; always reported as the whole model, the linear part alone recorded as an ablation (section 8) |
 | SNP annotations | None | Optional per-SNP annotation vectors as a gain and offset (96 functional annotations; not adopted after the pilot, see section 4.9) |
 | Labels | One per participant | One per disease per participant |
 | Covariates | Eight | Year of birth, sex, ten principal components |

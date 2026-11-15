@@ -278,6 +278,42 @@ def test_each_grid_point_trains_as_a_model_of_its_own(tmp_path):
         _build(data_dir, wide="on", prs_grid=[0.3, 3.0])
 
 
+def test_the_run_reports_the_network_on_top_whatever_its_value(tmp_path):
+    """Robert's decision of 15 Nov 2026: with the linear path on, the run's model is the network
+    on top of the linear model even when the linear model alone scores higher; the linear model
+    is recorded beside it as an ablation, and both keep their weights."""
+    from types import SimpleNamespace
+    from widedeepgp import tuning
+    base = SimpleNamespace(run_dir=str(tmp_path), experiment="t", exp_name="r")
+    root = tmp_path / "t" / "r"
+
+    def trial(name, value):
+        d = root / name
+        (d / "checkpoints").mkdir(parents=True)
+        (d / "checkpoints" / "best.ckpt").write_text("weights")
+        (d / "results.json").write_text(json.dumps({"val": {"a": {"auroc": value}}, "val_mean": {"auroc": value}}))
+        return str(d)
+
+    lin = trial("linear/per_disease", 0.72)
+    joint = [trial(f"joint/trial_{i:04d}", v) for i, v in enumerate((0.71, 0.715))]
+    summaries = {
+        "linear": {"best_value": 0.72, "best_trial_dir": lin, "best_checkpoint": lin + "/checkpoints/best.ckpt",
+                   "best_params": {}, "train_seconds": 1.0,
+                   "trials": [{"trial": 0, "run_dir": str(root / "linear")}]},
+        "joint": {"best_value": 0.715, "best_trial_dir": joint[1], "best_checkpoint": joint[1] + "/checkpoints/best.ckpt",
+                  "best_params": {"lr": 1e-3}, "train_seconds": 2.0,
+                  "trials": [{"trial": i, "run_dir": d} for i, d in enumerate(joint)]},
+    }
+    out = tuning.choose(base, summaries)
+    assert out["chosen_stage"] == "joint" and out["best_trial_dir"] == os.path.join("joint", "trial_0001")
+    assert out["best_val_auroc_mean"] == 0.715                       # below the linear model alone, reported all the same
+    assert out["linear_only"]["best_trial_dir"] == os.path.join("linear", "per_disease")
+    assert out["linear_only"]["network_minus_linear_only"] == pytest.approx(-0.005)
+    assert json.load(open(root / "results.json"))["chosen_stage"] == "joint"
+    assert os.path.isdir(os.path.join(joint[1], "checkpoints")) and os.path.isdir(os.path.join(lin, "checkpoints"))
+    assert not os.path.isdir(os.path.join(joint[0], "checkpoints"))  # the other trials' weights go
+
+
 def test_a_search_replaces_trials_a_crash_left_running(tmp_path):
     import optuna
     import tune_optuna

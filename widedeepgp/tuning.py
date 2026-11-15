@@ -19,8 +19,9 @@ calls ``tune_run`` whenever --tune_trials > 0 (its default). With the linear PRS
               intercepts keep learning. Searched (--tune_trials, Optuna): learning rate, weight
               decay, dropout, with successive-halving pruning.
 
-The run's model is the joint one only if its mean tuning AUROC is strictly higher than the
-linear one's; otherwise the linear model is. --wide only runs stage 1 alone, --wide off
+The run's model is always the joint one (the network on top of the linear model), whatever its
+tuning AUROC relative to the linear model alone, which results.json records as an ablation
+("linear_only"; Robert's decision of 15 Nov 2026). --wide only runs stage 1 alone, --wide off
 searches the deep network alone (stage "deep"). The run's folder,
 <run_dir>/<experiment>/<exp_name>/, holds linear/ (the grid run, with per_disease/ inside) and,
 for an Optuna stage, a subfolder with its study (optuna_journal.log) and one ordinary training
@@ -366,14 +367,14 @@ def tune_run(base, argv, script):
 
 
 def choose(base, summaries):
-    """The run's model, its results.json, and the deletion of the other trials' weights."""
+    """The run's model, its results.json, and the deletion of the other trials' weights.
+
+    The run's model is the last stage's best trial: with the linear path on, the network on top
+    of the linear model, whatever its tuning AUROC relative to the linear model alone (Robert's
+    decision of 15 Nov 2026: WideDeepGP is reported as the whole model, never as the ridge PGI
+    inside it). The linear model alone is recorded as an ablation ("linear_only")."""
     root = run_root(base)
-    order = [s for s in ("deep", "linear", "joint") if s in summaries]
-    chosen = order[0]
-    if "joint" in summaries and summaries["joint"]["best_value"] > summaries["linear"]["best_value"]:
-        chosen = "joint"
-    elif "linear" in summaries:
-        chosen = "linear"
+    chosen = [s for s in ("deep", "linear", "joint") if s in summaries][-1]
     best = summaries[chosen]
     with open(os.path.join(best["best_trial_dir"], "results.json")) as f:
         trial = json.load(f)
@@ -383,6 +384,11 @@ def choose(base, summaries):
            "best_params": best["best_params"], "val": trial.get("val"), "val_mean": trial.get("val_mean"),
            "train_seconds_all_trials": round(sum(s["train_seconds"] for s in summaries.values()), 1),
            "stages": summaries, "written": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if chosen == "joint":                                # the ablation: the same run without its network
+        lin = summaries["linear"]
+        out["linear_only"] = {"best_trial_dir": os.path.relpath(lin["best_trial_dir"], os.path.abspath(root)),
+                              "best_val_auroc_mean": lin["best_value"],
+                              "network_minus_linear_only": best["best_value"] - lin["best_value"]}
     with open(os.path.join(root, "results.json"), "w") as f:
         json.dump(out, f, indent=1)
     keep = {best["best_trial_dir"]}

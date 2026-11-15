@@ -863,3 +863,21 @@ network gate started from it was stopped after four minutes.
   results of 13 Nov.
 - Gate documentation: `DeepWideGP-Scripts/scripts/widedeepgp-gates/` (methods, results, tables,
   the run scripts).
+
+## 2026-11-15 (21:00 UTC) — The run's model is always the network on top (Robert's decision)
+
+Robert: "I want the recorded result to be ridge + widedeepgp no matter which does better."
+
+- `widedeepgp/tuning.py` `choose`: the run's model is the last stage's best trial; with the
+  linear path on, the joint stage (the network on top of the per-disease linear model). The linear
+  model alone is recorded in the run's `results.json` as `linear_only` (its folder, its mean tuning
+  AUROC, and `network_minus_linear_only`), and keeps its weights (the joint stage starts from it).
+  Before, the linear model was the run's model whenever the network did not beat it.
+- Docstrings (`tuning.py`, `main_multilabel.py`), README, methods.md sections 8 and 10 say so;
+  section 8's "Open" paragraph is now "Decided".
+- `tests/test_ml_wide.py` `test_the_run_reports_the_network_on_top_whatever_its_value` (a joint
+  trial at 0.715 is reported over a linear model at 0.72; the ablation is recorded; the right
+  weights kept). CPU suite: 76 passed, 28 skipped (GPU).
+- Explained to Robert: nothing in WideDeepGP uses folds; the ridge is fitted once per run on the
+  whole training set, and the same fixed ridge weights (each disease's chosen prior variance and
+  pass) plus the trained network predict for everyone else (tuning, test, held-out groups).

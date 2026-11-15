@@ -143,7 +143,8 @@ on the covariates and learned nothing detectable from unselected SNPs. Since 13 
 the model therefore contains a linear PRS path (one weight per SNP and disease, with a ridge
 penalty) beside the network, and every run tunes itself: first the linear model alone, at
 nine prior variances side by side with each disease keeping its best, then the network on top
-of that PRS, keeping the network only where it does better on the tuning set.
+of that PRS. The run's model is always the network on top of the linear model; the linear
+model alone is recorded beside it as an ablation, never reported as WideDeepGP.
 
 ```bash
 # a dataset <data_dir>/<dataset>/<variant>/ whose store.json names its "labels" and "covariates"

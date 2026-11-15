@@ -7,7 +7,8 @@
 A run tunes itself (widedeepgp/tuning.py), on the free GPUs minus one: first the linear model
 alone (PRS and covariates) at every prior variance of --prs_grid in one pass, each disease
 keeping its best, then the deep network on top of that PRS (--tune_trials settings, 12 by
-default), keeping whichever is better on the tuning set. --tune_trials 0 trains the given
+default); the run's model is the network on top, and the linear model alone is recorded beside
+it as an ablation. --tune_trials 0 trains the given
 settings once, on the GPU this process sees. The linear PRS path is on by default (--wide on;
 'off' is the network alone, 'only' the PRS and covariates).
 

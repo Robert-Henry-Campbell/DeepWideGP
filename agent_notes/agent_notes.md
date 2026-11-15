@@ -927,3 +927,20 @@ and remove every time limit; nothing is to start on 29 Nov.
   limit, runs each rung from a frozen export of `widening` (`runs/ladder/code_<commit>`), and
   runs the classic DeepGP comparator after each rung when `runs/classic_deepgp/run_rung.sh`
   exists.
+
+## 2026-11-15 (22:00 UTC) — The classic DeepGP comparator is being built and queued
+
+- `--tune_first_given` (761585c): the network stage's first trial uses the given --lr, --l2 and
+  --dropout (the classic DeepGP's published 7e-4, 1e-4, 0.2); test
+  `test_a_search_can_try_the_given_settings_first`. CPU suite: 79 passed, 28 skipped.
+- `DeepWideGP-Scripts/scripts/classic-deepgp-comparator/`: `build_datasets.py` (I10 lead SNPs
+  with p <= 0.05 from the PGI arm's REGENIE GWAS of each training size, plink2 clumping at r² 0.1
+  within 250 kb on the PGI arm's LD panel; one pass over the main store writes a small store per
+  size, `data/genostore/classic_i10_n<size>`, and datasets `data/datasets/ard30/classic_i10_n<size>`;
+  check of 200 participants on chromosomes 1, 6 and 22), started detached at 21:52 UTC
+  (`run_build.sh`, log `data/classic_deepgp_work/build.log`); `run_rung.sh` (copy of
+  `runs/classic_deepgp/run_rung.sh`, the ladder chain's hook): `main_multilabel.py --labels I10
+  --wide off --sampler shuffled --gamma 0 --batch_size 64 --lr 7e-4 --l2 1e-4 --dropout 0.2
+  --precision 32 --tune_trials 12 --tune_first_given`, seed 1, from the ladder's frozen export;
+  methods.md.
+- methods.md section 9: the clumping's LD comes from the PGI arm's panel (corrected).

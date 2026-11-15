@@ -781,8 +781,9 @@ original plan (E11, I25, I48, M17, K80) are dropped. At each size:
 - **SNPs**, as the published pipeline selects them: from the PGI arm's REGENIE GWAS of I10 on
   that size's training participants, the SNPs with *p* < 0.05, LD-clumped with plink2 at
   r² 0.1 within 250 kb (the published clumping parameters were not available; these are the
-  standard ones and the strictest of the PGI arm's C+T options), LD computed on the same
-  training participants.
+  standard ones and the strictest of the PGI arm's C+T options), LD from the PGI arm's LD panel
+  (20,000 training participants, the panel its C+T clumps on); details in
+  `DeepWideGP-Scripts/scripts/classic-deepgp-comparator/methods.md`.
 - **Model and training as published**: model width 32, one encoder layer, four attention
   heads, attention pooling, a two-layer head with 256 hidden units, 32-bit arithmetic, batches
   of 64 drawn at random, AdamW with learning rate 7 × 10⁻⁴ and weight decay 10⁻⁴, dropout 0.2,

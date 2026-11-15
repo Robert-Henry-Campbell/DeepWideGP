@@ -881,3 +881,18 @@ Robert: "I want the recorded result to be ridge + widedeepgp no matter which doe
 - Explained to Robert: nothing in WideDeepGP uses folds; the ridge is fitted once per run on the
   whole training set, and the same fixed ridge weights (each disease's chosen prior variance and
   pass) plus the trained network predict for everyone else (tuning, test, held-out groups).
+
+## 2026-11-15 (21:05 UTC) — The ladder is queued as one detached chain
+
+- Robert: run the rungs smallest to largest without waiting for his go-ahead between them,
+  ideally as one job. `runs/ladder/run_ladder_2026-11-15.sh` (copy and methods in
+  `DeepWideGP-Scripts/scripts/widedeepgp-ladder/`), started detached at 20:56 UTC (setsid nohup;
+  parent PID 1): it waits for the real-label gate (`runs/wide_gate/real_search`, running since
+  20:44 UTC, detached) to finish cleanly, then runs `hm3plus_n13199`, `_n26287`, `_n53498`,
+  `_n107743` and `hm3plus` one after another, each a whole search (`--wide on --tune_gpus
+  auto`, width 32, one layer, batches 16 x 4, bf16), stopping only if a rung fails; rerunning it
+  continues.
+- methods.md section 2.5: the run order (one chained job, no pause for review).
+- A project-wide `/mnt/sdg/robert/deepwidegp/CLAUDE.md` (outside git) now holds the reusable
+  lessons for every session in the project, first among them that long jobs must be launched
+  detached (setsid nohup, with a log and a completion line), never as session background tasks.

@@ -177,10 +177,13 @@ covariates, tuning and test sets, with no re-weighting; an earlier draft ladder 
 participants) is not used; and the smallest size, 13,199, is where the median disease's PGI
 first becomes detectable in the test set (PGI arm's power calculation), so the bottom of the
 learning curves is not a size at which nothing can be measured. Runs go from the smallest
-training set to the largest (Robert, 15 November 2026), so that each size's results can be
-examined before the next, twice as large and about twice as costly, starts; with a search
-inside every run, the five sizes together cost a few hundred GPU-hours, most of it at the two
-largest.
+training set to the largest, one after another in a single chained job that does not pause for
+review (Robert, 15 November 2026), so that each size's results are available as soon as it
+finishes while the next, twice as large and about twice as costly, runs; the chain stops only if
+a run fails. With a search inside every run, the five sizes together cost a few hundred
+GPU-hours, most of it at the two largest. The chain starts after the real-label check of
+section 8 (`runs/ladder/run_ladder_2026-11-15.sh`; record and configuration in
+`DeepWideGP-Scripts/scripts/widedeepgp-ladder/`).
 
 ### 2.6 Limitations of the phenotypes
 

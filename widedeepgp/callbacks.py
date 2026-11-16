@@ -96,8 +96,9 @@ class RunLog(pl.Callback):
     memory, learning rate, gradient norm and the cases seen per disease to the trainer's logger.
 
     ``metrics_at`` keeps the metrics of each pass this process made, by optimiser step, so that
-    results.json takes the best step's from there instead of scoring the tuning set again; a
-    pass made before a resume is not in it, and that step is scored again from its checkpoint.
+    results.json takes the best step's from there instead of scoring the tuning set again. That
+    includes the pass a resumed run repeats (scored on the whole tuning set); a pass made earlier,
+    before a resume, is not in it, and that step is scored again from its checkpoint.
     """
 
     FIELDS = ["validation", "step", "samples_seen", "epoch_equiv", "label", "metric", "value", "n", "n_cases"]
@@ -172,8 +173,9 @@ class RunLog(pl.Callback):
         m = pl_module.last_val_metrics
         if m is None or trainer.sanity_checking:
             return
-        if int(trainer.global_step) == self._last_step:      # the validation a resumed run repeats
-            return
+        if int(trainer.global_step) == self._last_step:      # the validation a resumed run repeats:
+            self.metrics_at[self._last_step] = m              # scored on the whole tuning set (model), so kept
+            return                                            # for results.json, but neither logged nor counted
         self._last_step = int(trainer.global_step)
         self.n_validations += 1
         self.metrics_at[int(trainer.global_step)] = m

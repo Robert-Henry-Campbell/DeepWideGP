@@ -207,8 +207,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def _read_table(self, split, row_of):
         df = pd.read_csv(os.path.join(self.dir, f"samples_{split}.tsv"), sep="\t", dtype={"IID": str})
         missing = [s for s in df["IID"] if s not in row_of]
-        if missing:
-            raise KeyError(f"samples_{split}.tsv: {len(missing)} IDs are not in the store, e.g. {missing[:3]}")
+        if missing:                 # a count only: participant IDs never go into messages or logs
+            raise KeyError(f"samples_{split}.tsv: {len(missing)} of {len(df)} IDs are not in the store")
         rows = np.array([row_of[s] for s in df["IID"]], dtype=np.int64)
         if not self.multilabel:
             covs = [c for c in df.columns if c not in ("IID", "label")]

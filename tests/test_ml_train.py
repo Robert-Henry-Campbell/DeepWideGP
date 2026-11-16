@@ -192,6 +192,31 @@ def test_a_resumed_run_keeps_its_own_stopping_patience():
     assert (later.patience, later.wait_count, later._seen_step) == (20, 3, 40)
 
 
+def test_the_pass_a_resume_repeats_is_kept_for_results_but_not_logged_again(tmp_path):
+    """The repeated pass (scored whole by the model) goes into metrics_at, so results.json need
+    not score the tuning set again, but adds no metrics.csv row, history entry or count."""
+    from types import SimpleNamespace
+    from widedeepgp import metrics as M
+    from widedeepgp.callbacks import RunLog
+    rng = np.random.default_rng(1)
+    y = rng.integers(0, 2, size=(50, 2)).astype(float)
+
+    def metrics():
+        return M.per_label_metrics(rng.normal(size=(50, 2)), y, None, ["a", "b"])
+
+    first = RunLog(str(tmp_path), n_train=100, n_snps=10)
+    first.on_fit_start(SimpleNamespace(), None)
+    module = SimpleNamespace(last_val_metrics=metrics(), samples_seen=100, label_names=["a", "b"])
+    first.on_validation_end(SimpleNamespace(global_step=12, sanity_checking=False, logger=None), module)
+    later = RunLog(str(tmp_path), n_train=100, n_snps=10)            # the resumed process
+    later.load_state_dict(first.state_dict())
+    rows = open(tmp_path / "metrics.csv").read()
+    module.last_val_metrics = repeated = metrics()
+    later.on_validation_end(SimpleNamespace(global_step=12, sanity_checking=False, logger=None), module)
+    assert later.metrics_at == {12: repeated}
+    assert (later.n_validations, len(later.history), open(tmp_path / "metrics.csv").read()) == (1, 1, rows)
+
+
 def test_a_resume_starts_from_the_latest_last_checkpoint(tmp_path):
     """The highest last-vN.ckpt, which must also be the newest of them."""
     from widedeepgp.train import last_checkpoint
@@ -348,7 +373,9 @@ def test_a_resumed_run_continues_the_same_batches(tmp_path):
 @gpu
 def test_a_resumed_run_reports_a_best_step_from_before_the_resume(tmp_path, monkeypatch):
     """results.json of a run whose best pass came before a resume: that step, with the metrics
-    metrics.csv holds for it, scored again from its checkpoint (this process did not make it)."""
+    metrics.csv holds for it. The resumed run scores the tuning set once, whole, for the pass it
+    repeats; that scoring serves results.json when the repeated pass is the best one, and an
+    earlier best step is scored again from its checkpoint (this process did not make it)."""
     import pytorch_lightning as pl
     import widedeepgp.train as T
 
@@ -357,15 +384,23 @@ def test_a_resumed_run_reports_a_best_step_from_before_the_resume(tmp_path, monk
             for group in trainer.optimizers[0].param_groups:
                 group["lr"] = 0.0
 
-    scored = []
+    scored = []                                            # (split, people scored) of each scoring
     predict = T.predict_split
-    monkeypatch.setattr(T, "predict_split", lambda *a, **k: scored.append(a[2]) or predict(*a, **k))
+
+    def record(*a, **k):
+        logits, y = predict(*a, **k)
+        scored.append((a[2], len(y)))
+        return logits, y
+
+    monkeypatch.setattr(T, "predict_split", record)
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
     first = T.run_training(_tiny(tmp_path, data_dir, "r", max_epoch_equiv=1.0))
     assert scored == []                                    # its best pass was made by the same process
     out = T.run_training(_tiny(tmp_path, data_dir, "r", max_epoch_equiv=2.0, resume=True),
                          extra_callbacks=[NoLearning()])
-    assert scored == ["val"] and len(out["history"]) == 4
+    n_val = len(out["datamodule"].splits["val"]["y"])
+    earlier_best = first["best_step"] < first["history"][-1]["step"]      # not the pass the resume repeats
+    assert scored == [("val", n_val)] * (2 if earlier_best else 1) and len(out["history"]) == 4
     assert out["best_step"] == first["best_step"] <= first["history"][-1]["step"]
     with open(os.path.join(out["run_dir"], "metrics.csv")) as f:
         logged = {(r["label"], r["metric"]): float(r["value"]) for r in csv.DictReader(f)

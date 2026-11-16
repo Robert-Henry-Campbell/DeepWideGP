@@ -41,6 +41,13 @@ POOLS = ("atten", "mean", "last")
 WIDE_MODES = ("off", "on", "only")
 
 
+def vocab_codes(x):
+    """Raw dosages [B, L, 1] (the store's codes times 0.01) -> those codes [B, L], 0 to 200, which
+    index --snp_embed vocab's table. DataEmbeddingVocab.forward truncates instead of rounding and
+    puts 6 of the 201 levels one code low (methods.md 11)."""
+    return torch.round(x[:, :, 0] * 100).long()
+
+
 def positions_digest(pos):
     h = hashlib.sha256()
     for p in pos:
@@ -251,15 +258,20 @@ class WideDeepGP(pl.LightningModule):
         self.samples_seen = 0
 
     # ---- network -------------------------------------------------------------------------------
+    def _embed(self, i, x):
+        """The embedding of input sequence i [B, L, 1] -> [B, L, d_model]: the published module's,
+        with the annotations' gain and offset on the value part."""
+        emb = self.dataEmbed[i]
+        v = emb.value_embedding(vocab_codes(x) if isinstance(emb, DataEmbeddingVocab) else x)
+        if self.annot_dim:
+            a = getattr(self, f"annot_{i}")
+            v = v * (1.0 + self.annot_gain(a)) + self.annot_offset(a)
+        return emb.dropout(v + emb.position_embedding(x))
+
     def _encode(self, i, x):
         """One input sequence [B, L, 1] -> its pooled vector [B, d_model], in float32."""
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and x.is_cuda):
-            emb = self.dataEmbed[i]
-            v = emb.value_embedding(x)
-            if self.annot_dim:
-                a = getattr(self, f"annot_{i}")
-                v = v * (1.0 + self.annot_gain(a)) + self.annot_offset(a)
-            h = emb.dropout(v + emb.position_embedding(x))
+            h = self._embed(i, x)
             residual = None
             for layer in self.encoders[i]:
                 h, residual = layer(h, residual)

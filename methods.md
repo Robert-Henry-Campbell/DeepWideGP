@@ -689,7 +689,9 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   disease's choice, and its best checkpoint, from one batch of the tuning set). Every pass
   therefore checks that it scored the whole tuning set and otherwise scores all of it before
   its metrics are used, so a repeated pass reproduces the original exactly and can be neither a
-  new best nor a new choice. The pilot's one resumed run is unaffected: its best checkpoint is a
+  new best nor a new choice. When the repeated pass is also the run's best, results.json takes
+  its metrics from that scoring (until 16 November 2026 the tuning set was scored a second time
+  for them, 7 to 10 minutes at full size). The pilot's one resumed run is unaffected: its best checkpoint is a
   complete pass that its metrics record.
 
 ## 8. Hyper-parameter search
@@ -854,6 +856,14 @@ deliberately reproduced, so that the comparison with the published model is like
   layer and head is fixed at 0.1.
 - The convolution of the value embedding uses circular padding, so the first and last SNP of a
   chromosome are treated as neighbours.
+
+The alternative value embedding, `--snp_embed vocab` (a table of 201 vectors, one per hundredth
+of a dosage, in place of the convolution), reads raw dosages: SNPs are not standardised for it.
+WideDeepGP indexes the table by the genotype store's own code, the dosage times 100 rounded (a
+missing dosage is 0). The published module's forward rounds to two decimals and then truncates
+in float32, which puts 6 of the 201 levels (0.53, 0.59, 1.05, 1.06, 1.17 and 1.18) one code low.
+Until 16 November 2026 WideDeepGP passed the dosages to the table unconverted, which fails at
+the first forward pass, so no run has used this option.
 
 Two published options do not run: the parser's default pooling (`--final_pool concat`) and the
 SNP-only mode (`--dm snps`), which names a class that is not in the repository. WideDeepGP does

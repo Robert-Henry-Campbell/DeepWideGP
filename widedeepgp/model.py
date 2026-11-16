@@ -30,7 +30,10 @@ def vocab_codes(x):
     """Raw dosages [B, L, 1] (the store's codes times 0.01) -> those codes [B, L], 0 to 200, which
     index --snp_embed vocab's table. DataEmbeddingVocab.forward truncates instead of rounding and
     puts 6 of the 201 levels one code low (methods.md 11)."""
-    return torch.round(x[:, :, 0].float() * 100).long()             # float32 first: exact for every level
+    codes = torch.round(x[:, :, 0].float() * 100).long()            # float32 first: exact for every level
+    if bool(((codes < 0) | (codes > 200)).any()):                    # a clear error, not a CUDA device assert
+        raise ValueError("--snp_embed vocab reads raw dosages in [0, 2]; these inputs give codes outside 0 to 200")
+    return codes
 
 
 def positions_digest(pos):

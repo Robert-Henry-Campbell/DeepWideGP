@@ -23,6 +23,16 @@ def test_the_codes_are_the_store_s_own():
     assert codes[0].tolist() == list(range(201)) + [0]
 
 
+@pytest.mark.parametrize("dosage", [-0.01, 2.01, -1.3])
+def test_inputs_that_are_not_raw_dosages_are_refused(dosage):
+    """Standardised or otherwise out-of-range inputs raise a clear error (on a GPU the table lookup
+    would end in a device-side assert that breaks the whole process)."""
+    from widedeepgp.model import vocab_codes
+    x = torch.tensor([[[1.0], [dosage]]])
+    with pytest.raises(ValueError, match="raw dosages in"):
+        vocab_codes(x)
+
+
 def test_the_published_conversion_puts_six_levels_one_code_low():
     """Why the model does not reuse DataEmbeddingVocab.forward's conversion (round to two decimals,
     times 100, then truncate): in float32 six levels land one code low."""

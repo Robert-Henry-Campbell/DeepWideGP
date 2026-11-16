@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Stand-alone hyper-parameter search for the multi-disease model with Optuna (the search inside
 every run, widedeepgp/tuning.py, uses suggest, open_study and load_study from here).
 

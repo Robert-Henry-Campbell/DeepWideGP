@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Convert a legacy pickle dataset into the store layout (numpy only).
 
     python -m genostore.from_pickles --src pukb/genes/<label>/ld_all --dst pukb/genes/<label>/store

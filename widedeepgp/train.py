@@ -1,18 +1,10 @@
 """One multi-disease training run, shared by main_multilabel.py and the search (tuning.py), so a
-tuned configuration is trained by exactly the code that tuned it.
+tuned configuration is trained by exactly the code that tuned it. It writes the run folder
+<run_dir>/<experiment>/<exp_name>/ that README.md describes.
 
 An epoch-equivalent is as many training draws as there are training participants. Lightning's
 "epoch" is one validation interval, so every checkpoint written after validation sits on an
 epoch boundary and a resumed run continues the same batch sequence.
-
-A run directory, <run_dir>/<experiment>/<exp_name>/, holds
-    config.json      every setting, the derived schedule, the label counts, the covariate scaling
-                     and the code that ran (code_version)
-    tb/              TensorBoard event files
-    metrics.csv      one row per validation pass, label and metric
-    snapshots/       weights along training; snapshots.csv says what each one cost
-    checkpoints/     best.ckpt (by mean validation AUROC) and last.ckpt (to resume)
-    results.json     validation metrics of the best checkpoint
 """
 import json
 import math
@@ -29,12 +21,12 @@ import torch
 from lightning_fabric.utilities.apply_func import move_data_to_device
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from genostore.datamodule import SNPStoreDataModule, is_store_dataset
+from genostore.datamodule import SNPStoreDataModule, dataset_dir, is_store_dataset
 
 from . import metrics as M
 from .callbacks import EarlyStoppingOnce, OptunaPruning, RunCheckpoint, RunLog, Snapshots, snapshot_steps
 from .losses import WideLoss, label_counts
-from .model import WideDeepGP, annotations_digest, curvature_ratios, positions_digest, wide_learning_rate
+from .model import WIDE_KEYS, WideDeepGP, annotations_digest, curvature_ratios, positions_digest, wide_learning_rate
 from .samplers import cases_per_batch, make_sampler
 
 MONITOR = "val/auroc_mean"
@@ -42,8 +34,8 @@ MONITOR = "val/auroc_mean"
 
 def build_data(cfg):
     if not is_store_dataset(cfg):
-        raise FileNotFoundError(f"{cfg.data_dir}/{cfg.label}/{cfg.rd_mode}/store.json not found: the multi-disease "
-                                f"model reads disk-backed datasets only (genostore/README.md)")
+        raise FileNotFoundError(f"{dataset_dir(cfg)}/store.json not found: the multi-disease model reads "
+                                "disk-backed datasets only (genostore/README.md)")
     return SNPStoreDataModule(cfg)
 
 
@@ -216,9 +208,6 @@ def last_checkpoint(ckpt_dir):
                          f"name but {', '.join(newer)} was written after it (copied without the files' times?); move "
                          "the stale checkpoints out of the folder")
     return latest
-
-
-WIDE_KEYS = ("prs.", "cov_linear", "intercept")
 
 
 def load_wide_init(model, path):

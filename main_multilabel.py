@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Train the multi-disease DeepGP (WideDeepGP).
 
     python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
@@ -8,7 +7,7 @@ A run tunes itself on the free GPUs minus one (widedeepgp/tuning.py; methods.md 
 --wide on, the default, its model is always the network on top of the linear PRS (the linear model
 alone is an ablation; 'off' is the network alone, 'only' the linear model). --tune_trials 0 trains
 the given settings once, on the GPU this process sees. The dataset is <data_dir>/<label>/<rd_mode>/
-in the genotype-store layout; widedeepgp/train.py says what a run writes.
+in the genotype-store layout; README.md says what a run writes.
 """
 import os
 import sys

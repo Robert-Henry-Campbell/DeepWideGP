@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Score the snapshots of a multi-disease run on one split.
 
     python score_snapshots.py --run runs/<experiment>/<run>                       # every snapshot, validation set

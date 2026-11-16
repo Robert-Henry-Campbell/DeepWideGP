@@ -10,14 +10,8 @@ in two stages:
 
 The run's model is always the joint one, whatever its tuning AUROC; the linear model alone is
 recorded as an ablation ("linear_only"). --wide only runs stage 1 alone, --wide off searches the
-network alone (stage "deep"). The run's folder, <run_dir>/<experiment>/<exp_name>/, holds
-linear/, a folder per Optuna stage with its study (optuna_journal.log) and one training run per
-trial (trial_NNNN/), plus
-
-    results.json   the chosen stage and model, and every trial's settings, value and cost
-    search.json    the arguments the search was started with (a rerun with others is refused)
-
-Rerunning the same command continues the search.
+network alone (stage "deep"). README.md lists what the run's folder holds; rerunning the same
+command continues the search.
 """
 import contextlib
 import copy

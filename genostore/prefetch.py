@@ -78,11 +78,8 @@ class CacheProbe:
 
 def disk_busy(path, window_s=0.5, threshold_bps=150e3):
     """True if anybody is reading the disk that holds ``path`` right now."""
-    dev = disk_of(path)
-    d0 = disk_read_bytes(dev)
-    time.sleep(window_s)
-    d1 = disk_read_bytes(dev)
-    return d0 is not None and d1 is not None and (d1 - d0) / window_s > threshold_bps
+    bps = read_bps(disk_of(path), window_s)
+    return bps is not None and bps > threshold_bps
 
 
 def disk_of(path):
@@ -112,6 +109,23 @@ def disk_read_bytes(dev):
     except OSError:
         pass
     return None
+
+
+def read_bps(dev, window_s):
+    """Bytes per second read from block device ``dev`` (all processes) over the next ``window_s``
+    seconds, or None if it cannot be measured."""
+    d0 = disk_read_bytes(dev)
+    time.sleep(window_s)
+    d1 = disk_read_bytes(dev)
+    return None if d0 is None or d1 is None else (d1 - d0) / window_s
+
+
+def willneed(fd, start, end):
+    """Queue readahead for bytes [start, end) as requests a seek-bound disk serves in one sweep."""
+    off = start
+    while off < end:
+        os.posix_fadvise(fd, off, min(REQ_BYTES, end - off), os.POSIX_FADV_WILLNEED)
+        off += REQ_BYTES
 
 
 class Prefetcher(threading.Thread):
@@ -180,13 +194,11 @@ class Prefetcher(threading.Thread):
 
     def _probe(self):
         """Quiet window: nothing of ours is in flight, so all disk reads seen are others'."""
-        d0 = disk_read_bytes(self.dev)
-        time.sleep(self.probe_s)
-        d1 = disk_read_bytes(self.dev)
-        if d0 is None or d1 is None:
+        bps = read_bps(self.dev, self.probe_s)
+        if bps is None:
             return False                      # cannot measure: assume the disk is ours
-        self.others_bps = (d1 - d0) / self.probe_s
-        return self.others_bps > self.contended_bps
+        self.others_bps = bps
+        return bps > self.contended_bps
 
     def _advance(self, pos, n, from_cache):
         with self.cv:
@@ -242,10 +254,7 @@ class Prefetcher(threading.Thread):
                         continue
                     t_probe = time.perf_counter()
                 t0 = time.perf_counter()
-                off = pos
-                while off < pos + n:
-                    os.posix_fadvise(fd, off, min(REQ_BYTES, pos + n - off), os.POSIX_FADV_WILLNEED)
-                    off += REQ_BYTES
+                willneed(fd, pos, pos + n)
                 os.pread(fd, 1, pos + n - 1)      # returns once the (in-order) readahead reaches the last page
                 dt = time.perf_counter() - t0
                 self.t_io += dt

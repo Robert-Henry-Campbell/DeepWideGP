@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """On-disk format of the DeepGP genotype store, version 1 ("base2+ovr8"). numpy only.
 
 Layout of a store directory

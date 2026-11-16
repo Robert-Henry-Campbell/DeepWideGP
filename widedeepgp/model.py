@@ -23,6 +23,7 @@ from .losses import WideLoss
 
 POOLS = ("atten", "mean", "last")
 WIDE_MODES = ("off", "on", "only")
+WIDE_KEYS = ("prs.", "cov_linear", "intercept")        # state_dict keys of the linear PRS path
 
 
 def positions_digest(pos):
@@ -472,7 +473,7 @@ class WideDeepGP(pl.LightningModule):
         src = {k: v for k, v in state_dict.items() if not k.endswith("position_embedding.pe")
                and not k.startswith("loss_fn.") and not (k.startswith("best_") and k not in own)}
         skipped = []
-        per_label = ("prs.", "cov_linear", "intercept")
+        per_label = WIDE_KEYS
         if self.wide != "only":
             per_label += (f"combine.layers.{len(self.combine.layers) - 1}.",)
         other_labels = source_labels is not None and list(source_labels) != self.label_names
@@ -490,7 +491,7 @@ class WideDeepGP(pl.LightningModule):
         if unknown:
             raise KeyError(f"weights not in this model: {unknown[:5]}")
         missing = [k for k in own if k not in src and not k.startswith("loss_fn.") and k not in skipped]
-        optional = ("annot_gain.", "annot_offset.", "prs.", "cov_linear", "intercept")
+        optional = ("annot_gain.", "annot_offset.") + WIDE_KEYS
         if missing and not all(k.startswith(optional) for k in missing):
             raise KeyError(f"weights missing from the source: {missing[:5]}")
         self.load_state_dict(src, strict=False)

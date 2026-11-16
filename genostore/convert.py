@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Convert PLINK2 .pgen files (variant-major) into a DeepGP genotype store (sample-major).
 
 One streaming pass per chromosome, bounded memory, resumable per block. Needs ``pgenlib``
@@ -21,18 +20,12 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import format as gf
-from .prefetch import CacheProbe, Prefetcher, REQ_BYTES, disk_busy, disk_of, disk_read_bytes
+from .prefetch import CacheProbe, Prefetcher, REQ_BYTES, disk_busy, disk_of, read_bps, willneed
 from .store import GenoStore
 
 
 def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
-
-
-def _willneed(fd, start, end):
-    """Queue readahead for bytes [start, end) as requests a seek-bound disk serves in one sweep."""
-    for off in range(start, end, REQ_BYTES):
-        os.posix_fadvise(fd, off, min(REQ_BYTES, end - off), os.POSIX_FADV_WILLNEED)
 
 
 def warm_file(path, length=None):
@@ -41,7 +34,7 @@ def warm_file(path, length=None):
     end = size if length is None else min(size, length)
     fd = os.open(path, os.O_RDONLY)
     try:
-        _willneed(fd, 0, end)
+        willneed(fd, 0, end)
     finally:
         os.close(fd)
 
@@ -260,10 +253,10 @@ class SparseWarmer:
         a, b = int(s[0]), int(e[0])
         for i in range(1, len(s)):
             if int(s[i]) - b > self.MERGE_GAP:
-                _willneed(self.fd, a, b)
+                willneed(self.fd, a, b)
                 a = int(s[i])
             b = int(e[i])
-        _willneed(self.fd, a, b)
+        willneed(self.fd, a, b)
         self.last_end = b
 
     def _wait_while_busy(self, deadline, stall_timeout):
@@ -272,11 +265,8 @@ class SparseWarmer:
         while True:
             if self.last_end is not None:
                 os.pread(self.fd, 1, self.last_end - 1)        # let our own queued requests finish first
-            d0 = disk_read_bytes(self.dev)
-            time.sleep(self.PROBE_S)
-            d1 = disk_read_bytes(self.dev)
-            bps = 0.0 if d0 is None or d1 is None else (d1 - d0) / self.PROBE_S     # none of it ours
-            if bps <= self.CONTENDED_BPS:
+            bps = read_bps(self.dev, self.PROBE_S)               # none of it ours
+            if bps is None or bps <= self.CONTENDED_BPS:          # (not measurable: idle)
                 break
             if time.time() - self._t_note >= 300:
                 log(f"read-ahead {os.path.basename(self.path)}: disk busy (others reading {bps / 1e6:.1f} MB/s); "

@@ -283,10 +283,11 @@ def run_workers(base, argv, script, stage, n_total, remaining, gpus, init):
     per trial still to run), each taking trials until the stage has ``n_total``."""
     if not gpus:
         return worker(base, stage, n_total, 0, init)
+    k = min(len(gpus), remaining)
     log_dir = os.path.join(run_root(base), stage, "workers")
     os.makedirs(log_dir, exist_ok=True)
     procs = [_spawn_worker(argv, script, os.path.join(log_dir, f"gpu{gpus[i]}.log"), gpus[i], stage, n_total, i, init)
-             for i in range(min(len(gpus), remaining))]
+             for i in range(k)]
     codes = [p.wait() for p in procs]
     if any(codes):
         print(f"{stage}: worker exit codes {codes}; logs in {log_dir}", flush=True)

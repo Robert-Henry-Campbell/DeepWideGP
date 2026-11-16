@@ -164,10 +164,9 @@ class RunLog(pl.Callback):
             self.peak_val_bytes = max(self.peak_val_bytes, torch.cuda.max_memory_allocated())
             torch.cuda.reset_peak_memory_stats()
         m = pl_module.last_val_metrics
-        step = int(trainer.global_step)
-        if m is None or trainer.sanity_checking or step == self._last_step:   # the pass a resumed run repeats
-            return
-        self._last_step = step
+        if m is None or trainer.sanity_checking or int(trainer.global_step) == self._last_step:
+            return                                       # a step already recorded: the pass a resumed run repeats
+        step = self._last_step = int(trainer.global_step)
         self.n_validations += 1
         self.metrics_at[step] = m
         ee = pl_module.samples_seen / self.n_train
@@ -262,11 +261,12 @@ class OptunaPruning(pl.Callback):
         if trainer.sanity_checking:
             return
         value = trainer.callback_metrics.get(self.monitor)
-        step = int(trainer.global_step)
-        if value is None or step == self._last_step:
+        if value is None or int(trainer.global_step) == self._last_step:
             return
-        self._last_step = step
-        self.n = max(1, int(round(step / float(self.steps_per_pass)))) if self.steps_per_pass else self.n + 1
+        self._last_step = int(trainer.global_step)
+        self.n += 1
+        if self.steps_per_pass:
+            self.n = max(1, int(round(int(trainer.global_step) / float(self.steps_per_pass))))
         self.trial.report(float(value), step=self.n)
         if self.trial.should_prune():
             import optuna

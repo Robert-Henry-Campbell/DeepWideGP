@@ -1063,3 +1063,35 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   umask; `generate_synthetic_multilabel._auc` ranks ties by position. Branch `fix/2026-11-16`
   (another session) fixes some of these in the same files, so merging it with
   `simplify/integrate` will need conflicts resolved.
+
+## 2026-11-16 (22:00 UTC) — The simplification and the fixes, verified, on widening (simplify/final)
+
+- widening moves from d019bb9 to the branch simplify/final: the five group commits with their
+  review fixes and the cross-group pass (entry above), then four commits of this session:
+  tuning.py imports torch and the training stack inside the functions that use them again (the
+  simplification had moved them to module level: importing tuning took 13 s and loaded torch,
+  now 0.5 s as before); the simplification's new tests renamed so the suite command runs them
+  (test_ml_model_pieces, test_ml_training_pieces, test_genostore_writing, test_genostore_reading,
+  test_ml_entry_points); fix/2026-11-16 merged onto the simplified code (conflicts resolved onto
+  its structure; two of the new tests pinned behaviour the fixes change on purpose and were
+  updated); and vocab_codes refusing inputs that are not raw dosages with a ValueError (the
+  harness's model check gives every configuration the same non-dosage inputs, and out-of-range
+  codes ended in a CUDA device-side assert that broke the rest of the check).
+- Size of the in-scope code (widedeepgp/, genostore/, main_multilabel.py, tune_optuna.py,
+  score_snapshots.py, args_generator.py, scripts/ but t2d.sh; 32 files): 5,683 lines (4,090 code
+  lines) at d019bb9; 5,071 (3,883) after the simplification; 5,138 (3,929) with the fixes.
+  Tests: 2,489 lines, now 5,124.
+- Verification of the final code (logs in /mnt/sdg/robert/deepwidegp/runs/simplify_2026-11-16):
+  CPU suite 207 passed, 29 skipped, 1 failed (test_free_workers_take_the_next_trial, a timing
+  test that fails the same way on d019bb9 under today's load). GPU (final_gpu/): test_ml_wide 26
+  passed and the same timing failure, test_ml_train quick 24 passed (the resume test passes
+  now), slow 2 passed and 1 skipped, test_ml_model 9, test_genostore_datamodule 4,
+  test_ml_mamba3 6, test_ml_vocab 9, capacity probe 2 of 2. The old-against-new harness
+  (harness/, 26 checks, golden outputs out_old_1 from d019bb9): 21 identical; the other 5 differ
+  only where the fixes change behaviour on purpose (the one-label error counts other values:
+  datamodule, datamodule_gpu; per-person score files are 0600: train_linear, train_network; the
+  vocab model refuses non-dosage input: model). The simplification alone (5458e6c) matched
+  d019bb9 on all 26 harness checks, the CPU and GPU suites, PGI's tests of genostore and
+  widedeepgp.metrics, and DeepWideGP-Scripts' tests.
+- The harness can check later refactors: harness.py --code DIR --out DIR --gpu N, then
+  compare.py out_old_1 DIR (usage in harness.py's docstring).

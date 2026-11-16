@@ -4,7 +4,7 @@ Pins what a store conversion writes (bytes, JSON keys and their order, refusals,
 scripts read) and how the command line hands its work to convert_chrom, so a refactor of
 genostore/format.py, convert.py or from_pickles.py cannot change them unnoticed.
 
-Run:  python -m pytest tests/test_lean_g3_genostore_write.py -q
+Run:  python -m pytest tests/test_genostore_writing.py -q
 """
 import hashlib
 import json

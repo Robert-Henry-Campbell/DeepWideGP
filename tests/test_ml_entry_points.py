@@ -3,7 +3,7 @@ tune_optuna.py, score_snapshots.py, args_generator.py and scripts/), all on the 
 
 Training is the linear path alone (--wide only, no encoder) or a stand-in for run_training; the
 generators and the schematic are checked against the committed synthetic data and figure.
-    python -m pytest tests/test_lean_g5_entry_scripts.py -q
+    python -m pytest tests/test_ml_entry_points.py -q
 """
 import csv
 import hashlib

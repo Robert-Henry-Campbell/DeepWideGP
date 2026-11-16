@@ -3,7 +3,7 @@ reach: the search's worker processes (a stand-in script plays main_multilabel.py
 its run lock and GPU discovery, the stage settings, the code version when git fails, which last
 checkpoint a resume picks, and the callbacks' logs, snapshots, stopping and pruning, driven by
 stand-ins for Lightning's trainer. Everything runs on the CPU in seconds.
-    python -m pytest tests/test_lean_g2_training.py -q
+    python -m pytest tests/test_ml_training_pieces.py -q
 """
 import csv
 import json

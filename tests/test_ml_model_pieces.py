@@ -3,7 +3,7 @@ blocks.py): what saved models depend on (digests, the layout and initial values 
 load_weights), the validation pass with and without a grid, the per-disease model, the training
 step, the learning-rate schedule, the samplers' seed keys and the metrics' layout. Pinned values
 come from commit d019bb9.
-    python -m pytest tests/test_lean_g1_model.py -q
+    python -m pytest tests/test_ml_model_pieces.py -q
 """
 import math
 import warnings

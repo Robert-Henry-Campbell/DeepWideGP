@@ -2,7 +2,7 @@
 the raw regions the store hands out, the torch decoder, the store-backed data module (refusals,
 scaling, the cache of training statistics, batch order) and the polite prefetcher.
 
-    python -m pytest tests/test_lean_g4_genostore_read.py -q
+    python -m pytest tests/test_genostore_reading.py -q
 """
 import hashlib
 import json

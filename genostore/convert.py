@@ -10,9 +10,6 @@ One streaming pass per chromosome, bounded memory, resumable per block. Needs ``
     python -m genostore.convert ... --chroms $(seq 1 22) --extract snps.tsv --out /path/store_subset
     python -m genostore.convert verify --out /path/store
 
---extract keeps only the listed variants (a text file whose header names CHROM and ID, or CHROM
-and POS) and reads just their records from the .pgen, so a SNP subset needs no intermediate copy.
-
 Memory: one block of n_samples x 16384 bytes (5.5 GB for 333k samples) plus ~1 GB of buffers.
 """
 import argparse
@@ -32,16 +29,19 @@ def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def warm_file(path, start=0, length=None):
-    """Queue readahead for a small file/range (so a seek-bound disk serves it in one sweep)."""
+def _willneed(fd, start, end):
+    """Queue readahead for bytes [start, end) as requests a seek-bound disk serves in one sweep."""
+    for off in range(start, end, REQ_BYTES):
+        os.posix_fadvise(fd, off, min(REQ_BYTES, end - off), os.POSIX_FADV_WILLNEED)
+
+
+def warm_file(path, length=None):
+    """Queue readahead for a small file, or its first ``length`` bytes."""
     size = os.path.getsize(path)
-    end = size if length is None else min(size, start + length)
+    end = size if length is None else min(size, length)
     fd = os.open(path, os.O_RDONLY)
     try:
-        off = (start // REQ_BYTES) * REQ_BYTES
-        while off < end:
-            os.posix_fadvise(fd, off, min(REQ_BYTES, end - off), os.POSIX_FADV_WILLNEED)
-            off += REQ_BYTES
+        _willneed(fd, 0, end)
     finally:
         os.close(fd)
 
@@ -55,8 +55,7 @@ def read_psam_ids(path):
             if not p:
                 continue
             if line.startswith("#"):
-                cols = [c.lstrip("#") for c in p]
-                iid_col = cols.index("IID")
+                iid_col = [c.lstrip("#") for c in p].index("IID")
                 continue
             if iid_col is None:                  # headerless .fam-style: FID IID ...
                 iid_col = 1
@@ -114,7 +113,7 @@ def pgen_variant_offsets(path):
     nonref_per_variant = ((h["fmt"] >> 6) & 3) == 3
     n_vblocks = (m + 65535) // 65536
     header_guess = 12 + n_vblocks * 8 + m * (len_bytes + 1 + allele_ct_bytes) + m // 8 + 4096
-    warm_file(path, 0, header_guess)
+    warm_file(path, header_guess)
     offs = np.empty(m + 1, dtype=np.uint64)
     with open(path, "rb") as f:
         f.seek(12)
@@ -219,102 +218,83 @@ def select_variants(pvar_lines, want, chrom, source):
     return np.sort(idx).astype(np.uint32)
 
 
+class _Stopped(Exception):
+    """The conversion paused early: "deadline" or "stalled"."""
+
+
+def _maybe_stop(deadline, stall_timeout=None, last_progress=None):
+    """Pause after ``stall_timeout`` s without new readable data, or once past the deadline."""
+    if stall_timeout is not None and time.time() - last_progress > stall_timeout:
+        raise _Stopped("stalled")
+    if deadline is not None and time.time() > deadline:
+        raise _Stopped("deadline")
+
+
 class SparseWarmer:
     """Read-ahead for a *list* of variant records instead of a contiguous stretch.
 
-    Queues the listed records' byte ranges a chunk or two ahead of the decoder (neighbouring
-    records closer than ``merge_gap`` are fetched as one request), so a rotational disk serves
-    them in one sweep and the decoder finds them in the page cache. Under the ``idle`` policy it
-    first lets its own requests finish, listens for a moment, and waits while other jobs are
-    reading the disk -- the same courtesy as ``Prefetcher``.
+    Queues the listed records' byte ranges up to AHEAD chunks ahead of the decoder (records closer
+    than MERGE_GAP as one request), so a rotational disk serves them in one sweep. Under the ``idle``
+    policy it waits while other jobs are reading the disk, the same courtesy as ``Prefetcher``.
     """
+    AHEAD, MERGE_GAP = 2, 256 << 10
+    PROBE_EVERY, PROBE_S, CONTENDED_BPS, BACKOFF_S = 5.0, 0.25, 150e3, 5.0
 
-    def __init__(self, path, starts, ends, chunk, policy="idle", ahead=2, merge_gap=256 << 10,
-                 probe_every=5.0, probe_s=0.25, contended_bps=150e3, backoff_s=5.0, log=None):
+    def __init__(self, path, starts, ends, chunk, warmed, policy):
         self.fd = os.open(path, os.O_RDONLY)
-        self.path = path
+        self.path, self.dev, self.policy = path, disk_of(path), policy
         self.starts = np.asarray(starts, dtype=np.int64)
         self.ends = np.asarray(ends, dtype=np.int64)
-        self.chunk, self.ahead, self.merge_gap = int(chunk), int(ahead), int(merge_gap)
-        self.policy, self.probe_every, self.probe_s = policy, probe_every, probe_s
-        self.contended_bps, self.backoff_s, self.log = contended_bps, backoff_s, log
-        self.dev = disk_of(path)
-        self.warmed = 0                       # listed variants whose records have been queued
+        self.chunk = int(chunk)
+        self.warmed = int(warmed)             # listed variants whose records have been queued
         self.last_end = None
         self.t_probe = -1e18
-        self.t_wait = 0.0
-        self.bytes_queued = 0
         self.last_progress = time.time()
         self._t_note = 0.0
 
     def close(self):
         os.close(self.fd)
 
-    def skip_to(self, k):
-        self.warmed = max(self.warmed, int(k))
-
     def _queue(self, k0, k1):
         s, e = self.starts[k0:k1], self.ends[k0:k1]
         a, b = int(s[0]), int(e[0])
         for i in range(1, len(s)):
-            if int(s[i]) - b <= self.merge_gap:
-                b = int(e[i])
-                continue
-            self._advise(a, b)
-            a, b = int(s[i]), int(e[i])
-        self._advise(a, b)
+            if int(s[i]) - b > self.MERGE_GAP:
+                _willneed(self.fd, a, b)
+                a = int(s[i])
+            b = int(e[i])
+        _willneed(self.fd, a, b)
         self.last_end = b
 
-    def _advise(self, a, b):
-        off = a
-        while off < b:
-            os.posix_fadvise(self.fd, off, min(REQ_BYTES, b - off), os.POSIX_FADV_WILLNEED)
-            off += REQ_BYTES
-        self.bytes_queued += b - a
-
-    def _others_reading(self):
-        if self.last_end is not None:
-            os.pread(self.fd, 1, self.last_end - 1)        # let our own queued requests finish first
-        d0 = disk_read_bytes(self.dev)
-        time.sleep(self.probe_s)
-        d1 = disk_read_bytes(self.dev)
-        if d0 is None or d1 is None:
-            return False, 0.0
-        bps = (d1 - d0) / self.probe_s
-        return bps > self.contended_bps, bps
-
-    def _wait_while_busy(self, deadline=None, stall_timeout=None):
-        if self.policy != "idle" or self.dev is None or time.perf_counter() - self.t_probe < self.probe_every:
+    def _wait_while_busy(self, deadline, stall_timeout):
+        if self.policy != "idle" or self.dev is None or time.perf_counter() - self.t_probe < self.PROBE_EVERY:
             return
         while True:
-            busy, bps = self._others_reading()
-            if not busy:
+            if self.last_end is not None:
+                os.pread(self.fd, 1, self.last_end - 1)        # let our own queued requests finish first
+            d0 = disk_read_bytes(self.dev)
+            time.sleep(self.PROBE_S)
+            d1 = disk_read_bytes(self.dev)
+            bps = 0.0 if d0 is None or d1 is None else (d1 - d0) / self.PROBE_S     # none of it ours
+            if bps <= self.CONTENDED_BPS:
                 break
-            if self.log is not None and time.time() - self._t_note >= 300:
-                self.log(f"read-ahead {os.path.basename(self.path)}: disk busy (others reading {bps / 1e6:.1f} MB/s); "
-                         f"waiting, {self.warmed}/{len(self.starts)} variants queued")
+            if time.time() - self._t_note >= 300:
+                log(f"read-ahead {os.path.basename(self.path)}: disk busy (others reading {bps / 1e6:.1f} MB/s); "
+                    f"waiting, {self.warmed}/{len(self.starts)} variants queued")
                 self._t_note = time.time()
-            if stall_timeout is not None and time.time() - self.last_progress > stall_timeout:
-                raise _Stopped("stalled")
-            if deadline is not None and time.time() > deadline:
-                raise _Stopped("deadline")
-            time.sleep(self.backoff_s)
-            self.t_wait += self.backoff_s
+            _maybe_stop(deadline, stall_timeout, self.last_progress)
+            time.sleep(self.BACKOFF_S)
         self.t_probe = time.perf_counter()
 
-    def need(self, k1, deadline=None, stall_timeout=None):
-        """Make sure the records of listed variants below ``k1`` are queued, plus ``ahead`` chunks."""
-        target = min(len(self.starts), int(k1) + self.ahead * self.chunk)
+    def need(self, k1, deadline, stall_timeout):
+        """Make sure the records of listed variants below ``k1`` are queued, plus AHEAD chunks."""
+        target = min(len(self.starts), int(k1) + self.AHEAD * self.chunk)
         while self.warmed < target:
             self._wait_while_busy(deadline, stall_timeout)
             j = min(target, self.warmed + self.chunk)
             self._queue(self.warmed, j)
             self.warmed = j
             self.last_progress = time.time()
-
-
-class _Stopped(Exception):
-    pass
 
 
 def readable_now(pgen, store_dir, chrom, block_variants, max_variants=None, _cache={}):
@@ -338,9 +318,14 @@ def readable_now(pgen, store_dir, chrom, block_variants, max_variants=None, _cac
         pr.close()
 
 
+def _complete(store_dir, chrom):
+    j = gf.chrom_paths(store_dir, chrom)["json"]
+    return os.path.exists(j) and gf.read_json(j).get("complete")
+
+
 def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variants=gf.BLOCK_VARIANTS,
                   chunk=256, policy="idle", duty=0.5, max_ahead=1536 << 20, prefetch=True,
-                  max_variants=None, deadline=None, n_audit=8, threads=8, stall_timeout=None,
+                  max_variants=None, deadline=None, threads=8, stall_timeout=None,
                   var_idx=None, extract_src=None):
     """Returns "done", or "deadline" / "stalled" if it stopped early (rerun to resume).
 
@@ -350,8 +335,7 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
     """
     import pgenlib
 
-    p = gf.chrom_paths(store_dir, chrom)
-    if os.path.exists(p["json"]) and gf.read_json(p["json"]).get("complete"):
+    if _complete(store_dir, chrom):
         log(f"chr{chrom}: already complete, skipping")
         return "done"
     hdr = pgen_header(pgen)
@@ -373,50 +357,46 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
         to_read = int((rec_end - rec_start).sum())
     else:
         to_read = int(offs[m])
-    n_in_file = hdr["n_variants"]
-    which = f" (listed, of {n_in_file})" if listed else ""
+    which = f" (listed, of {hdr['n_variants']})" if listed else ""
     log(f"chr{chrom}: {m} variants{which} x {n} samples (of {n_raw}); record offsets "
         f"{'exact' if exact else 'APPROXIMATE'}; {to_read / 1e9:.2f} GB to read")
     w = gf.ChromWriter(store_dir, chrom, n, m, block_variants)
     if w.next_block:
         log(f"chr{chrom}: resuming at block {w.next_block}/{w.n_blocks}")
-    audit_rows = np.unique(np.linspace(0, n - 1, min(n_audit, n)).astype(np.int64))
-    audit_path = p["json"][:-5] + ".audit.npy"
+    # up to 8 evenly spaced rows straight from the decoder, which `verify` compares with the store
+    audit_rows = np.unique(np.linspace(0, n - 1, min(8, n)).astype(np.int64))
+    audit_path = os.path.join(store_dir, f"chr{chrom}.audit.npy")
     if w.next_block and os.path.exists(audit_path):
         audit = np.load(audit_path, mmap_mode="r+")
     else:
         audit = np.lib.format.open_memmap(audit_path, mode="w+", dtype=np.uint8, shape=(len(audit_rows), m))
-    np.save(p["json"][:-5] + ".audit_rows.npy", audit_rows)
+    np.save(os.path.join(store_dir, f"chr{chrom}.audit_rows.npy"), audit_rows)
 
-    v_start = w.block_range(w.next_block)[0] if not w.complete else m
+    v_start = w.block_range(w.next_block)[0]
     pf = warm = None
-    if prefetch and not w.complete and listed:
-        if exact:
-            warm = SparseWarmer(pgen, rec_start, rec_end, chunk, policy=policy, log=log)
-            warm.skip_to(v_start)
+    if prefetch and not w.complete:
+        if not listed:
+            pf = Prefetcher(pgen, start=int(offs[v_start]), end=int(offs[m]), policy=policy, duty=duty,
+                            max_ahead=max_ahead, log=log, log_every=60.0)
+            pf.set_consumed(int(offs[v_start]))
+            pf.start()
+        elif exact:
+            warm = SparseWarmer(pgen, rec_start, rec_end, chunk, v_start, policy)
         else:
             log(f"chr{chrom}: record offsets are approximate, so listed variants are read without read-ahead")
-    elif prefetch and not w.complete:
-        pf = Prefetcher(pgen, start=int(offs[v_start]), end=int(offs[m]), policy=policy, duty=duty,
-                        max_ahead=max_ahead, log=log, log_every=60.0)
-        pf.set_consumed(int(offs[v_start]))
-        pf.start()
-    reader = (pgenlib.PgenReader(pgen.encode(), raw_sample_ct=n_raw) if sample_idx is None else
-              pgenlib.PgenReader(pgen.encode(), raw_sample_ct=n_raw,
-                                 sample_subset=np.ascontiguousarray(sample_idx, dtype=np.uint32)))
+    subset = None if sample_idx is None else np.ascontiguousarray(sample_idx, dtype=np.uint32)
+    reader = pgenlib.PgenReader(pgen.encode(), raw_sample_ct=n_raw, sample_subset=subset)
     fbuf = np.empty((chunk, n), dtype=np.float32)
     threads = max(1, int(threads))
     slab = max(256, -(-n // (threads * 4)))            # ~4 slabs per thread, cache-sized
     slab_starts = list(range(0, n, slab))
     pool = ThreadPoolExecutor(max_workers=threads)
-    slack = 0 if exact else 64 << 20
-    t_start, v_done0 = time.time(), v_start
+    slack = 0 if exact else 64 << 20                    # approximate offsets: wait for a margin
+    t_start = time.time()
     status = "done"
     try:
         while not w.complete:
-            if deadline is not None and time.time() > deadline:
-                status = "deadline"
-                break
+            _maybe_stop(deadline)
             b = w.next_block
             v0, v1 = w.block_range(b)
             Q = np.empty((n, v1 - v0), dtype=np.uint8)
@@ -425,18 +405,13 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
             for k0 in range(v0, v1, chunk):
                 k1 = min(k0 + chunk, v1)
                 k = k1 - k0
+                t = time.time()
                 if pf is not None:
-                    t = time.time()
                     while not pf.wait_until(int(offs[k1]) + slack, timeout=20.0):
-                        if stall_timeout is not None and time.time() - pf.last_progress > stall_timeout:
-                            raise _Stopped("stalled")
-                        if deadline is not None and time.time() > deadline:
-                            raise _Stopped("deadline")
-                    t_wait += time.time() - t
+                        _maybe_stop(deadline, stall_timeout, pf.last_progress)
                 if warm is not None:
-                    t = time.time()
                     warm.need(k1, deadline, stall_timeout)
-                    t_wait += time.time() - t
+                t_wait += time.time() - t
                 t = time.time()
                 if listed:
                     reader.read_dosages_list(var_idx[k0:k1], fbuf[:k])
@@ -449,8 +424,7 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
                 d = fbuf[:k]                                             # [k, n], variant-major
                 c0, c1 = k0 - v0, k1 - v0
 
-                def work(s0, d=d, c0=c0, c1=c1):
-                    # one slab of samples: quantise, per-variant sums, transposed store
+                def work(s0, d=d, c0=c0, c1=c1):       # one slab of samples: quantise, sums, transpose
                     qv = gf.quantize_dosage(d[:, s0:s0 + slab])
                     miss = qv == gf.MISSING
                     nm = miss.sum(axis=1) if miss.any() else 0
@@ -471,8 +445,7 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
             w.append_block(Q, st, pool=pool)
             audit.flush()
             t_enc = time.time() - t
-            el = time.time() - t_start
-            rate = (v1 - v_done0) / max(el, 1e-9)
+            rate = (v1 - v_start) / max(time.time() - t_start, 1e-9)
             log(f"chr{chrom} block {b + 1}/{w.n_blocks}: {v1 - v0} variants in {time.time() - t_b:.1f}s "
                 f"(wait-for-disk {t_wait:.1f}s, decode {t_dec:.1f}s, quantise+transpose {t_proc:.1f}s, "
                 f"encode+write {t_enc:.1f}s); "
@@ -495,7 +468,7 @@ def convert_chrom(pgen, pvar, store_dir, chrom, sample_idx, n_raw, block_variant
         lines = [lines[i] for i in var_idx]
     info = w.finalize(lines, {"pgen": pgen, "pvar": pvar, "n_raw_samples": n_raw,
                               "pgen_bytes_read": to_read, "max_variants": max_variants,
-                              "pgen_variants": n_in_file, "extract": extract_src})
+                              "pgen_variants": hdr["n_variants"], "extract": extract_src})
     log(f"chr{chrom}: complete. {info['bytes_per_genotype']:.4f} bytes/genotype "
         f"({(info['base_bytes'] + info['ovr_bytes']) / 1e9:.2f} GB), exceptions "
         f"{100 * info['n_override'] / (n * m):.2f}%, missing {info['n_missing']}, "
@@ -508,7 +481,7 @@ def verify_store(store_dir, chroms=None):
     gs = GenoStore(store_dir)
     ok = True
     for c in (chroms or gs.chroms):
-        base = gf.chrom_paths(store_dir, c)["json"][:-5]
+        base = os.path.join(store_dir, f"chr{c}")
         if not os.path.exists(base + ".audit.npy"):
             log(f"chr{c}: no audit file, skipped")
             continue
@@ -519,7 +492,7 @@ def verify_store(store_dir, chroms=None):
         for v0 in range(0, m, 1 << 18):
             v1 = min(m, v0 + (1 << 18))
             bad += int((gs.read_q(c, rows, v0, v1) != audit[:, v0:v1]).sum())
-        mean, std, cnt = gs.stats(c)
+        mean, std, _ = gs.stats(c)
         log(f"chr{c}: {len(rows)} audit rows x {m} variants -> {bad} mismatches; "
             f"mean ALT dosage {mean.mean():.4f}, monomorphic variants {(std == 0).sum()}")
         ok = ok and bad == 0
@@ -527,8 +500,8 @@ def verify_store(store_dir, chroms=None):
 
 
 def main(argv=None):
-    """The command line. What a conversion writes is participant-level, so it runs under umask
-    077: every file and directory it creates is its owner's only (the caller's umask is restored)."""
+    """The command line, under umask 077: what it writes is participant-level, so every file and
+    directory it creates is its owner's only (the caller's umask is restored)."""
     old = os.umask(0o077)
     try:
         return _main(argv)
@@ -536,7 +509,7 @@ def main(argv=None):
         os.umask(old)
 
 
-def _main(argv=None):
+def _main(argv):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "verify":
         ap = argparse.ArgumentParser(prog="genostore.convert verify")
@@ -553,26 +526,25 @@ def _main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--keep-file", default=None, help="file of sample IDs to keep (last column)")
     ap.add_argument("--anonymize-ids", action="store_true",
-                    help="with --keep-n: write anonymous row labels and do not record which samples were drawn "
-                         "(pass the same --seed again to resume or add chromosomes)")
+                    help="with --keep-n: anonymous row labels, and no record of which samples were drawn "
+                         "(resume or add chromosomes with the same --seed)")
     ap.add_argument("--block-variants", type=int, default=gf.BLOCK_VARIANTS)
     ap.add_argument("--chunk", type=int, default=256, help="variants decoded per pgenlib call")
     ap.add_argument("--disk-policy", choices=["idle", "share"], default="idle",
-                    help="idle (default): read the source disk only while nobody else is reading it; "
-                         "share: read alongside other jobs at --duty")
+                    help="idle: read the source disk only while nobody else does; share: alongside others, at --duty")
     ap.add_argument("--duty", type=float, default=0.5, help="with --disk-policy share: max share of disk time")
     ap.add_argument("--max-ahead-gb", type=float, default=1.5)
     ap.add_argument("--no-prefetch", action="store_true")
     ap.add_argument("--opportunistic", action="store_true",
-                    help="convert whichever chromosome is readable without disturbing other jobs: one already in "
-                         "the page cache (e.g. being read by a GWAS), or any once the source disk is idle")
+                    help="convert whichever chromosome costs the source disk nothing: one already in the page "
+                         "cache, or any once the disk is idle")
     ap.add_argument("--stall-s", type=float, default=120.0,
                     help="with --opportunistic: leave a chromosome after this long without new readable data")
     ap.add_argument("--threads", type=int, default=8, help="threads for quantise/transpose/encode")
     ap.add_argument("--max-variants", type=int, default=None, help="only the first N variants (testing)")
     ap.add_argument("--extract", default=None,
-                    help="keep only the variants listed in this text file (header naming CHROM and ID, or CHROM "
-                         "and POS); only their records are read from the .pgen")
+                    help="keep only the variants listed in this file (header naming CHROM and ID, or CHROM and "
+                         "POS), reading only their records")
     ap.add_argument("--time-budget-s", type=float, default=None, help="stop cleanly after this long; rerun to resume")
     a = ap.parse_args(argv)
 
@@ -585,35 +557,31 @@ def _main(argv=None):
             raise SystemExit(f"{a.extract} lists no variants on chr{','.join(absent)}")
     deadline = None if a.time_budget_s is None else time.time() + a.time_budget_s
     prefix = lambda c: os.path.join(a.pgen_dir, a.pattern.format(chrom=c))
-    is_done = lambda c: (os.path.exists(gf.chrom_paths(a.out, c)["json"])
-                         and gf.read_json(gf.chrom_paths(a.out, c)["json"]).get("complete"))
-    pending = [c for c in a.chroms if not is_done(c)]
+    pending = [c for c in a.chroms if not _complete(a.out, c)]
     state = {}                                   # filled on first use: sample subset, store meta
 
     def open_store(c):
         """Create/validate the store from the .psam of chromosome ``c`` (all .psam must agree)."""
         all_ids = read_psam_ids(prefix(c) + ".psam")
+        digest = gf.samples_digest(all_ids)
         if "idx" not in state:
             idx = choose_samples(all_ids, a.keep_n, a.seed, a.keep_file)
             ids = all_ids if idx is None else [all_ids[i] for i in idx]
             subset = "all" if idx is None else ({"keep_file": a.keep_file} if a.keep_file
                                                 else {"keep_n": a.keep_n, "seed": a.seed})
-            if a.anonymize_ids:
-                # Data minimisation for test/benchmark stores: rows carry no participant ID and
-                # the store does not record which .psam rows (or which seed) they came from.
+            if a.anonymize_ids:           # data minimisation: no participant IDs, no record of which rows
                 if idx is None:
                     raise SystemExit("--anonymize-ids is meant for small subsets; combine it with --keep-n")
                 ids = [f"anon{i:06d}" for i in range(len(idx))]
                 subset = {"keep_n": len(idx), "anonymized": True}
             prov = {"psam": prefix(c) + ".psam", "n_raw_samples": len(all_ids),
-                    "raw_samples_sha256_16": gf.samples_digest(all_ids), "subset": subset}
-            os.makedirs(a.out, mode=0o700, exist_ok=True)
+                    "raw_samples_sha256_16": digest, "subset": subset}
             meta = gf.create_store(a.out, ids, a.block_variants, prov)
             if idx is not None and not a.anonymize_ids:
                 np.save(os.path.join(a.out, "sample_rows.npy"), idx)
             state.update(idx=idx, n_raw=len(all_ids), digest=meta["provenance"]["raw_samples_sha256_16"])
             log(f"store {a.out}: {len(ids)} samples (of {len(all_ids)}), block {meta['block_variants']}")
-        if gf.samples_digest(all_ids) != state["digest"]:
+        if digest != state["digest"]:
             raise ValueError(f"chr{c}: .psam sample order differs from the one this store was built from")
 
     t_note = 0.0
@@ -621,9 +589,7 @@ def _main(argv=None):
         if deadline is not None and time.time() > deadline:
             break
         pick = pending[0]
-        if a.opportunistic:
-            # Only touch what costs the source disk nothing: data another job already pulled into
-            # the page cache, or anything at all once nobody else is reading the disk.
+        if a.opportunistic:               # only what costs the source disk nothing: cached data, or an idle disk
             pick = next((c for c in pending
                          if readable_now(prefix(c) + ".pgen", a.out, c, a.block_variants, a.max_variants)), None)
             if pick is None and not disk_busy(prefix(pending[0]) + ".pgen"):

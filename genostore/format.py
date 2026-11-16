@@ -57,9 +57,6 @@ VALUE_OF = np.array([0, 100, 200, 0], dtype=np.uint8)
 SHIFTS = np.array([0, 2, 4, 6], dtype=np.uint8)
 
 
-# --------------------------------------------------------------------------------------
-# quantisation / block codec
-# --------------------------------------------------------------------------------------
 def quantize_dosage(d):
     """float dosage array (missing: negative sentinel or NaN) -> uint8 q, 255 = missing.
 
@@ -67,10 +64,7 @@ def quantize_dosage(d):
     multiples of 1/16384, for which this is exact in float32.
     """
     t = np.multiply(d, np.float32(DOSAGE_SCALE), dtype=np.float32)
-    if t.size == 0:
-        return t.astype(np.uint8)
-    lo, hi = t.min(), t.max()                     # NaN makes both comparisons below False
-    if lo >= 0.0 and hi <= 2.0 * DOSAGE_SCALE:    # usual case: nothing missing, one cheap pass
+    if t.size and t.min() >= 0.0 and t.max() <= 2.0 * DOSAGE_SCALE:   # usual case: none missing (NaN fails)
         t += np.float32(0.5)
         return t.astype(np.uint8)
     miss = ~(t >= -0.5)
@@ -82,27 +76,11 @@ def quantize_dosage(d):
     return q
 
 
-def _encode_rows(q, nbytes):
-    """q: uint8 [rows, width] -> (packed [rows, nbytes], exception bytes, per-row counts)."""
-    width = q.shape[1]
-    code = np.take(CODE_OF, q)
-    m = code == 3
-    counts = np.count_nonzero(m, axis=1)
-    vals = q[m]                                   # row-major: sample-major, variants ascending
-    if nbytes * 4 != width:                       # pad with code 0 so padding never claims an exception
-        pad = np.zeros((code.shape[0], nbytes * 4), dtype=np.uint8)
-        pad[:, :width] = code
-        code = pad
-    x = np.ascontiguousarray(code).view("<u4")    # 4 codes per uint32: c0 | c1<<8 | c2<<16 | c3<<24
-    packed = (x | (x >> 6) | (x >> 12) | (x >> 18)).astype(np.uint8)   # low byte = c0|c1<<2|c2<<4|c3<<6
-    return packed, vals, counts
-
-
 def encode_block(Q, slab=8192, pool=None):
     """Q: uint8 [n_samples, width] of q values -> (packed [n, ceil(width/4)], ovr bytes, counts).
 
-    ``pool``: optional concurrent.futures executor; row slabs are independent and numpy
-    releases the GIL in these loops, so threads give a real speed-up on large blocks.
+    ``pool``: optional executor; row slabs are independent and numpy releases the GIL in these
+    loops, so threads speed up large blocks.
     """
     Q = np.asarray(Q)
     assert Q.dtype == np.uint8 and Q.ndim == 2
@@ -110,14 +88,20 @@ def encode_block(Q, slab=8192, pool=None):
     nbytes = (width + 3) // 4
     packed = np.empty((n, nbytes), dtype=np.uint8)
     counts = np.empty(n, dtype=np.int64)
-    starts = list(range(0, n, slab))
 
     def work(r0):
-        p, v, c = _encode_rows(Q[r0:r0 + slab], nbytes)
-        packed[r0:r0 + slab] = p
-        counts[r0:r0 + slab] = c
-        return v
+        q = Q[r0:r0 + slab]
+        code = np.take(CODE_OF, q)
+        exc = code == 3
+        counts[r0:r0 + slab] = np.count_nonzero(exc, axis=1)
+        if nbytes * 4 != width:                   # padding is code 0, so it never claims an exception
+            code = np.pad(code, ((0, 0), (0, nbytes * 4 - width)))
+        x = np.ascontiguousarray(code).view("<u4")    # 4 codes per uint32: c0 | c1<<8 | c2<<16 | c3<<24
+        x = x | (x >> 6) | (x >> 12) | (x >> 18)      # low byte = c0 | c1<<2 | c2<<4 | c3<<6
+        packed[r0:r0 + slab] = x.astype(np.uint8)
+        return q[exc]                             # sample-major, variants ascending
 
+    starts = range(0, n, slab)
     parts = list(pool.map(work, starts)) if pool is not None else [work(r0) for r0 in starts]
     ovr = np.concatenate(parts) if parts else np.empty(0, dtype=np.uint8)
     return packed, ovr, counts
@@ -131,9 +115,7 @@ def decode_packed(packed, ovr, width=None):
     """
     packed = np.asarray(packed)
     lead, nbytes = packed.shape[:-1], packed.shape[-1]
-    codes = ((packed[..., None] >> SHIFTS) & 3).reshape(*lead, nbytes * 4)
-    if width is not None and width != nbytes * 4:
-        codes = codes[..., :width]
+    codes = ((packed[..., None] >> SHIFTS) & 3).reshape(*lead, nbytes * 4)[..., :None if width == nbytes * 4 else width]
     q = VALUE_OF[codes]
     m = codes == 3
     n_exc = int(m.sum())
@@ -144,9 +126,6 @@ def decode_packed(packed, ovr, width=None):
     return q
 
 
-# --------------------------------------------------------------------------------------
-# small file helpers
-# --------------------------------------------------------------------------------------
 def new_file(path, mode="w"):
     """Open ``path`` for writing, created (or emptied) readable and writable by its owner only."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
@@ -176,11 +155,7 @@ def chrom_paths(store_dir, chrom):
 
 
 def samples_digest(sample_ids):
-    h = hashlib.sha256()
-    for s in sample_ids:
-        h.update(str(s).encode())
-        h.update(b"\n")
-    return h.hexdigest()[:16]
+    return hashlib.sha256(b"".join(str(s).encode() + b"\n" for s in sample_ids)).hexdigest()[:16]
 
 
 def create_store(store_dir, sample_ids, block_variants=BLOCK_VARIANTS, provenance=None):
@@ -205,35 +180,29 @@ def create_store(store_dir, sample_ids, block_variants=BLOCK_VARIANTS, provenanc
     return meta
 
 
-# --------------------------------------------------------------------------------------
-# writer
-# --------------------------------------------------------------------------------------
 class ChromWriter:
     """Append blocks of one chromosome in order. Resumable at block granularity."""
 
     def __init__(self, store_dir, chrom, n_samples, n_variants, block_variants=BLOCK_VARIANTS,
                  resume=True, drop_cache=True):
-        self.store_dir, self.chrom = store_dir, str(chrom)
+        self.chrom = str(chrom)
         self.n, self.m, self.w = int(n_samples), int(n_variants), int(block_variants)
         assert self.w % 4 == 0
         self.n_blocks = (self.m + self.w - 1) // self.w
         self.p = chrom_paths(store_dir, self.chrom)
         self.drop_cache = drop_cache
-        st = None
         if resume and os.path.exists(self.p["progress"]):
             st = read_json(self.p["progress"])
             if (st["n_samples"], st["n_variants"], st["block_variants"]) != (self.n, self.m, self.w):
                 raise ValueError(f"progress file for chr{self.chrom} does not match this conversion")
-        if st is None:
+        else:
             st = {"n_samples": self.n, "n_variants": self.m, "block_variants": self.w,
                   "blocks_done": 0, "base_bytes": 0, "ovr_bytes": 0, "ovr_block_start": [0],
                   "n_override": 0, "n_missing": 0, "elapsed_s": 0.0}
-            for k in ("base", "ovr", "ptr", "stats"):
+            for k in ("base", "ovr", "ptr"):
                 new_file(self.p[k], "wb").close()
-            stats = np.lib.format.open_memmap(self.p["stats"], mode="w+", dtype=np.float64, shape=(3, self.m))
-            stats[:] = 0
-            stats.flush()
-            del stats
+            with new_file(self.p["stats"], "wb") as f:
+                np.save(f, np.zeros((3, self.m)))
         self.st = st
         self.f = {}
         for k, size in (("base", st["base_bytes"]), ("ovr", st["ovr_bytes"]),
@@ -263,9 +232,7 @@ class ChromWriter:
         fh.write(memoryview(arr).cast("B"))
         fh.flush()
         os.fsync(fh.fileno())
-        if self.drop_cache:
-            # we will not read this back soon; do not let our output push other
-            # jobs' data out of the page cache
+        if self.drop_cache:                   # not read back soon: leave the page cache to other jobs
             os.posix_fadvise(fh.fileno(), off, arr.nbytes, os.POSIX_FADV_DONTNEED)
         return arr.nbytes
 
@@ -313,7 +280,6 @@ class ChromWriter:
             raise RuntimeError(f"chr{self.chrom}: only {self.next_block}/{self.n_blocks} blocks written")
         for fh in self.f.values():
             fh.close()
-        self.stats.flush()
         if variant_lines is not None:
             tsv_pos = np.empty(self.m, dtype=np.int64)
             with new_file(self.p["variants"]) as f:

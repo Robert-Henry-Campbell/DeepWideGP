@@ -82,9 +82,10 @@ def main(argv=None):
     ap.add_argument("--dst", required=True)
     a = ap.parse_args(argv)
     worst = convert(a.src, a.dst)
+    ok = worst <= 0.005 + 1e-6                   # within half a quantisation step
     print(f"wrote {a.dst}; largest |stored - original| genotype value: {worst:.6f}"
-          + ("" if worst <= 0.005 + 1e-6 else "  <-- values are not dosages in [0, 2]; this store cannot represent them"))
-    return 0 if worst <= 0.005 + 1e-6 else 1
+          + ("" if ok else "  <-- values are not dosages in [0, 2]; this store cannot represent them"))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

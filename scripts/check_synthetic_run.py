@@ -4,14 +4,12 @@
 
 Prints each trait's validation AUROC beside the simulation's own ceiling and exits non-zero if
 a band is missed. The bands catch a model that does not learn, a rare trait that is ignored and
-a null trait that is "predicted"; they are not a test of small differences in accuracy.
-
-Where the bands come from: scripts/multilabel_synthetic_seeds.csv holds the validation AUROCs
-of five training seeds of the smoke run (scripts/multilabel_synthetic.sh), without and with
-annotation vectors. A heritable trait's lowest acceptable AUROC is the lowest of its five seeds
-minus a margin, the larger of 0.04 and 2.5 seed standard deviations; the same rule gives the
-band for the mean over heritable traits. The trait with no genetic signal must stay within 0.10
-of 0.5. A run with annotation vectors is held to the annotated seeds' bands.
+a null trait that is "predicted"; they are not a test of small differences in accuracy. They
+come from five training seeds of the smoke run (multilabel_synthetic.sh) in
+multilabel_synthetic_seeds.csv (methods.md section 12): a heritable trait, and the mean over
+heritable traits, must reach the lowest seed minus the larger of MARGIN and SD_MULTIPLE seed
+standard deviations; the null trait must stay in NULL_BAND. A run with annotation vectors is
+held to the annotated seeds' bands.
 """
 import csv
 import json
@@ -25,11 +23,11 @@ NULL_TRAIT, NULL_BAND = "null_f", (0.40, 0.60)
 MEAN = "mean over heritable traits"
 
 
-def bands(annot=False, table=SEEDS_TABLE):
+def bands(annot=False):
     """{trait: lowest acceptable validation AUROC}, plus the same for the mean over heritable traits."""
     arm = "annotated" if annot else "plain"
     by_trait, by_seed = {}, {}
-    with open(table) as f:
+    with open(SEEDS_TABLE) as f:
         for r in csv.DictReader(f):
             if r["arm"] != arm or r["trait"] == NULL_TRAIT:
                 continue

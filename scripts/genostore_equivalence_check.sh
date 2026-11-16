@@ -1,12 +1,11 @@
 #!/bin/bash
-# Train the synthetic 1causal_10case dataset twice with identical settings and seed:
-#   1) through the original pickle loader           (--rd_mode ld_all)
-#   2) through the disk-backed genotype store        (--rd_mode store, --snp_stats train)
-# and print the test metrics side by side. The two loaders feed the model the same batches
-# (tests/test_genostore_datamodule.py), so the metrics should agree closely.
+# Train the synthetic 1causal_10case dataset twice with the same settings and seed, through the
+# pickle loader (--rd_mode ld_all) and through the genotype store (--rd_mode store --snp_stats
+# train), and print the test metrics side by side. The two loaders feed the model the same
+# batches (tests/test_genostore_datamodule.py), so the metrics should agree closely.
 #
-# Usage:  CUDA_VISIBLE_DEVICES=<idle gpu> bash scripts/genostore_equivalence_check.sh
-# Needs:  pukb/genes/1causal_10case/store  (python -m genostore.from_pickles --src pukb/genes/1causal_10case/ld_all --dst pukb/genes/1causal_10case/store)
+#   CUDA_VISIBLE_DEVICES=<idle gpu> bash scripts/genostore_equivalence_check.sh
+# Needs pukb/genes/1causal_10case/store (python -m genostore.from_pickles --src pukb/genes/1causal_10case/ld_all --dst pukb/genes/1causal_10case/store)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=${PY:-python}

@@ -1,20 +1,10 @@
-# -*- coding: utf-8 -*-
-"""Batch samplers for the multi-disease model.
+"""Batch samplers for the multi-disease model (methods.md 5.1). Both yield whole batches as
+(target, indices), target being the label the batch is balanced on (NO_TARGET when shuffled),
+which StoreBatchDataset passes through to the model.
 
-Both samplers yield whole batches as ``(target, indices)``; ``StoreBatchDataset`` turns that
-into one encoded batch and passes ``target`` through to the model.
-
-    RotationBatchSampler   batch g is balanced on one "target" label: half its people are
-                           cases of that label, half are not. One rotation visits every label
-                           once, in an order reshuffled each rotation.
-    ShuffledBatchSampler   plain shuffling; target is -1.
-
-Every batch is a pure function of (seed, global batch number). Nothing depends on how many
-batches were drawn before, so a run resumed at an epoch boundary continues the same sequence,
-and several workers could draw disjoint batch numbers.
-
-An "epoch" here is whatever number of batches the training code asks for per validation
-interval (``steps_per_epoch``); Lightning calls ``set_epoch`` before each one.
+Every batch is a pure function of (seed, global batch number), so a run resumed at an epoch
+boundary continues the same sequence. An "epoch" is the number of batches the training code asks
+for per validation interval (steps_per_epoch); Lightning calls set_epoch before each one.
 """
 import numpy as np
 from torch.utils.data import Sampler
@@ -23,19 +13,16 @@ NO_TARGET = -1
 
 
 def cases_per_batch(batch_size, case_fraction=0.5):
-    """Cases of the target in a rotation batch, round(batch_size * case_fraction); the rest are
-    non-cases. Python rounds halves to even, so an odd batch is not split exactly in half (21:
-    10 cases and 11 non-cases; 19: 10 and 9), and the loss uses the share this gives."""
+    """Cases of the target in a rotation batch, round(batch_size * case_fraction), the rest non-cases.
+    Python rounds halves to even, so an odd batch is not split in half (21: 10 cases and 11
+    non-cases; 19: 10 and 9), and the loss uses the share this gives."""
     return int(round(int(batch_size) * float(case_fraction)))
 
 
 class _Queue:
-    """Endless shuffled passes over a fixed set of indices, addressable by position.
-
-    Position p lies in pass p // n; each pass is its own permutation, derived from the seed
-    and the pass number. Cases of a rare label therefore come round many times while the
-    non-cases come round once: "use the cases multiple times and each control once".
-    """
+    """Endless shuffled passes over a fixed set of indices, addressable by position: position p lies
+    in pass p // n, each pass its own permutation from the seed key and the pass number. The cases of
+    a rare label so come round many times while its non-cases come round once."""
 
     def __init__(self, items, seed_key):
         self.items = np.asarray(items, dtype=np.int64)
@@ -82,8 +69,6 @@ class _StepSampler(Sampler):
 class ShuffledBatchSampler(_StepSampler):
     """Shuffled passes over all training people, cut into batches."""
 
-    kind = "shuffled"
-
     def __init__(self, n_items, batch_size, steps_per_epoch, seed=0):
         super().__init__(batch_size, steps_per_epoch, seed)
         self.queue = _Queue(np.arange(int(n_items)), (self.seed, 1))
@@ -93,14 +78,9 @@ class ShuffledBatchSampler(_StepSampler):
 
 
 class RotationBatchSampler(_StepSampler):
-    """One target label per batch; half the batch are its cases, half its non-cases (an odd
-    batch cannot be halved: see cases_per_batch).
-
-    labels: float [N, n_labels] with 1, 0 or NaN (not applicable; never drawn for that target).
-    case_fraction: share of the batch taken from the target's cases (0.5 = balanced).
-    """
-
-    kind = "rotation"
+    """One target label per batch, which takes its cases and non-cases (cases_per_batch); a rotation
+    makes every label the target once, in an order reshuffled every rotation. labels: float
+    [N, n_labels] of 1, 0 or NaN (not applicable: never drawn for that target)."""
 
     def __init__(self, labels, batch_size, steps_per_epoch, seed=0, case_fraction=0.5):
         super().__init__(batch_size, steps_per_epoch, seed)
@@ -121,18 +101,14 @@ class RotationBatchSampler(_StepSampler):
             self.ctrls.append(_Queue(c0, (self.seed, 3, j)))
         self._rot, self._order = None, None
 
-    def target_of(self, g):
+    def batch(self, g):
         rot, pos = divmod(int(g), self.n_labels)
         if self._rot != rot:
             self._rot = rot
             self._order = np.random.default_rng((self.seed, 4, rot)).permutation(self.n_labels)
-        return int(self._order[pos]), rot
-
-    def batch(self, g):
-        t, rot = self.target_of(g)             # label t is the target once per rotation: its rot-th visit
-        idx = np.concatenate([self.cases[t].take(rot * self.n_case, self.n_case),
-                              self.ctrls[t].take(rot * self.n_ctrl, self.n_ctrl)])
-        return t, idx
+        t = int(self._order[pos])                # the target, on its rot-th visit
+        return t, np.concatenate([self.cases[t].take(rot * self.n_case, self.n_case),
+                                  self.ctrls[t].take(rot * self.n_ctrl, self.n_ctrl)])
 
 
 def make_sampler(kind, labels, batch_size, steps_per_epoch, seed=0):

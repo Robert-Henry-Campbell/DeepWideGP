@@ -961,3 +961,60 @@ and remove every time limit; nothing is to start on 29 Nov.
   the other seven trials while the slow first trial runs; four racing workers start exactly 5).
   CPU suite: 80 passed, 28 skipped. methods.md section 8 says so.
 - The ladder chain picks this up from rung 2 (each rung exports the newest commit of `widening`).
+
+## 2026-11-16 (21:05 UTC) — Leaner WideDeepGP code, same behaviour (the /simplify pass, integrated)
+
+Robert asked for /simplify over all WideDeepGP code except the tests (project CLAUDE.md section 8:
+lean code, thorough tests). Five groups of files were simplified on their own branches from
+d019bb9 and reviewed adversarially: `simplify/g1_model` (model, blocks, losses, labels, metrics,
+samplers), `g2_training` (train, tuning, callbacks), `g3_genostore_write` (convert, format,
+from_pickles), `g4_genostore_read` (datamodule, prefetch, store, torch_decode) and
+`g5_entry_scripts` (main_multilabel, tune_optuna, score_snapshots, the WideDeepGP part of
+args_generator, scripts/ but t2d.sh). They are merged on `simplify/integrate`. The published
+single-disease code (models/, layers/, utils.py, main_genome.py, scripts/t2d.sh) and the existing
+tests are unchanged; the ladder's frozen copies are unaffected.
+
+### Code changes
+
+- Mostly docstrings and comments condensed to one line of why, with pointers to methods.md.
+- Dead code removed (no caller in the repository, DeepWideGP-Scripts, PGI or the run scripts):
+  `WideDeepGP.population_logits` and `predict_step`, `labels.summarise`, `WideLoss.extra_repr`,
+  `SNPStoreDataModule.shuffle_targets`, the Prefetcher's write-only counters, `convert_chrom`'s
+  unused `n_audit`, the samplers' `kind` attributes.
+- Shared code: `tuning._spawn_worker` for both kinds of search worker; the run lock as a context
+  manager; one stall/deadline check in convert.py; `model.WIDE_KEYS` (the linear path's weights)
+  used by `load_weights` and `train.load_wide_init`; `genostore.prefetch.willneed` and `read_bps`
+  (read-ahead requests, others' disk reads) used by the prefetcher, `disk_busy` and convert.py's
+  read-ahead; `train.build_data` names the dataset with `datamodule.dataset_dir`;
+  `tune_optuna.suggest` without its duplicated suggestions (same draws).
+- train.py's and tuning.py's lists of what a run folder holds now point to README.md.
+- New CPU tests that pin the behaviour of each group, run by name (the suite's
+  `tests/test_ml_*.py tests/test_genostore*.py` globs do not match them):
+  `python -m pytest tests/test_lean_*.py -q` (111 tests: g1 20, g2 16, g3 22, g4 28, g5 25).
+
+### Verification (old d019bb9 against the integrated code)
+
+- CPU suite: 1 failed, 79 passed, 28 skipped, as on d019bb9; the failure is the timing test
+  `test_free_workers_take_the_next_trial` at its "free worker took all the rest" assertion,
+  which fails on the old code too under today's load. The 111 new tests pass (each group also
+  ran its own file on the old code).
+- Equivalence harness (`runs/simplify_2026-11-16/harness`, synthetic data, GPU 4): 26 of 26
+  checks pass against the golden outputs of d019bb9, 25 of them bit for bit and
+  train_real_kernels (the fork's nondeterministic CUDA kernels) within its tolerances.
+- PGI's tests that import genostore or widedeepgp.metrics, and DeepWideGP-Scripts' tests: the
+  same results on old and new code (PGI: 1 failed, 198 passed, 1 skipped on both, the failure being
+  `test_the_real_method_registry`, which reads PGI's locally modified methods.yaml; Scripts: 12, 5
+  and 10 passed on both).
+- Size of the 32 in-scope files: 5,683 to 5,071 lines (-612, -10.8%) and 4,090 to 3,883 code lines
+  (-207, -5.1%); the new tests add 2,358 lines (1,939 code).
+
+### Things worth knowing
+
+- Pre-existing problems found and left as they were (this pass changed no behaviour):
+  `--snp_embed vocab` fails at the first forward pass; a resumed run scores the tuning set twice
+  (the GPU test `test_a_resumed_run_reports_a_best_step_from_before_the_resume` fails on old and
+  new); `SNPStoreDataModule._read_table`'s error for unknown participants quotes up to three IDs
+  (against CLAUDE.md section 3); `from_pickles` writes its sample tables under the caller's
+  umask; `generate_synthetic_multilabel._auc` ranks ties by position. Branch `fix/2026-11-16`
+  (another session) fixes some of these in the same files, so merging it with
+  `simplify/integrate` will need conflicts resolved.

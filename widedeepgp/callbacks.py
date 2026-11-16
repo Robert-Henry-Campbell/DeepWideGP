@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
-"""Callbacks for a multi-disease run: weight snapshots, the run's own log files, early stopping
-that counts a repeated validation pass once (EarlyStoppingOnce), Optuna pruning."""
+"""Callbacks of a multi-disease run: weight snapshots, the run's log files, early stopping and
+Optuna pruning that count a pass a resumed run repeats once, and checkpoints that follow a copied
+run folder."""
 import csv
 import os
 import time
@@ -13,13 +13,12 @@ from . import metrics as M
 
 
 def snapshot_steps(max_steps, per_decade=8, every=None, max_count=0):
-    """Optimiser steps at which weights are saved: evenly spaced on a log axis (``per_decade``
-    per tenfold increase), plus every ``every`` steps (one epoch-equivalent), plus the last.
-    With ``max_count``, the regular ones are thinned (every second, third, ... epoch-equivalent)
-    until the total fits; the log-spaced ones and the last are kept."""
+    """Optimiser steps at which weights are saved: ``per_decade`` per tenfold increase on a log
+    axis, every ``every`` steps (one epoch-equivalent), and the last. With ``max_count`` the
+    regular ones are thinned (every second, third, ...) until the total fits."""
     logged = set()
     k = 0
-    while per_decade > 0:                                # per_decade <= 0: no log-spaced snapshots
+    while per_decade > 0:
         s = int(round(10 ** (k / float(per_decade))))
         if s > max_steps:
             break
@@ -36,20 +35,15 @@ def snapshot_steps(max_steps, per_decade=8, every=None, max_count=0):
 
 
 class Snapshots(pl.Callback):
-    """Weights-only snapshots along training, with a table of what each one cost.
-
-    The table (snapshots.csv) records optimiser step, batches, participants seen,
-    epoch-equivalents and training time, which is what a compute axis needs. Snapshots hold
-    weights and the model's configuration, not optimiser state: resuming uses the run's last
-    checkpoint (train.last_checkpoint).
-    """
+    """Weights-only snapshots (a resume reads the last checkpoint instead), and snapshots.csv,
+    what each one cost: the compute axis of methods.md section 7."""
 
     FIELDS = ["step", "batches", "samples_seen", "epoch_equiv", "train_seconds", "file"]
 
     def __init__(self, run_dir, steps, n_train):
         self.dir = os.path.join(run_dir, "snapshots")
         self.table = os.path.join(run_dir, "snapshots.csv")
-        self.steps = set(int(s) for s in steps)
+        self.steps = {int(s) for s in steps}
         self.n_train = int(n_train)
         self.done = set()
         self.train_seconds = 0.0
@@ -91,14 +85,15 @@ class Snapshots(pl.Callback):
         self.train_seconds = float(state.get("train_seconds", 0.0))
 
 
+def _grad_sq(params):
+    return sum(float(p.grad.detach().float().pow(2).sum()) for p in params if p.grad is not None)
+
+
 class RunLog(pl.Callback):
     """Writes metrics.csv (one row per validation pass, label and metric) and logs throughput,
-    memory, learning rate, gradient norm and the cases seen per disease to the trainer's logger.
-
-    ``metrics_at`` keeps the metrics of each pass this process made, by optimiser step, so that
-    results.json takes the best step's from there instead of scoring the tuning set again; a
-    pass made before a resume is not in it, and that step is scored again from its checkpoint.
-    """
+    memory, learning rates, gradient norms and cases seen per disease to the trainer's logger.
+    ``metrics_at`` keeps each pass this process made, by optimiser step, for results.json (a
+    pass made before a resume is scored again)."""
 
     FIELDS = ["validation", "step", "samples_seen", "epoch_equiv", "label", "metric", "value", "n", "n_cases"]
 
@@ -110,8 +105,8 @@ class RunLog(pl.Callback):
         self.n_validations = 0
         self._last_step = -1
         self.history = []                       # (validation, step, samples_seen, mean AUROC)
-        self.peak_train_bytes = self.peak_val_bytes = 0     # peak GPU memory, training and validation apart
-        self.metrics_at = {}                    # optimiser step -> the metrics of the validation pass made there
+        self.peak_train_bytes = self.peak_val_bytes = 0
+        self.metrics_at = {}
 
     def on_fit_start(self, trainer, pl_module):
         if not os.path.exists(self.path):
@@ -122,9 +117,8 @@ class RunLog(pl.Callback):
 
     @staticmethod
     def _writes_now(trainer):
-        """True during the batches whose step metrics Lightning 2.0 writes to the logger: those
-        that complete every ``log_every_n_steps``-th optimiser step. Values logged on other
-        batches are dropped, so step metrics are logged on these batches only."""
+        """Lightning 2.0 writes step metrics only on the batches that complete every
+        log_every_n_steps-th optimiser step, and drops values logged on the others."""
         loop = trainer.fit_loop.epoch_loop
         return (not loop._should_accumulate()) and (loop._batches_that_stepped + 1) % trainer.log_every_n_steps == 0
 
@@ -142,24 +136,24 @@ class RunLog(pl.Callback):
             rate = self._n / (now - self._t)
             groups = trainer.optimizers[0].param_groups
             log = {"perf/samples_per_s": rate, "perf/million_sample_snps_per_s": rate * self.n_snps / 1e6,
-                   "train/lr": groups[0]["lr"]}             # the deep network's (or, with --wide only, the covariates')
+                   "train/lr": groups[0]["lr"]}             # the network's (with --wide only, the covariates')
             prs = {id(p) for p in getattr(pl_module, "prs", [])}
-            if prs and any(id(p) in prs for g in groups for p in g["params"]):
-                log["train/lr_wide"] = [g["lr"] for g in groups if any(id(p) in prs for p in g["params"])][0]
+            wide = [g["lr"] for g in groups if any(id(p) in prs for p in g["params"])]
+            if wide:
+                log["train/lr_wide"] = wide[0]
             if torch.cuda.is_available():
                 log["perf/gpu_peak_gib"] = self.peak_train_bytes / 2 ** 30
             pl_module.log_dict(log)
             self._t, self._n = now, 0
 
     def on_before_optimizer_step(self, trainer, pl_module, optimizer):
-        if self._writes_now(trainer):
-            prs = {id(p) for p in getattr(pl_module, "prs", [])}
-            sq = sum(float(p.grad.detach().float().pow(2).sum()) for p in pl_module.parameters()
-                     if p.grad is not None and id(p) not in prs)
-            pl_module.log("train/grad_norm", sq ** 0.5)    # everything but the PRS weights, which would dominate it
-            if prs:
-                sq = sum(float(p.grad.detach().float().pow(2).sum()) for p in pl_module.prs if p.grad is not None)
-                pl_module.log("train/grad_norm_wide", sq ** 0.5)
+        if not self._writes_now(trainer):
+            return
+        prs = {id(p) for p in getattr(pl_module, "prs", [])}
+        # the PRS weights apart, which would dominate the norm
+        pl_module.log("train/grad_norm", _grad_sq(p for p in pl_module.parameters() if id(p) not in prs) ** 0.5)
+        if prs:
+            pl_module.log("train/grad_norm_wide", _grad_sq(pl_module.prs) ** 0.5)
 
     def on_validation_start(self, trainer, pl_module):
         if torch.cuda.is_available():
@@ -170,25 +164,22 @@ class RunLog(pl.Callback):
             self.peak_val_bytes = max(self.peak_val_bytes, torch.cuda.max_memory_allocated())
             torch.cuda.reset_peak_memory_stats()
         m = pl_module.last_val_metrics
-        if m is None or trainer.sanity_checking:
-            return
-        if int(trainer.global_step) == self._last_step:      # the validation a resumed run repeats
-            return
-        self._last_step = int(trainer.global_step)
+        if m is None or trainer.sanity_checking or int(trainer.global_step) == self._last_step:
+            return                                       # a step already recorded: the pass a resumed run repeats
+        step = self._last_step = int(trainer.global_step)
         self.n_validations += 1
-        self.metrics_at[int(trainer.global_step)] = m
+        self.metrics_at[step] = m
         ee = pl_module.samples_seen / self.n_train
         with open(self.path, "a", newline="") as f:
             csv.DictWriter(f, self.FIELDS).writerows(M.to_rows(
-                m, validation=self.n_validations, step=int(trainer.global_step),
-                samples_seen=int(pl_module.samples_seen), epoch_equiv=round(ee, 6)))
-        self.history.append((self.n_validations, int(trainer.global_step), int(pl_module.samples_seen),
-                             float(m["auroc_mean"])))
+                m, validation=self.n_validations, step=step, samples_seen=int(pl_module.samples_seen),
+                epoch_equiv=round(ee, 6)))
+        self.history.append((self.n_validations, step, int(pl_module.samples_seen), float(m["auroc_mean"])))
         if trainer.logger is not None and self.cases_seen is not None:
             seen = self.cases_seen.cpu().numpy()
             trainer.logger.log_metrics({f"cases_seen/{name}": float(seen[j])
-                                        for j, name in enumerate(pl_module.label_names)}, step=int(trainer.global_step))
-            trainer.logger.log_metrics({"epoch_equiv": float(ee)}, step=int(trainer.global_step))
+                                        for j, name in enumerate(pl_module.label_names)}, step=step)
+            trainer.logger.log_metrics({"epoch_equiv": float(ee)}, step=step)
 
     def state_dict(self):
         return {"n_validations": self.n_validations, "history": self.history, "last_step": self._last_step,
@@ -204,53 +195,42 @@ class RunLog(pl.Callback):
 
 
 class EarlyStoppingOnce(EarlyStopping):
-    """Early stopping that counts every validation pass once.
-
-    A checkpoint written after a validation pass makes a resumed run repeat that pass before it
-    trains further; the repeat must not use up patience.
-    """
+    """Early stopping that counts every validation pass once: a resumed run repeats the pass its
+    checkpoint was written after, and the repeat must not use up patience."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._seen_step = -1
 
     def _run_early_stopping_check(self, trainer):
-        if int(trainer.global_step) == self._seen_step:
+        step = int(trainer.global_step)
+        if step == self._seen_step:
             return
-        self._seen_step = int(trainer.global_step)
+        self._seen_step = step
         super()._run_early_stopping_check(trainer)
 
     def state_dict(self):
         return dict(super().state_dict(), seen_step=self._seen_step)
 
     def load_state_dict(self, state_dict):
-        """Restore the count of passes without improvement but keep this run's patience
-        (--stop_patience): a resumed run may change how long it trains, and Lightning would
-        otherwise put back the checkpoint's patience."""
+        # keeps this run's --stop_patience (a resume may train longer); Lightning would put back the checkpoint's
         self._seen_step = int(state_dict.get("seen_step", -1))
         patience = self.patience
         super().load_state_dict(state_dict)
         self.patience = patience
 
 
-
 class RunCheckpoint(ModelCheckpoint):
     """ModelCheckpoint that carries a run's best and last checkpoints over to a copy of its
-    directory, or to the same directory named another way.
-
-    Lightning restores the best score and the name of the last checkpoint only when the
-    checkpoint folder is named exactly as when the state was saved (with this fsspec it keeps
-    the path as given: a symlink or a relative --run_dir counts as another folder). A copied
-    run directory, once resumed, would start a new best (best-v1.ckpt) compared with nothing
-    from before the resume, and a new last-v1.ckpt beside the copied last.ckpt. When the files
-    are there, the saved paths are moved into this folder first, so the run carries on in
-    best.ckpt and last.ckpt with its best score, as a run resumed in place does. Copy a run
-    directory only while nothing is writing to it."""
+    folder, or to the same folder named another way (methods.md section 7). Lightning restores
+    the best score and the last checkpoint's name only when the folder is named exactly as when
+    saved (a symlink or a relative --run_dir counts as another), so a resumed copy would start a
+    new best-v1.ckpt, compared with nothing from before the resume, and a new last-v1.ckpt. When
+    the files are there, the saved paths are moved into this folder first."""
 
     @property
     def state_key(self):
-        # ModelCheckpoint's own key, so that checkpoints written before this class existed (every
-        # run of the pilot) restore it, and the ones it writes restore a plain ModelCheckpoint
+        # ModelCheckpoint's: the pilot's checkpoints restore into this class, and its own into a plain ModelCheckpoint
         return "ModelCheckpoint" + super().state_key[len(type(self).__qualname__):]
 
     def load_state_dict(self, state_dict):
@@ -265,11 +245,11 @@ class RunCheckpoint(ModelCheckpoint):
                 state_dict = {**state_dict, **moved, "best_k_models": best_k, "dirpath": self.dirpath}
         super().load_state_dict(state_dict)
 
+
 class OptunaPruning(pl.Callback):
-    """Report the watched validation metric to an Optuna trial after every validation pass and
-    stop the run when the trial's pruner says so. The step reported is the pass's number in the
-    run (optimiser steps over steps per pass), so a run resumed after a crash carries on counting
-    where it stopped and the pruner compares it at the right rung."""
+    """Reports the watched metric to an Optuna trial after every validation pass and stops the
+    run when the pruner says so. The step reported is the pass's number in the run (optimiser
+    steps over steps per pass), so a resumed trial meets the pruner at the right rung."""
 
     def __init__(self, trial, monitor="val/auroc_mean", steps_per_pass=None):
         self.trial, self.monitor = trial, monitor

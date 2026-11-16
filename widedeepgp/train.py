@@ -1,23 +1,17 @@
-# -*- coding: utf-8 -*-
-"""One multi-disease training run. Used by main_multilabel.py and by the Optuna tuner, so a
+"""One multi-disease training run, shared by main_multilabel.py and the search (tuning.py), so a
 tuned configuration is trained by exactly the code that tuned it.
 
-Vocabulary
-    epoch-equivalent   as many training draws as there are training participants
-    validation pass    every 1 / --val_per_epoch epoch-equivalents; Lightning's "epoch" is one
-                       such interval, so every checkpoint written after validation sits on an
-                       epoch boundary and a resumed run continues the same batch sequence
+An epoch-equivalent is as many training draws as there are training participants. Lightning's
+"epoch" is one validation interval, so every checkpoint written after validation sits on an
+epoch boundary and a resumed run continues the same batch sequence.
 
 A run directory, <run_dir>/<experiment>/<exp_name>/, holds
-    config.json      every setting, the derived schedule, the label counts, the covariate scaling,
-                     the code directory, its git commit, whether tracked .py files differ from
-                     it (git_dirty) and the Python interpreter
+    config.json      every setting, the derived schedule, the label counts, the covariate scaling
+                     and the code that ran (code_version)
     tb/              TensorBoard event files
     metrics.csv      one row per validation pass, label and metric
-    snapshots/       weights along training (log-spaced steps and every epoch-equivalent)
-    snapshots.csv    what each snapshot cost: steps, participants seen, training seconds
-    checkpoints/     best.ckpt (by mean validation AUROC) and last.ckpt (to resume; a copy of
-                     a run directory carries on in the same files: callbacks.RunCheckpoint)
+    snapshots/       weights along training; snapshots.csv says what each one cost
+    checkpoints/     best.ckpt (by mean validation AUROC) and last.ckpt (to resume)
     results.json     validation metrics of the best checkpoint
 """
 import json
@@ -27,6 +21,7 @@ import re
 import subprocess
 import sys
 import time
+import warnings
 
 import numpy as np
 import pytorch_lightning as pl
@@ -38,8 +33,8 @@ from genostore.datamodule import SNPStoreDataModule, is_store_dataset
 
 from . import metrics as M
 from .callbacks import EarlyStoppingOnce, OptunaPruning, RunCheckpoint, RunLog, Snapshots, snapshot_steps
-from .losses import label_counts
-from .model import WideDeepGP, annotations_digest, positions_digest
+from .losses import WideLoss, label_counts
+from .model import WideDeepGP, annotations_digest, curvature_ratios, positions_digest, wide_learning_rate
 from .samplers import cases_per_batch, make_sampler
 
 MONITOR = "val/auroc_mean"
@@ -58,8 +53,7 @@ def train_labels(dm):
 
 
 def load_annotations(dm):
-    """Annotation vectors standardised per channel over the model's SNPs (constant channels are
-    only centred)."""
+    """Annotation vectors standardised per channel over the model's SNPs (constant ones only centred)."""
     annot, names = dm.annotations()
     if annot is None:
         raise ValueError("--annot was given but the dataset's store.json names no annotations")
@@ -71,15 +65,12 @@ def load_annotations(dm):
 
 def schedule(cfg, n_train):
     """Batches per epoch-equivalent and per validation interval, and the number of intervals.
-
-    A validation pass costs the same whatever the training size, so with --val_min_participants
-    the interval is at least that many participants (small training sets would otherwise spend
-    most of their time validating), and with --min_participants the budget is at least that
-    many participants, so that early stopping has room to act."""
+    The interval is at least --val_min_participants (methods.md section 7) and the budget at
+    least --min_participants, so that early stopping has room to act."""
     acc = max(1, int(cfg.accumulate))
     per_ee = int(cfg.steps_per_epoch_equiv or math.ceil(n_train / cfg.batch_size))
-    per_val = max(1, int(math.ceil(per_ee / float(cfg.val_per_epoch))))    # rounded up, so that
-    #                                                      val_per_epoch intervals cover an epoch-equivalent
+    # rounded up, so that val_per_epoch intervals cover an epoch-equivalent
+    per_val = max(1, int(math.ceil(per_ee / float(cfg.val_per_epoch))))
     per_val = max(per_val, int(math.ceil(int(getattr(cfg, "val_min_participants", 0) or 0) / cfg.batch_size)))
     cap = float(getattr(cfg, "val_max_epoch_equiv", 0) or 0)
     if cap > 0:                                          # but at least once per `cap` epoch-equivalents
@@ -92,8 +83,8 @@ def schedule(cfg, n_train):
 
 
 def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
-    """Everything the model needs to be rebuilt, as a plain dict (saved in every checkpoint).
-    annot: the standardised annotation matrices, whose digest is kept."""
+    """Everything needed to rebuild the model, as a plain dict saved in every checkpoint; ``annot``,
+    the standardised annotation matrices, is kept as a digest."""
     names = dm.label_names if dm.multilabel else ["label"]
     return {
         "d_model": int(cfg.d_model), "e_layers": int(cfg.e_layers), "dropout": float(cfg.dropout),
@@ -127,15 +118,13 @@ def parse_grid(spec):
 
 def wide_hparams(cfg, dm):
     """Settings of the linear PRS path; its learning rate follows from --wide_kappa unless given
-    (for prs_var: with a grid, each grid point's follows from the same rule, model.prs_col_scale)."""
+    (methods.md section 6; with a grid, each grid point's by the same rule: section 4.10)."""
     wide = getattr(cfg, "wide", "off") or "off"
     grid = parse_grid(getattr(cfg, "prs_grid", None))
     if grid and wide != "only":
         raise ValueError("--prs_grid trains one linear model per prior variance side by side; it needs --wide only")
     if wide == "off":
         return {}
-    from .losses import WideLoss
-    from .model import curvature_ratios, wide_learning_rate
     tau, kappa = float(cfg.prs_var), float(cfg.wide_kappa)
     lr_wide = getattr(cfg, "lr_wide", None)
     if not lr_wide:
@@ -167,10 +156,7 @@ def load_model(path, dm, device="cpu"):
 def predict_split(model, dm, split, device=None):
     """Logits and labels [N, n] for a split ('train', 'val', 'test', or an external table name)."""
     device = device or next(model.parameters()).device
-    if split in dm.splits:
-        loader = dm._loader(dm._dataset(dm.splits[split]), False)
-    else:
-        loader = dm.eval_dataloder(split)
+    loader = dm._loader(dm._dataset(dm.splits[split]), False) if split in dm.splits else dm.eval_dataloder(split)
     was_training = model.training
     model.eval()
     logits, ys = [], []
@@ -183,57 +169,44 @@ def predict_split(model, dm, split, device=None):
 
 
 def code_version(code_dir=None):
-    """The directory the training code was loaded from, its git commit (None unless that
-    directory is the top of a git checkout; a frozen copy has none), whether any tracked .py file
-    there differs from that commit (git_dirty; None outside git) and the Python interpreter."""
+    """The directory the code was loaded from, its git commit (only at the top of a git checkout;
+    a frozen copy has none), whether a tracked .py file there differs from it (git_dirty; None
+    outside git) and the Python interpreter."""
     code_dir = os.path.realpath(code_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    commit = None
+    commit = dirty = None
     try:
         r = subprocess.run(["git", "-C", code_dir, "rev-parse", "--show-toplevel", "HEAD"], capture_output=True,
                            text=True, timeout=60)
         top_and_commit = r.stdout.splitlines()
         if r.returncode == 0 and len(top_and_commit) == 2 and os.path.realpath(top_and_commit[0]) == code_dir:
             commit = top_and_commit[1]
-    except (OSError, subprocess.SubprocessError):
-        pass
-    dirty = None
-    if commit is not None:
-        try:
-            # --no-optional-locks: a status run must not write the index of a checkout that
-            # another process (an editor, a commit) may be using
+            # --no-optional-locks: never write the index of a checkout another process may be using
             r = subprocess.run(["git", "--no-optional-locks", "-C", code_dir, "status", "--porcelain",
                                 "--untracked-files=no", "--", "*.py"], capture_output=True, text=True, timeout=60)
             dirty = bool(r.stdout.strip()) if r.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError):
-            pass
+    except (OSError, subprocess.SubprocessError):
+        pass
     return {"code_dir": code_dir, "git_commit": commit, "git_dirty": dirty, "python": sys.executable}
 
 
-# Settings a resumed run may change: how long it trains, and activation checkpointing (which
-# leaves outputs and gradients unchanged). Everything else in a model's hp defines the run.
+# What a resumed run may change in a model's hp: its length, and activation checkpointing (which
+# leaves outputs and gradients unchanged).
 RESUMABLE = ("total_optimizer_steps", "grad_ckpt")
-# Arguments that define a run's inputs and batches but are not among a model's saved settings;
-# a resumed run must keep them. The dataset is checked through the saved position and
-# annotation digests, label names and counts and number of covariates, so the path it is named
-# by may differ.
+# Arguments that define a run's inputs and batches but are not in its hp. (The dataset is checked
+# through the hp's digests, labels and counts, so the path it is named by may differ.)
 RUN_ARGS = ("snp_stats", "scaling", "batch_size", "accumulate", "seed", "steps_per_epoch_equiv", "val_per_epoch",
             "val_min_participants", "val_max_epoch_equiv")
 
 
 def last_checkpoint(ckpt_dir):
     """The checkpoint a resumed run continues from, or None: last.ckpt, or the highest
-    last-vN.ckpt. Lightning writes last-vN.ckpt when a last.ckpt it did not write itself is in
-    the way: in a run directory copied and resumed before RunCheckpoint existed (the pilot's
-    pilot_sim/selected_long_s1), or in one started again without --resume. That file must also
-    be the newest; a copy that did not keep the files' times can make a stale one newer, and
-    then the run's state is ambiguous and nothing is picked."""
+    last-vN.ckpt, which Lightning writes beside a last.ckpt it did not write (a copied run, or one
+    started again without --resume). It must also be the newest: a copy that did not keep the
+    files' times can make a stale one newer, and then nothing is picked."""
     if not os.path.isdir(ckpt_dir):
         return None
-    version = {}
-    for name in os.listdir(ckpt_dir):
-        m = re.fullmatch(r"last(?:-v(\d+))?\.ckpt", name)
-        if m:
-            version[os.path.join(ckpt_dir, name)] = int(m.group(1) or 0)
+    found = (re.fullmatch(r"last(?:-v(\d+))?\.ckpt", name) for name in os.listdir(ckpt_dir))
+    version = {os.path.join(ckpt_dir, m.string): int(m.group(1) or 0) for m in found if m}
     if not version:
         return None
     latest = max(version, key=version.get)
@@ -249,9 +222,9 @@ WIDE_KEYS = ("prs.", "cov_linear", "intercept")
 
 
 def load_wide_init(model, path):
-    """Start the linear PRS path (PRS weights, covariate weights, intercepts) from a run that
-    trained it: the first stage of a run's search. It must have the same SNPs, labels, training
-    split and SNP scaling, so that a fit on other participants can never come in."""
+    """Start the linear PRS path (PRS and covariate weights, intercepts) from the search's first
+    stage; it must have the same SNPs, labels, training split and SNP scaling, so that no fit on
+    other participants comes in."""
     src = torch.load(path, map_location="cpu", weights_only=False)
     old = src["hyper_parameters"]["hp"]
     for key in ("pos_digest", "seq_len", "label_names", "label_counts", "snp_stats"):
@@ -265,8 +238,8 @@ def load_wide_init(model, path):
 
 
 def check_resume_args(config_path, cfg):
-    """Refuse to resume a run with other input scaling, batches or schedule than its config.json,
-    written when it started, records (the resumed run is about to overwrite that file)."""
+    """Refuse to resume a run with other input scaling, batches or schedule than the config.json
+    it wrote when it started records (the resumed run is about to overwrite that file)."""
     if not os.path.exists(config_path):
         return
     with open(config_path) as f:
@@ -280,20 +253,11 @@ def check_resume_args(config_path, cfg):
 
 
 def check_resume_tables(ckpt_path, hp, loss=None):
-    """Refuse to resume from a checkpoint that was trained differently: on other SNP positions,
-    annotation vectors, diseases or training labels, or with other settings.
-
-    The position and annotation tables are rebuilt from the dataset and are not part of the
-    saved weights, so Lightning would restore the weights over different tables without
-    noticing. The loss's constants (prevalences, class weights, sampling rates) and the
-    optimiser's state are restored from the checkpoint, so a resume with other labels or
-    settings would keep the checkpoint's values while this run's config.json records the new
-    ones. Only the settings in RESUMABLE may change; --init_from starts a new run from saved
-    weights. ``loss``, this run's loss module, is also compared constant by constant with the
-    checkpoint's, which covers checkpoints saved before some settings were recorded (such as
-    case_share). Checkpoints saved before the annotation digest existed are resumed with a
-    warning, as load_model loads them."""
-    import warnings
+    """Refuse to resume from a checkpoint trained on other SNP positions, annotation vectors,
+    diseases or training labels, or with other settings than RESUMABLE allows (methods.md
+    section 7). ``loss``, this run's loss module, is compared buffer by buffer too, which covers
+    checkpoints saved before a setting (such as case_share) was recorded. An annotated
+    checkpoint without a digest resumes with a warning."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     old = ckpt["hyper_parameters"]["hp"]
     if old.get("wide", "off") != hp.get("wide", "off"):
@@ -336,11 +300,10 @@ def check_resume_tables(ckpt_path, hp, loss=None):
 
 
 def write_per_disease(model, dm, run_dir, config, step, device):
-    """The model of a grid run (--prs_grid): every disease at its own best prior variance and
-    validation pass. Written as a run of its own, <run_dir>/per_disease/ (config.json,
-    results.json, per_disease.csv, checkpoints/best.ckpt and last.ckpt, one file), so that
-    score_snapshots.py and --init_wide_from read it as any run; scored once more on the tuning
-    set, which reproduces the AUROC each disease was chosen with."""
+    """The model of a grid run (--prs_grid), every disease at its own best prior variance and
+    pass (methods.md section 4.10), written as a run of its own, <run_dir>/per_disease/, which
+    score_snapshots.py and --init_wide_from read as any run. It is scored on the tuning set
+    again, which reproduces the AUROC each disease was chosen by."""
     state, rows = model.per_disease_state()
     hp = dict(model.hp, prs_grid=None, prs_var_per_label=[r["prs_var"] for r in rows], selected_from_grid=model.grid)
     pd_model = WideDeepGP(hp, dm.pos_chr)
@@ -451,8 +414,8 @@ def run_training(cfg, trial=None, extra_callbacks=()):
                          enable_model_summary=False)
     trainer.fit(model, dm, ckpt_path=resume)
 
-    # the best checkpoint and its validation metrics (kept from the pass made at that step; scored
-    # again only when this process did not make that pass, as after a resume)
+    # the best checkpoint, with the metrics of the pass made at its step (scored again only when
+    # another process made that pass, as before a resume)
     best_path = best_ckpt.best_model_path or last_checkpoint(ckpt_dir)
     state = torch.load(best_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["state_dict"])
@@ -477,8 +440,8 @@ def run_training(cfg, trial=None, extra_callbacks=()):
            "gpu_peak_val_gib": round(runlog.peak_val_bytes / 2 ** 30, 3),
            "n_parameters": int(n_params)}
     if model.grid:
-        # the grid's own best checkpoint holds every grid point; the run's model is the one that
-        # takes each disease's best grid point and pass, from the end of training's best_* buffers
+        # the grid's best checkpoint holds every grid point; the run's model takes each disease's
+        # best point and pass, from the best_* buffers at the end of training
         last = torch.load(last_checkpoint(ckpt_dir), map_location="cpu", weights_only=False)
         model.load_state_dict(last["state_dict"])
         out.update(write_per_disease(model, dm, run_dir, config, int(last.get("global_step", 0)), device))

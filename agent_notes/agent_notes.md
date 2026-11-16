@@ -944,3 +944,20 @@ and remove every time limit; nothing is to start on 29 Nov.
   --precision 32 --tune_trials 12 --tune_first_given`, seed 1, from the ladder's frozen export;
   methods.md.
 - methods.md section 9: the clumping's LD comes from the PGI arm's panel (corrected).
+
+## 2026-11-16 (11:10 UTC) — Workers take the next free trial
+
+- Rung 1 of the ladder (13,199 participants, started 15 Nov 22:52 UTC from code_5b472c5): the
+  ridge stage took 32 min (per-disease mean tuning AUROC 0.6634); the network stage's 12 trials
+  were split as fixed shares of 3 per GPU worker, and one worker's first trial ran 27 passes in
+  9.5 h, so three GPUs stood idle for about six hours while it finished its share. The gate on
+  the real labels of the proxy (`runs/wide_gate/real_search`, finished 15 Nov 22:52 UTC):
+  network on top 0.6640 against the ridge alone 0.6641 (reported model the network on top).
+- `widedeepgp/tuning.py`: `claim_trial` and a new `worker` loop: each worker claims the next
+  trial (`study.ask()`, waiting re-runs first) under an fcntl lock on `<stage>/.claim.lock`
+  while the stage has fewer than its total finished or running, runs it and tells the result;
+  `run_workers` passes the stage's total to every worker. Same trials and search, no idle GPUs.
+- `tests/test_ml_wide.py` `test_free_workers_take_the_next_trial` (threads: a free worker takes
+  the other seven trials while the slow first trial runs; four racing workers start exactly 5).
+  CPU suite: 80 passed, 28 skipped. methods.md section 8 says so.
+- The ladder chain picks this up from rung 2 (each rung exports the newest commit of `widening`).

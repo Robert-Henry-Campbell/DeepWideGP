@@ -727,7 +727,10 @@ under that rule.) With `--wide off` the search is the second stage alone, withou
 linear path; with `--wide only`, the first stage alone. Trials use the run's seed; each
 worker's sampler is seeded with the run's seed plus the worker's index. Trials run in parallel,
 one per GPU, on the free GPUs minus one (`--tune_gpus auto`), or one after another without a
-GPU. Model width, depth, the sequence block and the use of annotations are experimental factors
+GPU. Each GPU's worker takes the next trial whenever it is free, counting and claiming under a
+lock so that exactly the stage's number of trials is started (since 16 November 2026: before,
+each worker had a fixed share, and on the first training size one slow trial kept a worker busy
+for about six hours while the other three GPUs stood idle). Model width, depth, the sequence block and the use of annotations are experimental factors
 and are never searched.
 
 **Checks on the pilot's proxy** (gates; methods, results and tables in

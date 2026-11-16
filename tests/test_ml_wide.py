@@ -394,6 +394,43 @@ def test_a_search_can_try_the_given_settings_first(tmp_path, monkeypatch):
     assert len({tuple(x) for x in seen}) == 3 and out["chosen_stage"] == "deep"
 
 
+def test_free_workers_take_the_next_trial(tmp_path, monkeypatch):
+    """Workers claim trials one at a time until the stage has its total: a slow trial on one
+    worker does not leave the others idle (rung 1 of the ladder, 16 Nov 2026), and however many
+    workers race for the last trials, exactly the total is started."""
+    import threading
+    import time as _time
+    import main_multilabel
+    from widedeepgp import tuning
+    base = main_multilabel.parse_args(["--label", "x", "--run_dir", str(tmp_path), "--experiment", "t",
+                                       "--exp_name", "r", "--wide", "off"])
+    ran = {}
+
+    def fake_objective(trial, base_, stage, init):
+        ran.setdefault(threading.current_thread().name, []).append(trial.number)
+        _time.sleep(1.5 if trial.number == 0 else 0.02)          # the first trial is slow
+        return 0.6
+
+    monkeypatch.setattr(tuning, "objective", fake_objective)
+    threads = [threading.Thread(target=tuning.worker, args=(base, "deep", 8, i), name=f"w{i}") for i in range(2)]
+    for t in threads:
+        t.start()
+        _time.sleep(0.2)                                          # w0 claims trial 0 first
+    for t in threads:
+        t.join()
+    assert sorted(n for v in ran.values() for n in v) == list(range(8))
+    assert ran["w0"] == [0] and len(ran["w1"]) == 7               # the free worker took all the rest
+    ran.clear()                                                   # a race for the last trials: no overshoot
+    base.exp_name = "r2"
+    threads = [threading.Thread(target=tuning.worker, args=(base, "deep", 5, i), name=f"x{i}") for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    study = tuning.open_stage_study(base, "deep")
+    assert len(study.trials) == 5 and sum(len(v) for v in ran.values()) == 5
+
+
 def test_the_pruner_sees_a_resumed_run_s_pass_numbers():
     from widedeepgp.callbacks import OptunaPruning
 

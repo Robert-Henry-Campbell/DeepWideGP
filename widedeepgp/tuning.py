@@ -181,12 +181,44 @@ def objective(trial, base, stage, init):
     return out["best_val_auroc_mean"]
 
 
-def worker(base, stage, n_trials, worker_index=0, init=None):
-    """Run ``n_trials`` trials of a stage."""
-    if int(n_trials) <= 0:
+def claim_trial(study, lock_path, n_total):
+    """The next trial of a stage, or None when the stage already has ``n_total`` trials finished
+    or running. Counting and asking happen under a file lock shared by the stage's workers, so
+    together they start exactly ``n_total`` trials (failed ones are not counted: their re-runs
+    are queued by fail_stale and taken first)."""
+    with open(lock_path, "a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            taken = len(study.get_trials(deepcopy=False, states=FINISHED + (TrialState.RUNNING,)))
+            return study.ask() if taken < int(n_total) else None
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def worker(base, stage, n_total, worker_index=0, init=None):
+    """Run trials of a stage until it has ``n_total`` trials finished or running. Workers take
+    the next trial whenever they are free, so a slow trial on one GPU does not leave the others
+    idle while it finishes a fixed share (rung 1 of the ladder, 15-16 Nov 2026)."""
+    import gc
+    if int(n_total) <= 0:
         return
     study = open_stage_study(base, stage, worker_index)
-    study.optimize(lambda t: objective(t, base, stage, init), n_trials=int(n_trials), gc_after_trial=True)
+    lock_path = os.path.join(run_root(base), stage, ".claim.lock")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    while True:
+        trial = claim_trial(study, lock_path, n_total)
+        if trial is None:
+            return
+        try:
+            value = objective(trial, base, stage, init)
+        except optuna.TrialPruned:
+            study.tell(trial, state=TrialState.PRUNED)
+        except BaseException:
+            study.tell(trial, state=TrialState.FAIL)
+            raise
+        else:
+            study.tell(trial, value)
+        gc.collect()
 
 
 def worker_from_env(base):
@@ -277,19 +309,19 @@ def fail_stale(study):
     return len(stale)
 
 
-def run_workers(base, argv, script, stage, n, gpus, init):
-    """The trials of a stage: in this process without GPUs, else one worker per GPU."""
+def run_workers(base, argv, script, stage, n_total, remaining, gpus, init):
+    """The trials of a stage: in this process without GPUs, else one worker per GPU (at most one
+    per trial still to run), each taking trials until the stage has ``n_total``."""
     if not gpus:
-        worker(base, stage, n, 0, init)
+        worker(base, stage, n_total, 0, init)
         return
-    k = min(len(gpus), n)
-    share = [n // k + (1 if i < n % k else 0) for i in range(k)]
+    k = min(len(gpus), remaining)
     log_dir = os.path.join(run_root(base), stage, "workers")
     os.makedirs(log_dir, exist_ok=True)
     procs = []
     for i in range(k):
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpus[i]), WIDEDEEPGP_TUNE_STAGE=stage,
-                   WIDEDEEPGP_TUNE_N=str(share[i]), WIDEDEEPGP_TUNE_WORKER=str(i), WIDEDEEPGP_WIDE_INIT=init or "")
+                   WIDEDEEPGP_TUNE_N=str(n_total), WIDEDEEPGP_TUNE_WORKER=str(i), WIDEDEEPGP_WIDE_INIT=init or "")
         log = open(os.path.join(log_dir, f"gpu{gpus[i]}.log"), "a")
         procs.append((subprocess.Popen([sys.executable, script, *argv, "--tune_worker"], env=env, stdout=log,
                                        stderr=subprocess.STDOUT), log))
@@ -379,7 +411,7 @@ def tune_run(base, argv, script):
                 print(f"{stage}: {stale} trial(s) left running by an earlier attempt marked failed", flush=True)
             remaining = n - len(study.get_trials(deepcopy=False, states=FINISHED))
             if remaining > 0:                            # GPUs picked per stage: the rule applies when trials start
-                run_workers(base, argv, script, stage, remaining, pick_gpus(spec), init)
+                run_workers(base, argv, script, stage, n, remaining, pick_gpus(spec), init)
             summaries[stage] = stage_summary(base, stage)
             if "best_trial" not in summaries[stage]:
                 raise RuntimeError(f"no trial of stage {stage} in {root} completed; see the trials' folders")

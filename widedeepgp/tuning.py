@@ -25,10 +25,7 @@ import sys
 import time
 
 import optuna
-import torch
 from optuna.trial import TrialState
-
-from . import train
 
 FINISHED = (TrialState.COMPLETE, TrialState.PRUNED)
 # arguments that may change when a search is continued
@@ -119,7 +116,9 @@ def drop_weights(trial_dir):
 
 
 def objective(trial, base, stage, init):
+    import torch                                         # torch and the training stack load only where used
     import tune_optuna
+    from . import train
     cfg = stage_cfg(base, stage, init)
     tune_optuna.suggest(trial, cfg, "deep")             # an enqueued trial gets its queued settings back
     resume_from = trial.user_attrs.get("resume_from")
@@ -206,6 +205,7 @@ def linear_dir(base):
 
 def linear_run(base):
     """Stage 1: the grid run, resumed from its last checkpoint if an earlier attempt left one."""
+    from . import train
     cfg = stage_cfg(base, "linear")
     cfg.resume = train.last_checkpoint(os.path.join(linear_dir(base), "checkpoints")) is not None
     train.run_training(cfg)
@@ -256,6 +256,7 @@ def fail_stale(study):
     """Trials still marked running when a search starts were left by a crash: mark them failed
     and queue each again with its settings, carrying on from its last checkpoint in its own
     folder when it wrote one (resume_from; methods.md section 7)."""
+    from . import train
     stale = study.get_trials(deepcopy=False, states=(TrialState.RUNNING,))
     for t in stale:
         study.tell(t.number, state=TrialState.FAIL)
@@ -338,6 +339,7 @@ def check_identity(base, root):
 
 def tune_run(base, argv, script):
     """The search of one run. ``argv`` and ``script`` start the workers (main_multilabel.py)."""
+    import torch
     root = run_root(base)
     os.makedirs(root, exist_ok=True)
     with _run_lock(root):

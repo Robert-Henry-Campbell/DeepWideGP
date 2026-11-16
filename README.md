@@ -146,6 +146,13 @@ nine prior variances side by side with each disease keeping its best, then the n
 of that PRS. The run's model is always the network on top of the linear model; the linear
 model alone is recorded beside it as an ablation, never reported as WideDeepGP.
 
+**Decided on 16 November 2026, not yet implemented:** the linear PRS path will be off by default
+and the model becomes one network trained end to end from dosages, with a per-SNP table pooled by
+LD block as its first layer and a mixer over the blocks (design and decisions in DeepWideGP-Scripts
+`scripts/widedeepgp-blocks/methods.md`, branch `widening`; status note at the top of
+[methods.md](methods.md)). The paragraph above and the `--wide` default in the table below describe
+the code as it stands.
+
 ```bash
 # a dataset <data_dir>/<dataset>/<variant>/ whose store.json names its "labels" and "covariates"
 # (genostore/README.md); without --data_dir, datasets are looked for in pukb/genes

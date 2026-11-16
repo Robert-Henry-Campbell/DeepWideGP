@@ -7,6 +7,20 @@ removed on 16 November 2026 and are in git history at 784009f); what it showed
 about the model itself is summarised in section 4.9 and should be read before the model is
 trained at full size.*
 
+**Status, 16 November 2026 (evening).** The design of the model changed after the first training
+size of the ladder showed the network adding nothing to the ridge PRS path (ridge alone 0.6634,
+ridge plus network 0.6633; the simulated-trait gate had shown the same). Robert decided that the
+deep arm of the scaling study is one network trained end to end from dosages, whose first layer is
+a learned table with a vector per SNP pooled by LD block, followed by a mixer (Mamba or a
+transformer) over the blocks; that the linear PRS path of section 4.10 stays in the code but is off
+by default and is never part of the reported model; that the study is styled after Kaplan et al.
+(2020), with model size, participants and compute as its axes. The design, its decisions and its
+costs are in DeepWideGP-Scripts `scripts/widedeepgp-blocks/methods.md` (branch `widening`); the
+implementation has not started. Until it lands, sections 4.10, 8 and 10 and the comparison table
+of section 10 describe the code as it stands (the path on by default, "the network on top of the
+linear model" as the run's model), and every statement of that rule in this document is
+superseded by the decision above.
+
 ## 1. Question
 
 DeepGP (Zhu et al., 2025) predicts one disease from genome-wide SNP data with a deep sequence
@@ -755,7 +769,8 @@ problem was found).
 simple linear PGI, overlapping the PGI arm, the study's linear comparator: as first built, a run
 reported the linear model whenever the network did not improve on it. He decided that the
 reported result is always the linear model with the network on top, whichever does better; the
-linear model alone is kept only as a labelled ablation (above).
+linear model alone is kept only as a labelled ablation (above). **Superseded on 16 November
+2026:** the path is off by default and the model is redesigned (status note at the top).
 
 The search inside every run replaces the plan's search on a proxy followed by a comparison at
 full size. In the pilot, on the network alone, a search on the real labels of the proxy was

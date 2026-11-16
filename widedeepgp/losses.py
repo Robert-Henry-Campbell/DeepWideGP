@@ -1,29 +1,14 @@
-# -*- coding: utf-8 -*-
-"""The multi-disease training loss.
-
-The loss is defined so that it does not depend on how the batches were drawn:
+"""The multi-disease training loss, which does not depend on how batches are drawn (methods.md 5.2;
+the variants correction=False and outputs="target" are those of 5.3):
 
     loss = (1/n) sum_j [ sum_k m_kj * c_j(y_kj) * BCE(z_kj, y_kj) / omega_k ] / (B * Z_j)
 
-    c_j(1) = min(((1 - pi_j) / pi_j) ** gamma, w_max),  c_j(0) = 1      class weight
+    c_j(1) = min(((1 - pi_j) / pi_j) ** gamma, w_max), c_j(0) = 1      class weight
     omega_k = how often the sampler draws person k, relative to uniform  sampling-rate correction
-    Z_j     = f_j * (pi_j * c_j(1) + 1 - pi_j)                           expected weight per draw
+    Z_j = f_j * (pi_j * c_j(1) + 1 - pi_j)                              expected weight per draw
 
-k runs over the B people of the batch, j over the n labels; m is 1 where a label applies; pi_j
-is the training prevalence of label j among the people it applies to and f_j the share of
-people it applies to.
-
-Dividing by omega makes the expected batch sum equal to the same population average whatever
-the sampler: the disease-balanced batches change how often an example is seen, not what the
-network is asked to fit. Z_j and the 1/n put every label on the same scale, so a frequent
-disease cannot dominate the sum. A population-scale probability is recovered from a logit by
-subtracting ``logit_shift`` = log c_j(1).
-
-Variants, for comparison runs:
-    correction=False   leave out omega (the non-target labels then learn from a sample that is
-                       enriched for whatever co-occurs with the batch's target)
-    outputs="target"   only the label the batch was balanced on learns from it; its cases and
-                       non-cases are weighted back to the same per-label objective
+m is 1 where a label applies, f_j the share of people label j applies to and pi_j its prevalence
+among them. A population-scale logit is the logit minus logit_shift = log c_j(1).
 """
 import numpy as np
 import torch
@@ -43,11 +28,9 @@ def label_counts(train_labels):
 class WideLoss(nn.Module):
     def __init__(self, train_labels=None, gamma=0.5, w_max=20.0, sampler="rotation", correction=True, outputs="all",
                  counts=None, case_share=0.5):
-        """train_labels: the training label matrix, or pass ``counts`` = {"cases": [...],
-        "non_cases": [...], "n": people} (what ``label_counts`` returns), which is all the loss
-        needs and is small enough to keep with a saved model. case_share: the share of a
-        rotation batch drawn from its target's cases (one half unless the batch size is odd;
-        samplers.cases_per_batch)."""
+        """Give the training label matrix or its ``counts`` (label_counts), which are all the loss
+        needs and small enough to keep with a saved model. case_share: the share of a rotation
+        batch drawn from its target's cases (samplers.cases_per_batch)."""
         super().__init__()
         if outputs not in ("all", "target"):
             raise ValueError("outputs must be 'all' or 'target'")
@@ -71,7 +54,7 @@ class WideLoss(nn.Module):
         self.register_buffer("rate_ctrl", t(rate_ctrl))
         self.register_buffer("logit_shift", t(np.log(c1)))
         self.n_labels = len(n1)
-        self.gamma, self.w_max, self.case_share = float(gamma), float(w_max), s
+        self.case_share = s
         self.sampler, self.correction, self.outputs = sampler, bool(correction), outputs
 
     def omega(self, y, mask):
@@ -100,7 +83,3 @@ class WideLoss(nn.Module):
             w = w / self.omega(y0, mask).clamp_min(1e-12).unsqueeze(1)
         per_label = (w * bce).sum(dim=0) / (batch * self.z)
         return per_label.mean(), per_label.detach()
-
-    def extra_repr(self):
-        return (f"n_labels={self.n_labels}, gamma={self.gamma}, w_max={self.w_max}, sampler={self.sampler}, "
-                f"correction={self.correction}, outputs={self.outputs}, case_share={self.case_share:.4g}")

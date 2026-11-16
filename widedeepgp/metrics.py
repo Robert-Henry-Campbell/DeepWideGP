@@ -1,12 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Per-disease metrics over a whole evaluation set.
-
-Everything is computed once over all evaluated people (never batch by batch: a small batch
-often holds no case of a disease, and its AUROC is then undefined), leaving out the entries
-where a label does not apply. A label with no case or no non-case among the people evaluated
-gets NaN, and the means skip it; if nothing can be scored the mean AUROC is reported as 0.5 so
-that callers watching it (early stopping, the tuner) always see a finite number.
-"""
+"""Per-disease metrics, computed once over a whole evaluation set (a batch often holds no case of a
+disease), leaving out the entries where a label does not apply. A label without a case or a
+non-case gets NaN and the means skip it; if nothing can be scored the mean AUROC is 0.5, so that
+early stopping and the tuner always see a finite number."""
 import numpy as np
 from scipy.stats import rankdata
 from sklearn.metrics import average_precision_score
@@ -31,12 +26,9 @@ def cross_entropy(logit, y):
 
 
 def per_label_metrics(logits, y, logit_shift=None, names=None):
-    """logits, y: [N, n]; y holds 1, 0 or NaN. logit_shift [n] is subtracted before the
-    cross-entropy, so that it is evaluated at population prevalence.
-
-    Returns {"labels": names, "auroc": [n], "ap": [n], "bce": [n], "n": [n], "n_cases": [n],
-             "auroc_mean", "ap_mean", "bce_mean"}.
-    """
+    """logits, y [N, n], y holding 1, 0 or NaN; logit_shift [n] is subtracted before the
+    cross-entropy, which is then at population prevalence. Returns {"auroc", "ap", "bce", "n",
+    "n_cases": [n], "auroc_mean", "ap_mean", "bce_mean", "labels"}."""
     logits = np.asarray(logits, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     n_labels = y.shape[1]

@@ -1,16 +1,11 @@
-# -*- coding: utf-8 -*-
-"""The sequence-block factory.
+"""The sequence block (methods.md 4.3), with the interface of models.DeepGP.Block:
+``hidden_states, residual = block(hidden_states, residual)``.
 
-Every block has the interface of ``models.DeepGP.Block``:
-    hidden_states, residual = block(hidden_states, residual)
-
-    bimamba1   the block published DeepGP uses: bidirectional Mamba-1 from the Vision-Mamba
-               fork of ``mamba_ssm`` (``bimamba_type`` "v1": the two directions share their
-               convolution and projections and differ in the state matrix; "v2", selected by
-               --bi_direct, gives the backward direction weights of its own).
-    mamba3     Mamba-3 from upstream ``mamba_ssm``, which runs in one direction only, wrapped
-               so that a second block reads the sequence backwards and the two outputs are
-               summed. Needs the separate environment (the fork and upstream share a name).
+    bimamba1   the published block: bidirectional Mamba-1 of the Vision-Mamba fork of mamba_ssm
+               ("v1": the two directions share convolution and projections; "v2", selected by
+               --bi_direct, gives the backward direction weights of its own)
+    mamba3     upstream Mamba-3, one direction only, as a pair reading forwards and backwards
+               (BiDirectional); it needs its own environment (the fork and upstream share a name)
 """
 from functools import partial
 
@@ -36,19 +31,11 @@ def make_block(d_model, mixer="bimamba1", bi_direct=False, m3_d_state=None):
 
 
 def mamba3_settings(d_model, d_state=None):
-    """Mamba-3 settings for a DeepGP-sized model (single-input mode).
-
-    headdim   the largest power of two up to 64 that divides the inner width (2 * d_model); the
-              kernels need powers of two.
-    d_state   16 by default, the state size of the published block: Mamba-3's own default of
-              128 adds parameters that grow only in proportion to d_model and would outweigh the
-              rest of a d_model-32 block. Must be even (rotary embedding) and a power of two.
-    chunk_size 64, upstream's recommendation for the single-input kernel.
-
-    The single-input kernel computes its recurrence in bf16 whatever the precision of the rest
-    of the network (it casts its inputs; only the step sizes stay in float32), so a "float32"
-    run with this block is float32 everywhere except inside the recurrence.
-    """
+    """Mamba-3 at DeepGP's size, in single-input mode: headdim the largest power of two up to 64 that
+    divides the inner width (the kernels need powers of two); d_state 16 by default (the published
+    block's; Mamba-3's 128 would outweigh the rest of a narrow block), even for the rotary embedding
+    and a power of two; chunk_size 64, upstream's advice for this kernel, which computes its
+    recurrence in bf16 whatever the precision of the rest."""
     d_inner = 2 * d_model
     headdim = 64
     while d_inner % headdim:
@@ -60,8 +47,8 @@ def mamba3_settings(d_model, d_state=None):
 
 
 class BiDirectional(nn.Module):
-    """Two one-directional blocks, one reading the sequence forwards and one backwards; their
-    outputs are summed. Each direction has its own weights."""
+    """Two one-directional blocks with weights of their own, one reading the sequence forwards and
+    one backwards; their outputs are summed."""
 
     def __init__(self, dim, kind="mamba3", d_state=None):
         super().__init__()

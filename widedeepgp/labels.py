@@ -1,10 +1,5 @@
-# -*- coding: utf-8 -*-
-"""Label matrices for the multi-disease model.
-
-A label matrix is float [N, n_labels] holding 1 (case), 0 (not a case) or NaN (the label does
-not apply to that person, e.g. a sex-limited disease; such entries are left out of the loss
-and of every metric). Everything here is plain numpy so it can be unit-tested without a GPU.
-"""
+"""Label matrices: float [N, n_labels] holding 1 (case), 0 (not a case) or NaN (the label does not
+apply to that person, e.g. a sex-limited disease; left out of the loss and of every metric)."""
 import numpy as np
 
 
@@ -24,35 +19,26 @@ def check_labels(y, names=None):
 
 
 def case_counts(y):
-    """(cases, non-cases) per label, counting only the people each label applies to."""
+    """(cases, non-cases) per label, among the people each label applies to."""
     y = np.asarray(y, dtype=np.float64)
     return np.nansum(y, axis=0), np.nansum(1.0 - y, axis=0)
 
 
 def prevalence(y):
-    """Share of cases among the people each label applies to."""
     n1, n0 = case_counts(y)
     return n1 / (n1 + n0)
 
 
 def class_weights(pi, gamma=0.5, w_max=20.0):
-    """Weight on a case relative to a non-case, per label: min(((1 - pi) / pi) ** gamma, w_max).
-
-    gamma = 1 weights every label to 50/50, gamma = 0 leaves the population rate untouched,
-    gamma = 0.5 (the default) is the square root.
-    """
+    """Weight of a case relative to a non-case, min(((1 - pi) / pi) ** gamma, w_max) (methods.md 5.2)."""
     pi = np.asarray(pi, dtype=np.float64)
     return np.minimum(((1.0 - pi) / pi) ** float(gamma), float(w_max))
 
 
 def rotation_rates(y, case_share=0.5):
-    """How often the rotation sampler draws a case / a non-case of each label, relative to
-    drawing people uniformly: (N * s / cases, N * (1 - s) / non-cases), s = ``case_share``.
-
-    A batch balanced on label i takes the share s of its people from the cases of i and the
-    rest from the non-cases of i, among the people label i applies to. s is one half unless
-    the batch size is odd (samplers.cases_per_batch).
-    """
+    """How often the rotation sampler draws a case / a non-case of each label, relative to uniform
+    drawing: (N s / cases, N (1 - s) / non-cases), s the share of a batch taken from its target's
+    cases (samplers.cases_per_batch)."""
     y = np.asarray(y, dtype=np.float64)
     n1, n0 = case_counts(y)
     n = y.shape[0]
@@ -61,21 +47,11 @@ def rotation_rates(y, case_share=0.5):
 
 
 def sampling_rate(y, rate_case=None, rate_ctrl=None, case_share=0.5):
-    """omega: how often the rotation sampler draws each person, relative to uniform drawing.
-
-    Each label is the target of one batch per rotation, so a person's rate is the mean over
-    labels of their rate under that label's batch (0 where the label does not apply to them).
-    The mean of omega over the people ``rate_*`` were computed from is exactly 1.
-    """
+    """omega: how often the rotation sampler draws each person, relative to uniform drawing: the
+    mean over labels of their rate when that label is the target (0 where it does not apply). Its
+    mean over the people ``rate_*`` were computed from is exactly 1."""
     y = np.asarray(y, dtype=np.float64)
     if rate_case is None:
         rate_case, rate_ctrl = rotation_rates(y, case_share)
     r = np.where(np.isnan(y), 0.0, y * rate_case + (1.0 - y) * rate_ctrl)
     return r.mean(axis=1)
-
-
-def summarise(y, names):
-    """Per-label counts for logs and manifests."""
-    n1, n0 = case_counts(y)
-    return [{"label": nm, "cases": int(a), "non_cases": int(b), "prevalence": float(a / (a + b))}
-            for nm, a, b in zip(names, n1, n0)]

@@ -2,7 +2,8 @@
 
 *DeepWideGP repository, DPhil chapter 6. Written 11–12 November 2026. This document describes
 the data, the model and how it is trained. A pilot on real data is reported in
-DeepWideGP-Scripts (branch `widening`, `scripts/widedeepgp-pilot/results.md`); what it showed
+DeepWideGP-Scripts (branch `widening`, `scripts/widedeepgp-pilot/`; its written results were
+removed on 16 November 2026 and are in git history at 784009f); what it showed
 about the model itself is summarised in section 4.9 and should be read before the model is
 trained at full size.*
 
@@ -182,8 +183,10 @@ review (Robert, 15 November 2026), so that each size's results are available as 
 finishes while the next, twice as large and about twice as costly, runs; the chain stops only if
 a run fails. With a search inside every run, the five sizes together cost a few hundred
 GPU-hours, most of it at the two largest. The chain starts after the real-label check of
-section 8 (`runs/ladder/run_ladder_2026-11-15.sh`; record and configuration in
-`DeepWideGP-Scripts/scripts/widedeepgp-ladder/`).
+section 8 (`DeepWideGP-Scripts/scripts/widedeepgp-ladder/run_ladder_2026-11-15.sh`, with the
+record and configuration). The first size ran on 15–16 November 2026 (summary:
+`widedeepgp-ladder/rung_13199_summary.md`); the ladder was then stopped and its run folders
+removed, at Robert's request, before changes to the code.
 
 ### 2.6 Limitations of the phenotypes
 
@@ -733,8 +736,9 @@ each worker had a fixed share, and on the first training size one slow trial kep
 for about six hours while the other three GPUs stood idle). Model width, depth, the sequence block and the use of annotations are experimental factors
 and are never searched.
 
-**Checks on the pilot's proxy** (gates; methods, results and tables in
-`DeepWideGP-Scripts/scripts/widedeepgp-gates/`). On five traits simulated on the proxy's real
+**Checks on the pilot's proxy** (gates; methods in `DeepWideGP-Scripts/scripts/widedeepgp-gates/`;
+its results files and run folders were removed on 16 November 2026, the numbers below are the
+record). On five traits simulated on the proxy's real
 genotypes, the linear stage reached a mean tuning AUROC of 0.7187 against 0.7132 for GBLUP given
 each trait's true heritability, and the network on top added nothing (its best trial 0.7187,
 below the linear model alone in the fifth decimal; under the rule of that day the linear model

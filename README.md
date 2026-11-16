@@ -137,8 +137,8 @@ The single-disease code above (`main_genome.py`, `models/`, `layers/`, `utils.py
 difference from the single-disease model.
 
 **Read [methods.md](methods.md) sections 4.9, 4.10 and 8 before training at full size.** In
-the pilot on real data (DeepWideGP-Scripts, branch `widening`,
-`scripts/widedeepgp-pilot/results.md`) the network alone ended slightly below a logistic model
+the pilot on real data (DeepWideGP-Scripts, branch `widening`, `scripts/widedeepgp-pilot/`;
+written results in git history at 784009f) the network alone ended slightly below a logistic model
 on the covariates and learned nothing detectable from unselected SNPs. Since 13 November 2026
 the model therefore contains a linear PRS path (one weight per SNP and disease, with a ridge
 penalty) beside the network, and every run tunes itself: first the linear model alone, at

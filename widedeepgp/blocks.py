@@ -33,8 +33,8 @@ def make_block(d_model, mixer="bimamba1", bi_direct=False, m3_d_state=None):
 def mamba3_settings(d_model, d_state=None):
     """Mamba-3 at DeepGP's size, in single-input mode: headdim the largest power of two up to 64 that
     divides the inner width (the kernels need powers of two); d_state 16 by default (the published
-    block's; Mamba-3's 128 would outweigh the rest of a narrow block), even for the rotary embedding
-    and a power of two; chunk_size 64, upstream's advice for this kernel, which computes its
+    block's; Mamba-3's 128 would outweigh the rest of a narrow block), which must be even (rotary
+    embedding) and a power of two; chunk_size 64, upstream's advice for this kernel, which computes its
     recurrence in bf16 whatever the precision of the rest."""
     d_inner = 2 * d_model
     headdim = 64

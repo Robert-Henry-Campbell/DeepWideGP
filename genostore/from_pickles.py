@@ -27,7 +27,7 @@ def _load(src, name):
         return pickle.load(f)
 
 
-def convert(src, dst, store_name="genostore", block_variants=gf.BLOCK_VARIANTS):
+def convert(src, dst):
     genes, pos = _load(src, "genes"), _load(src, "pos")
     snp = {s: _load(src, f"snp_{s}") for s in ("train", "test")}
     lab = {s: np.asarray(_load(src, f"label_{s}")[0]) for s in ("train", "test")}
@@ -35,8 +35,8 @@ def convert(src, dst, store_name="genostore", block_variants=gf.BLOCK_VARIANTS):
     n = {s: len(lab[s]) for s in ("train", "test")}
     ids = {"train": [f"tr{i:07d}" for i in range(n["train"])], "test": [f"te{i:07d}" for i in range(n["test"])]}
     os.makedirs(dst, exist_ok=True)
-    store = os.path.join(dst, store_name)
-    gf.create_store(store, ids["train"] + ids["test"], block_variants, {"legacy_pickles": os.path.abspath(src)})
+    store = os.path.join(dst, "genostore")
+    gf.create_store(store, ids["train"] + ids["test"], provenance={"legacy_pickles": os.path.abspath(src)})
     worst = 0.0
     for c in range(len(genes)):
         x = np.concatenate([np.asarray(snp["train"][c]), np.asarray(snp["test"][c])], axis=0)
@@ -47,9 +47,9 @@ def convert(src, dst, store_name="genostore", block_variants=gf.BLOCK_VARIANTS):
         if ok.any():
             worst = max(worst, float(np.abs(q[ok] / gf.DOSAGE_SCALE - x[ok]).max()))
         lines = (f"{c + 1}\t{j}\t{genes[c][j]}\tN\tN" for j in range(x.shape[1]))
-        gf.write_chrom_from_array(store, str(c + 1), q, lines, block_variants, pos=np.asarray(pos[c]))
+        gf.write_chrom_from_array(store, str(c + 1), q, lines, pos=np.asarray(pos[c]))
     multi = lab["train"].ndim == 2
-    spec = {"store": store_name, "pos_mode": "pos"}
+    spec = {"store": "genostore", "pos_mode": "pos"}
     cov_names = _names(src, "covar_names.json", "cov", cov["train"].shape[1])
     label_names = _names(src, "label_names.json", "y", lab["train"].shape[1]) if multi else ["label"]
     if multi:
@@ -82,9 +82,10 @@ def main(argv=None):
     ap.add_argument("--dst", required=True)
     a = ap.parse_args(argv)
     worst = convert(a.src, a.dst)
+    ok = worst <= 0.005 + 1e-6                   # within half a quantisation step
     print(f"wrote {a.dst}; largest |stored - original| genotype value: {worst:.6f}"
-          + ("" if worst <= 0.005 + 1e-6 else "  <-- values are not dosages in [0, 2]; this store cannot represent them"))
-    return 0 if worst <= 0.005 + 1e-6 else 1
+          + ("" if ok else "  <-- values are not dosages in [0, 2]; this store cannot represent them"))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

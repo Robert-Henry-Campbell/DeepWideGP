@@ -300,7 +300,8 @@ def _val_metrics(mean):
 @pytest.mark.parametrize("prs, frozen", [(False, False), (True, False), (True, True)], ids=["network", "prs", "fixed"])
 def test_the_run_log(tmp_path, prs, frozen):
     """Step metrics only on the batches Lightning writes, the PRS's learning rate and gradient norm
-    apart from the network's, and one row set per validation pass (a repeated pass ignored)."""
+    apart from the network's, and one row set per validation pass (a repeated pass is not logged
+    again, but its metrics, which the model scores on the whole tuning set, serve results.json)."""
     from widedeepgp.callbacks import RunLog
     mod = _module(prs, frozen)
     groups = [{"lr": 0.5, "params": [mod.net.weight, mod.net.bias]}]
@@ -330,7 +331,7 @@ def test_the_run_log(tmp_path, prs, frozen):
         trainer.global_step, mod.last_val_metrics = step, m              # step 4 twice: a resumed run's repeat
         log.on_validation_end(trainer, mod)
     assert log.history == [(1, 4, 12, 0.6), (2, 9, 12, 0.65)] and sorted(log.metrics_at) == [4, 9]
-    assert log.metrics_at[4]["auroc_mean"] == 0.6
+    assert log.metrics_at[4]["auroc_mean"] == 0.7                       # the repeated pass's (16 Nov 2026)
     with open(tmp_path / "metrics.csv") as f:
         rows = list(csv.DictReader(f))
     assert [(r["validation"], r["step"], r["epoch_equiv"]) for r in rows] == [("1", "4", "1.2")] * 9 + [
@@ -346,7 +347,8 @@ def test_the_run_log(tmp_path, prs, frozen):
     resumed.load_state_dict(json.loads(json.dumps(state)))              # as a checkpoint holds it
     trainer.global_step, mod.last_val_metrics = 9, _val_metrics(0.9)    # the pass a resumed run repeats
     resumed.on_validation_end(trainer, mod)
-    assert resumed.history == log.history and resumed.metrics_at == {} and resumed.n_validations == 2
+    assert resumed.history == log.history and resumed.n_validations == 2
+    assert resumed.metrics_at == {9: mod.last_val_metrics}            # kept for results.json (16 Nov 2026)
     assert resumed.cases_seen.dtype == torch.float64 and resumed.cases_seen.tolist() == [6.0, 6.0]
 
 

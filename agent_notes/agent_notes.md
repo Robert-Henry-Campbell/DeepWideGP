@@ -962,6 +962,51 @@ and remove every time limit; nothing is to start on 29 Nov.
   CPU suite: 80 passed, 28 skipped. methods.md section 8 says so.
 - The ladder chain picks this up from rung 2 (each rung exports the newest commit of `widening`).
 
+## 2026-11-16 (20:05 UTC) — Three fixes, and what their review found (branch fix/2026-11-16, on d019bb9)
+
+Robert asked for three fixes found while the code was being simplified; an independent review of
+the first commit (98cbe9b) found more of the same kinds. They are kept apart from the
+simplification and go onto it only after its old-against-new check.
+- `--snp_embed vocab` (model.py): `_encode` passed the raw float dosages to the published
+  201-entry `nn.Embedding`, which fails at the first forward pass (no run has used vocab).
+  `vocab_codes` turns the model input back into the store's codes (dosage x 100, rounded, in
+  float32: exact for all 201 levels); `_embed` is the embedding step, shared by `_encode` and the
+  tests. The published `DataEmbeddingVocab.forward` truncates after rounding to two decimals and
+  puts 6 levels (0.53, 0.59, 1.05, 1.06, 1.17, 1.18) one code low (methods.md 11). Vocab reads raw
+  dosages, so `wide_hparams` refuses it with the linear PRS path (it needs `--wide off`), and
+  config.json's `snp_scaling` says "none" when SNPs were not standardised.
+- Participant IDs and values out of messages (genostore/datamodule.py, score_snapshots.py): the
+  unknown-participant KeyError counts IDs instead of listing three; a cell that is not a number
+  (e.g. an ID in a label or covariate column after a shifted row) raises without quoting it, with
+  `from None` so pandas' chained message is not printed either; one-label checks count other
+  values instead of listing them; `--save_scores` refuses a folder in the run directory or a git
+  work tree, and writes its files 0600.
+- Resume (callbacks.py, model.py, train.py): since 512c755 the model rescores a resumed run's
+  repeated validation pass on the whole tuning set, but RunLog dropped those metrics, so
+  run_training scored the tuning set again for results.json (the GPU test
+  `test_a_resumed_run_reports_a_best_step_from_before_the_resume` failed with ['val', 'val'];
+  it was written on 12 Nov, before 512c755). RunLog now keeps the repeated pass's metrics in
+  `metrics_at` (no metrics.csv row, history entry or count), which saves 7-10 min per resume at
+  full size. The fallback that scores an earlier best step from its checkpoint treated a grid run
+  as if it had no grid (results.json's top-level fields were wrong for a resumed `--prs_grid` run
+  whose best pass came before the resume; the search's choices read `per_disease` and were not
+  affected): `model.val_metrics` is now the one computation for a validation pass and that
+  fallback; `_grid_means` is pure and `_keep_grid_best` keeps the best_* buffers.
+- Tests: `tests/test_ml_vocab.py`, `tests/test_genostore_identifiers.py` (new); in
+  `tests/test_ml_train.py`, `test_a_resumed_run_scores_only_what_it_lacks` (CPU, `--wide only`:
+  the repeated pass is the best / an earlier best / an earlier best with a grid), a CPU test of
+  RunLog's repeated pass, and the GPU resume test allows an earlier best step. 11 of the new
+  tests fail on d019bb9, as they should (the other 2 check behaviour that was already right).
+  CPU suite: 93 passed, 29 skipped, 1 failed (`test_free_workers_take_the_next_trial`, a timing
+  test that also fails 5 of 5 on d019bb9 at today's load). GPU (GPU 2): test_ml_vocab 6 passed,
+  test_ml_train quick 24 passed, test_ml_wide 26 passed and the same timing test failed,
+  test_ml_model 9 passed.
+- Reported, not changed: `utils.py:36` prints every distinct label value and `main_genome.py`
+  writes per-person predictions into the tracked `DeepGP/results` (the published single-disease
+  code, kept unchanged; not run on real data). In DeepWideGP-Scripts (branch widening),
+  `classic-deepgp-comparator/build_datasets.py:136` and `widedeepgp-pilot/gwas_annotation.py:107`
+  look up rows by ID without a membership check, so a KeyError would print the ID.
+
 ## 2026-11-16 (21:05 UTC) — Leaner WideDeepGP code, same behaviour (the /simplify pass, integrated)
 
 Robert asked for /simplify over all WideDeepGP code except the tests (project CLAUDE.md section 8:

@@ -192,6 +192,83 @@ def test_a_resumed_run_keeps_its_own_stopping_patience():
     assert (later.patience, later.wait_count, later._seen_step) == (20, 3, 40)
 
 
+def test_the_pass_a_resume_repeats_is_kept_for_results_but_not_logged_again(tmp_path):
+    """The repeated pass (scored whole by the model) goes into metrics_at, so results.json need
+    not score the tuning set again, but adds no metrics.csv row, history entry or count."""
+    from types import SimpleNamespace
+    from widedeepgp import metrics as M
+    from widedeepgp.callbacks import RunLog
+    rng = np.random.default_rng(1)
+    y = rng.integers(0, 2, size=(50, 2)).astype(float)
+
+    def metrics():
+        return M.per_label_metrics(rng.normal(size=(50, 2)), y, None, ["a", "b"])
+
+    first = RunLog(str(tmp_path), n_train=100, n_snps=10)
+    first.on_fit_start(SimpleNamespace(), None)
+    module = SimpleNamespace(last_val_metrics=metrics(), samples_seen=100, label_names=["a", "b"])
+    first.on_validation_end(SimpleNamespace(global_step=12, sanity_checking=False, logger=None), module)
+    later = RunLog(str(tmp_path), n_train=100, n_snps=10)            # the resumed process
+    later.load_state_dict(first.state_dict())
+    rows = open(tmp_path / "metrics.csv").read()
+    module.last_val_metrics = repeated = metrics()
+    later.on_validation_end(SimpleNamespace(global_step=12, sanity_checking=False, logger=None), module)
+    assert later.metrics_at == {12: repeated}
+    assert (later.n_validations, len(later.history), open(tmp_path / "metrics.csv").read()) == (1, 1, rows)
+
+
+@pytest.mark.parametrize("branch, grid", [("repeated", None), ("earlier", None), ("earlier", [0.1, 1.0, 10.0])])
+def test_a_resumed_run_scores_only_what_it_lacks(tmp_path, monkeypatch, branch, grid):
+    """--wide only, on the CPU. A resumed run rescores the pass it repeats on the whole tuning set;
+    results.json takes the best step's metrics from that when it is the best pass, and scores an
+    earlier best step from its checkpoint as a validation pass would (with a grid: per grid point).
+    Either way results.json holds what metrics.csv recorded for the best step."""
+    import inspect
+    import pytorch_lightning as pl
+    import widedeepgp.train as T
+
+    class Freeze(pl.Callback):                     # after the first pass nothing changes: it stays the best
+        def on_validation_end(self, trainer, pl_module):
+            for group in trainer.optimizers[0].param_groups:
+                group["lr"] = 0.0
+
+    class NoLearning(pl.Callback):
+        def on_train_start(self, trainer, pl_module):
+            for group in trainer.optimizers[0].param_groups:
+                group["lr"] = 0.0
+
+    callers, predict = [], T.predict_split
+
+    def record(*a, **k):
+        callers.append(inspect.stack()[1].function)
+        return predict(*a, **k)
+
+    monkeypatch.setattr(T, "predict_split", record)
+
+    def scorings():                                # a grid run's per-disease model is always scored once more
+        return [c for c in callers if c != "write_per_disease"]
+
+    data_dir, _ = synthetic_dataset(tmp_path, n=300, snps=60)
+    over = dict(wide="only", lr=3e-3, prs_grid=grid, run_dir=str(tmp_path / "runs"), experiment="t", exp_name="r",
+                steps_per_epoch_equiv=12, val_per_epoch=2, stop_patience=0, snapshots_per_decade=4)
+    first = T.run_training(make_cfg(data_dir, "multi", max_epoch_equiv=0.5 if branch == "repeated" else 1.0, **over),
+                           extra_callbacks=[] if branch == "repeated" else [Freeze()])
+    assert (first["best_step"] == first["history"][-1]["step"]) == (branch == "repeated") and scorings() == []
+    out = T.run_training(make_cfg(data_dir, "multi", max_epoch_equiv=2.0, resume=True, **over),
+                         extra_callbacks=[NoLearning()])
+    assert scorings() == ["on_validation_epoch_end"] + (["run_training"] if branch == "earlier" else [])
+    assert out["best_step"] == first["best_step"]
+    with open(os.path.join(out["run_dir"], "metrics.csv")) as f:
+        logged = {(r["label"], r["metric"]): float(r["value"]) for r in csv.DictReader(f)
+                  if int(r["step"]) == out["best_step"]}
+    with open(os.path.join(out["run_dir"], "results.json")) as f:
+        res = json.load(f)
+    got = {(name, k): m[k] for name, m in res["val"].items() for k in m}
+    got.update({("MEAN", k): v for k, v in res["val_mean"].items()})
+    assert set(got) == set(logged) and len(got) == 3 * (6 * (len(grid) if grid else 1) + 1)
+    assert all(np.isclose(got[k], logged[k], rtol=0, atol=1e-6, equal_nan=True) for k in got), (got, logged)
+
+
 def test_a_resume_starts_from_the_latest_last_checkpoint(tmp_path):
     """The highest last-vN.ckpt, which must also be the newest of them."""
     from widedeepgp.train import last_checkpoint
@@ -348,7 +425,9 @@ def test_a_resumed_run_continues_the_same_batches(tmp_path):
 @gpu
 def test_a_resumed_run_reports_a_best_step_from_before_the_resume(tmp_path, monkeypatch):
     """results.json of a run whose best pass came before a resume: that step, with the metrics
-    metrics.csv holds for it, scored again from its checkpoint (this process did not make it)."""
+    metrics.csv holds for it. The resumed run scores the tuning set once, whole, for the pass it
+    repeats; that scoring serves results.json when the repeated pass is the best one, and an
+    earlier best step is scored again from its checkpoint (this process did not make it)."""
     import pytorch_lightning as pl
     import widedeepgp.train as T
 
@@ -357,15 +436,23 @@ def test_a_resumed_run_reports_a_best_step_from_before_the_resume(tmp_path, monk
             for group in trainer.optimizers[0].param_groups:
                 group["lr"] = 0.0
 
-    scored = []
+    scored = []                                            # (split, people scored) of each scoring
     predict = T.predict_split
-    monkeypatch.setattr(T, "predict_split", lambda *a, **k: scored.append(a[2]) or predict(*a, **k))
+
+    def record(*a, **k):
+        logits, y = predict(*a, **k)
+        scored.append((a[2], len(y)))
+        return logits, y
+
+    monkeypatch.setattr(T, "predict_split", record)
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
     first = T.run_training(_tiny(tmp_path, data_dir, "r", max_epoch_equiv=1.0))
     assert scored == []                                    # its best pass was made by the same process
     out = T.run_training(_tiny(tmp_path, data_dir, "r", max_epoch_equiv=2.0, resume=True),
                          extra_callbacks=[NoLearning()])
-    assert scored == ["val"] and len(out["history"]) == 4
+    n_val = len(out["datamodule"].splits["val"]["y"])
+    earlier_best = first["best_step"] < first["history"][-1]["step"]      # not the pass the resume repeats
+    assert scored == [("val", n_val)] * (2 if earlier_best else 1) and len(out["history"]) == 4
     assert out["best_step"] == first["best_step"] <= first["history"][-1]["step"]
     with open(os.path.join(out["run_dir"], "metrics.csv")) as f:
         logged = {(r["label"], r["metric"]): float(r["value"]) for r in csv.DictReader(f)

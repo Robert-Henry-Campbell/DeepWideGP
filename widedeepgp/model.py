@@ -26,6 +26,13 @@ WIDE_MODES = ("off", "on", "only")
 WIDE_KEYS = ("prs.", "cov_linear", "intercept")        # state_dict keys of the linear PRS path
 
 
+def vocab_codes(x):
+    """Raw dosages [B, L, 1] (the store's codes times 0.01) -> those codes [B, L], 0 to 200, which
+    index --snp_embed vocab's table. DataEmbeddingVocab.forward truncates instead of rounding and
+    puts 6 of the 201 levels one code low (methods.md 11)."""
+    return torch.round(x[:, :, 0].float() * 100).long()             # float32 first: exact for every level
+
+
 def positions_digest(pos):
     h = hashlib.sha256()
     for p in pos:
@@ -213,15 +220,20 @@ class WideDeepGP(pl.LightningModule):
         self.last_val_metrics = None
         self.samples_seen = 0
 
+    def _embed(self, i, x):
+        """The embedding of input sequence i [B, L, 1] -> [B, L, d_model]: the published module's,
+        with the annotations' gain and offset on the value part."""
+        emb = self.dataEmbed[i]
+        v = emb.value_embedding(vocab_codes(x) if isinstance(emb, DataEmbeddingVocab) else x)
+        if self.annot_dim:
+            a = getattr(self, f"annot_{i}")
+            v = v * (1.0 + self.annot_gain(a)) + self.annot_offset(a)
+        return emb.dropout(v + emb.position_embedding(x))
+
     def _encode(self, i, x):
         """One input sequence [B, L, 1] -> its pooled vector [B, d_model], in float32."""
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and x.is_cuda):
-            emb = self.dataEmbed[i]
-            v = emb.value_embedding(x)
-            if self.annot_dim:
-                a = getattr(self, f"annot_{i}")
-                v = v * (1.0 + self.annot_gain(a)) + self.annot_offset(a)
-            h = emb.dropout(v + emb.position_embedding(x))
+            h = self._embed(i, x)
             residual = None
             for layer in self.encoders[i]:
                 h, residual = layer(h, residual)
@@ -340,10 +352,9 @@ class WideDeepGP(pl.LightningModule):
             # a resumed run repeats its checkpoint's pass, restored part-way: score all of it (methods.md 7)
             from .train import predict_split
             logits, y = predict_split(self, dm, "val", self.device)
-        m = M.per_label_metrics(logits, np.tile(y, (1, self.n_grid)), self.loss_fn.logit_shift.cpu().numpy(),
-                                self.out_names)          # every grid point scored on every disease
+        m = self.val_metrics(logits, y)
         if self.grid:
-            self._grid_means(m)
+            self._keep_grid_best(m)
         self.last_val_metrics = m
         self.log("val/auroc_mean", m["auroc_mean"], prog_bar=True)
         self.log("val/ap_mean", m["ap_mean"])
@@ -362,9 +373,18 @@ class WideDeepGP(pl.LightningModule):
             self._train_sum.zero_()
             self._train_cnt.zero_()
 
+    def val_metrics(self, logits, y):
+        """A validation pass's metrics: every grid point on every disease (n_grid is 1 without a grid)
+        and, with a grid, the means over diseases each at its best grid point."""
+        m = M.per_label_metrics(logits, np.tile(y, (1, self.n_grid)), self.loss_fn.logit_shift.cpu().numpy(),
+                                self.out_names)
+        if self.grid:
+            self._grid_means(m)
+        return m
+
     def _grid_means(self, m):
         """With a grid: the means are over diseases, each at its best grid point in this pass (by
-        AUROC), and each disease's best grid point and pass so far is kept (best_*)."""
+        AUROC); m["grid_pick"] holds those points (-1 for a disease without a finite AUROC)."""
         n, k = self.n_labels, self.n_grid
         auc = np.asarray(m["auroc"], dtype=np.float64).reshape(k, n)
         pick = np.full(n, -1)
@@ -378,12 +398,18 @@ class WideDeepGP(pl.LightningModule):
             v = v[np.isfinite(v)]
             m[key + "_mean"] = float(v.mean()) if len(v) else (0.5 if key == "auroc" else float("nan"))
         m["grid_pick"] = pick.tolist()
+
+    def _keep_grid_best(self, m):
+        """Each disease's best grid point and pass so far (best_*), from a pass's metrics m."""
         trainer = self._trainer
         if trainer is not None and trainer.sanity_checking:
             return
+        n = self.n_labels
+        auc = np.asarray(m["auroc"], dtype=np.float64).reshape(self.n_grid, n)
+        pick = np.asarray(m["grid_pick"])
         step = int(trainer.global_step) if trainer is not None else -1
         with torch.no_grad():
-            for j in np.flatnonzero(ok):
+            for j in np.flatnonzero(pick >= 0):
                 value = float(auc[pick[j], j])
                 if not value > float(self.best_auroc[j]):    # strictly better: a repeated pass changes nothing
                     continue

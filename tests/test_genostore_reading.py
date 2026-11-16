@@ -235,11 +235,11 @@ def set_label(path, i, value):
 def test_a_single_label_must_be_coded_0_1_in_every_table(data, capsys):
     one = data["one"]
 
-    def refused(split, make):
-        values = np.unique(pd.read_csv(one / f"samples_{split}.tsv", sep="\t")["label"]).tolist()
+    def refused(split, make):                    # other values are counted, not listed (CLAUDE.md section 3)
+        labels = pd.read_csv(one / f"samples_{split}.tsv", sep="\t")["label"].to_numpy()
         with pytest.raises(ValueError) as e:
             make()
-        assert str(e.value) == f"{split} labels must be encoded as 0/1, found {values}"
+        assert str(e.value) == f"{split} labels must be encoded as 0/1; {int((~np.isin(labels, [0, 1])).sum())} are not"
 
     set_label(one / "samples_ext.tsv", 3, 7)
     dm = module(data, "one", ve="ext")                                       # the external table is read later

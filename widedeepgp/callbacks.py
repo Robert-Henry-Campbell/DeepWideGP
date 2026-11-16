@@ -92,8 +92,9 @@ def _grad_sq(params):
 class RunLog(pl.Callback):
     """Writes metrics.csv (one row per validation pass, label and metric) and logs throughput,
     memory, learning rates, gradient norms and cases seen per disease to the trainer's logger.
-    ``metrics_at`` keeps each pass this process made, by optimiser step, for results.json (a
-    pass made before a resume is scored again)."""
+    ``metrics_at`` keeps each pass this process made, by optimiser step, for results.json; that
+    includes the pass a resumed run repeats (the model scores it whole), while a pass made before
+    a resume is scored again from its checkpoint."""
 
     FIELDS = ["validation", "step", "samples_seen", "epoch_equiv", "label", "metric", "value", "n", "n_cases"]
 
@@ -164,9 +165,13 @@ class RunLog(pl.Callback):
             self.peak_val_bytes = max(self.peak_val_bytes, torch.cuda.max_memory_allocated())
             torch.cuda.reset_peak_memory_stats()
         m = pl_module.last_val_metrics
-        if m is None or trainer.sanity_checking or int(trainer.global_step) == self._last_step:
-            return                                       # a step already recorded: the pass a resumed run repeats
-        step = self._last_step = int(trainer.global_step)
+        if m is None or trainer.sanity_checking:
+            return
+        step = int(trainer.global_step)
+        if step == self._last_step:                      # the pass a resumed run repeats, scored whole by the
+            self.metrics_at[step] = m                    # model: kept for results.json, not logged or counted
+            return
+        self._last_step = step
         self.n_validations += 1
         self.metrics_at[step] = m
         ee = pl_module.samples_seen / self.n_train

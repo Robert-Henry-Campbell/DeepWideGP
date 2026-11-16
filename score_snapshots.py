@@ -12,8 +12,8 @@ The test split is locked: scoring it needs --unlock_test, and every access is ap
 test_access.log in the run directory. Model selection belongs on the validation split.
 
 With --save_scores, per-person population-scale logits and labels of each scored snapshot are
-written to --scores_dir (default: scores/ beside the dataset). These are participant-level
-data and are never written into the run directory.
+written to --scores_dir (default: scores/ beside the dataset), owner-only. These are participant-level
+data: a folder in the run directory or in a git work tree is refused.
 """
 import argparse
 import csv
@@ -87,6 +87,19 @@ def chosen_trial(run):
     return run
 
 
+def refuse_shared_place(path, run_dir):
+    """Per-person scores are participant-level: never in the run directory or a git work tree
+    (CLAUDE.md section 3)."""
+    real, run = os.path.realpath(path), os.path.realpath(run_dir)
+    if real == run or real.startswith(run + os.sep):
+        raise SystemExit(f"--scores_dir {path} is inside the run directory; per-person scores belong under data/")
+    p = real
+    while p != os.path.dirname(p):
+        if os.path.exists(os.path.join(p, ".git")):
+            raise SystemExit(f"--scores_dir {path} is inside the git repository {p}; per-person scores belong under data/")
+        p = os.path.dirname(p)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, help="run directory (holds config.json), or a run that tuned itself")
@@ -105,6 +118,11 @@ def main(argv=None):
     snaps = pick_snapshots(a.run, a.snapshots)
     if not snaps:
         raise SystemExit("no snapshots match")
+    scores_dir = None
+    if a.save_scores:
+        base = a.scores_dir or os.path.join(config["dataset_dir"], "scores")
+        scores_dir = os.path.join(base, config["args"]["experiment"], config["args"]["exp_name"])
+        refuse_shared_place(scores_dir, a.run)
     if a.split == "test":
         if not a.unlock_test:
             raise SystemExit("the test split is locked: pass --unlock_test once model selection is finished")
@@ -128,14 +146,14 @@ def main(argv=None):
                     epoch_equiv=info["epoch_equiv"], train_seconds=info["train_seconds"], split=a.split)
         rows += M.to_rows(m, **meta)
         print(f"{tag}: mean AUROC {m['auroc_mean']:.4f}, mean cross-entropy {m['bce_mean']:.4f}", flush=True)
-        if a.save_scores:
-            base = a.scores_dir or os.path.join(config["dataset_dir"], "scores")
-            out_dir = os.path.join(base, config["args"]["experiment"], config["args"]["exp_name"])
-            os.makedirs(out_dir, mode=0o700, exist_ok=True)
+        if scores_dir:
+            os.makedirs(scores_dir, mode=0o700, exist_ok=True)
             sp = dm.splits[a.split] if a.split in dm.splits else dm._read_table(a.split, dm._row_of)
             iid = np.asarray(dm.store.samples)[sp["rows"]].astype(str)   # text, so the file loads without pickle
-            np.savez(os.path.join(out_dir, f"{a.split}_{tag}.npz"), iid=iid, labels=np.array(names),
+            path = os.path.join(scores_dir, f"{a.split}_{tag}.npz")
+            np.savez(path, iid=iid, labels=np.array(names),
                      logit_population=(logits - shift).astype(np.float32), y=y.astype(np.float32))
+            os.chmod(path, 0o600)
         del model
     if a.split in dm.splits and dm.splits["train"]["cov"].shape[1]:
         base_m = covariates_only(dm, a.split, names)

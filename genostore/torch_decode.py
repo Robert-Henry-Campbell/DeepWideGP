@@ -14,7 +14,8 @@ def unpack_codes(packed):
 
 def decode_packed(packed, ovr, width=None):
     """Torch twin of genostore.format.decode_packed: -> uint8 q [..., width]."""
-    codes = unpack_codes(packed)[..., :width]
+    codes = unpack_codes(packed)
+    codes = codes[..., :width] if width is not None and width != codes.shape[-1] else codes
     exc = codes == 3
     q = codes * 100                      # codes 0,1,2 -> 0,100,200 (code 3 wraps; overwritten next)
     n_exc = int(exc.sum())
@@ -29,13 +30,13 @@ def decode_segment(full, full_ovr, tail, tail_ovr, block_variants, tail_width, s
     """One RawRegion as tensors (absent parts empty) -> uint8 q [B, n]; twin of GenoStore.decode."""
     parts = []
     if full.numel():
-        nbf, bsz = full.shape[:2]
+        nbf, bsz = full.shape[0], full.shape[1]
         q = decode_packed(full, full_ovr)                                   # [nbf, B, W]
         parts.append(q.permute(1, 0, 2).reshape(bsz, nbf * block_variants))
     if tail.numel():
         parts.append(decode_packed(tail, tail_ovr, tail_width))
     q = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
-    return q[:, skip:skip + n]
+    return q[:, skip:skip + n] if skip or n != q.shape[1] else q
 
 
 def to_model_input(q, mean=None, inv_std=None):

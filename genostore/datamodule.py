@@ -109,6 +109,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.scaling = configs.scaling
         self.snp_embed = configs.snp_embed
         self.ve = configs.ve
+        self.shuffle = configs.shuffle
         self.snp_stats = getattr(configs, "snp_stats", "store")
         if getattr(configs, "non_add", False) or len(getattr(configs, "use_sim", "")) > 0:
             raise NotImplementedError("--non_add / --use_sim are only implemented for the legacy pickle loader")

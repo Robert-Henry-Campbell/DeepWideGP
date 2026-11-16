@@ -24,16 +24,11 @@ def _natural_key(c):
 
 def _runs_to_index(starts, lens):
     """Concatenated index of the half-open runs [start, start + len)."""
+    total = int(lens.sum())
+    if total == 0:
+        return np.empty(0, dtype=np.int64)
     ends = np.cumsum(lens)
-    return np.repeat(starts - (ends - lens), lens) + np.arange(int(lens.sum()), dtype=np.int64)
-
-
-def _exceptions(mp, b0, b1, rows):
-    """Exception bytes of ``rows`` in blocks [b0, b1) of one chromosome's maps."""
-    p0 = mp["ptr"][b0:b1][:, rows].astype(np.int64)
-    p1 = mp["ptr"][b0:b1][:, rows + 1].astype(np.int64)
-    idx = _runs_to_index((mp["bstart"][b0:b1, None] + p0).ravel(), (p1 - p0).ravel())
-    return np.asarray(mp["ovr"][idx]) if len(idx) else _EMPTY
+    return np.repeat(starts - (ends - lens), lens) + np.arange(total, dtype=np.int64)
 
 
 class GenoStore:
@@ -100,8 +95,9 @@ class GenoStore:
         if self._pid != os.getpid():        # forked DataLoader worker: do not share handles
             self._maps, self._pid = {}, os.getpid()
         chrom = str(chrom)
-        if chrom in self._maps:
-            return self._maps[chrom]
+        mp = self._maps.get(chrom)          # one read: threads sharing a store may reset _maps
+        if mp is not None:
+            return mp
         inf, p = self.info[chrom], chrom_paths(self.dir, chrom)
         n, m, nb = self.n_samples, inf["n_variants"], inf["n_blocks"]
         n_full = m // self.w
@@ -112,9 +108,9 @@ class GenoStore:
                           shape=(n, (tail_width + 3) // 4)) if tail_width else None)
         ovr = np.memmap(p["ovr"], dtype=np.uint8, mode="r") if inf["ovr_bytes"] else _EMPTY
         ptr = np.memmap(p["ptr"], dtype="<u4", mode="r", shape=(nb, n + 1))
-        self._maps[chrom] = {"full": full, "tail": tail, "ovr": ovr, "ptr": ptr, "n_full": n_full,
-                             "tail_width": tail_width, "bstart": np.asarray(inf["ovr_block_start"], dtype=np.int64)}
-        return self._maps[chrom]
+        mp = self._maps[chrom] = {"full": full, "tail": tail, "ovr": ovr, "ptr": ptr, "n_full": n_full,
+                                  "tail_width": tail_width, "bstart": np.asarray(inf["ovr_block_start"], dtype=np.int64)}
+        return mp
 
     def read_raw(self, chrom, rows, v0=0, v1=None):
         """Encoded genotypes of ``rows`` (int array) for variants [v0, v1) of ``chrom``."""
@@ -124,17 +120,23 @@ class GenoStore:
         if not (0 <= v0 < v1 <= m):
             raise IndexError(f"chr{chrom}: bad variant range [{v0}, {v1}) for {m} variants")
         rows = np.asarray(rows, dtype=np.int64)
-        n_full = mp["n_full"]
         b0, b1 = v0 // self.w, (v1 - 1) // self.w            # first and last block, inclusive
-        bf = min(b1 + 1, n_full)                             # full blocks are [b0, bf)
+        bf = min(b1 + 1, mp["n_full"])                       # full blocks are [b0, bf)
         full, full_ovr = None, _EMPTY
         if bf > b0:
             full = np.ascontiguousarray(mp["full"][b0:bf][:, rows, :])
-            full_ovr = _exceptions(mp, b0, bf, rows)
+            p0 = mp["ptr"][b0:bf][:, rows].astype(np.int64)
+            p1 = mp["ptr"][b0:bf][:, rows + 1].astype(np.int64)
+            idx = _runs_to_index((mp["bstart"][b0:bf, None] + p0).ravel(), (p1 - p0).ravel())
+            full_ovr = np.asarray(mp["ovr"][idx]) if len(idx) else _EMPTY
         tail, tail_ovr = None, _EMPTY
-        if b1 >= n_full:                                     # region reaches the narrow last block
+        if b1 >= mp["n_full"]:                               # region reaches the narrow last block
+            b = mp["n_full"]                                 # indexed: a ptr without this block raises
             tail = np.ascontiguousarray(mp["tail"][rows])
-            tail_ovr = _exceptions(mp, n_full, n_full + 1, rows)
+            p0 = mp["ptr"][b][rows].astype(np.int64)
+            p1 = mp["ptr"][b][rows + 1].astype(np.int64)
+            idx = _runs_to_index(mp["bstart"][b] + p0, p1 - p0)
+            tail_ovr = np.asarray(mp["ovr"][idx]) if len(idx) else _EMPTY
         return RawRegion(full, full_ovr, tail, tail_ovr, mp["tail_width"], v0 - b0 * self.w, v1 - v0)
 
     def decode(self, raw):

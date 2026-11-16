@@ -134,6 +134,7 @@ class Prefetcher(threading.Thread):
         if policy not in ("idle", "share"):
             raise ValueError("policy must be 'idle' or 'share'")
         self.policy, self.duty = policy, float(duty)
+        self.last_progress = time.time()
         self.max_ahead = None if max_ahead is None else int(max_ahead)
         self.contended_bps, self.probe_every, self.probe_s = contended_bps, probe_every, probe_s
         self.backoff_s, self.ride_cache = backoff_s, ride_cache
@@ -145,7 +146,6 @@ class Prefetcher(threading.Thread):
         self.bytes_done = self.bytes_from_cache = 0
         self.t_io = self.t_wait_idle = 0.0
         self.others_bps = float("nan")
-        self.last_progress = time.time()
 
     def set_consumed(self, pos):
         with self.cv:
@@ -242,8 +242,10 @@ class Prefetcher(threading.Thread):
                         continue
                     t_probe = time.perf_counter()
                 t0 = time.perf_counter()
-                for off in range(pos, pos + n, REQ_BYTES):
+                off = pos
+                while off < pos + n:
                     os.posix_fadvise(fd, off, min(REQ_BYTES, pos + n - off), os.POSIX_FADV_WILLNEED)
+                    off += REQ_BYTES
                 os.pread(fd, 1, pos + n - 1)      # returns once the (in-order) readahead reaches the last page
                 dt = time.perf_counter() - t0
                 self.t_io += dt

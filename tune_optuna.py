@@ -10,9 +10,10 @@ Start one worker per GPU; all workers of a study share one journal file and so o
 
 Everything after "--" is passed to the training code as for main_multilabel.py and fixes what
 is not searched. Each trial is an ordinary run, runs/<study>/trial_NNNN/. Searched: learning
-rate, weight decay, embedding dropout, accumulation and warm-up. The value maximised is the
+rate, weight decay, embedding dropout, accumulation and warm-up (--space full: also the
+class-weight exponent and cap, the sampler and the head's width). The value maximised is the
 trial's best mean validation AUROC; successive halving stops trailing trials (after
---min_validations passes, keeping one in three at each rung).
+--min_validations passes, keeping one in --reduction at each rung).
 """
 import argparse
 import json
@@ -38,6 +39,11 @@ def suggest(trial, cfg, space):
     if space != "deep":
         cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
         cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])
+    if space == "full":
+        cfg.gamma = trial.suggest_categorical("gamma", [0.0, 0.5, 1.0])
+        cfg.w_max = trial.suggest_categorical("w_max", [5.0, 20.0, 100.0])
+        cfg.sampler = trial.suggest_categorical("sampler", ["rotation", "shuffled"])
+        cfg.head_hidden = trial.suggest_categorical("head_hidden", [128, 256, 512])
 
 
 def open_study(name, run_dir, min_validations=2, reduction=3, seed=None, n_startup_trials=10, prune=True):
@@ -67,15 +73,18 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--study", required=True)
     ap.add_argument("--n_trials", type=int, default=10, help="trials this worker runs")
+    ap.add_argument("--space", choices=["optim", "full"], default="optim")
     ap.add_argument("--run_dir", default="runs")
     ap.add_argument("--min_validations", type=int, default=2)
+    ap.add_argument("--reduction", type=int, default=3)
+    ap.add_argument("--sampler_seed", type=int, default=1, help="seed of the TPE sampler (the project's seed)")
     a = ap.parse_args(own)
-    study = open_study(a.study, a.run_dir, a.min_validations, seed=1)      # the project's seed
+    study = open_study(a.study, a.run_dir, a.min_validations, a.reduction, a.sampler_seed)
 
     def objective(trial):
         cfg = parse_args(base)
         cfg.run_dir, cfg.experiment, cfg.exp_name = a.run_dir, a.study, f"trial_{trial.number:04d}"
-        suggest(trial, cfg, "optim")
+        suggest(trial, cfg, a.space)
         try:
             out = run_training(cfg, trial=trial)
         except torch.cuda.OutOfMemoryError:

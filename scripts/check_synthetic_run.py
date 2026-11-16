@@ -23,11 +23,11 @@ NULL_TRAIT, NULL_BAND = "null_f", (0.40, 0.60)
 MEAN = "mean over heritable traits"
 
 
-def bands(annot=False):
+def bands(annot=False, table=SEEDS_TABLE):
     """{trait: lowest acceptable validation AUROC}, plus the same for the mean over heritable traits."""
     arm = "annotated" if annot else "plain"
     by_trait, by_seed = {}, {}
-    with open(SEEDS_TABLE) as f:
+    with open(table) as f:
         for r in csv.DictReader(f):
             if r["arm"] != arm or r["trait"] == NULL_TRAIT:
                 continue

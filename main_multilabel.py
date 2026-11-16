@@ -4,11 +4,11 @@
     python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
         --exp_name <run> --final_pool atten --d_model 32 --e_layers 1 --batch_size 16 ...
 
-A run tunes itself on the free GPUs minus one (widedeepgp/tuning.py; methods.md section 8), and
-its model is always the network on top of the linear PRS (the linear model alone is an ablation);
---tune_trials 0 trains the given settings once, on the GPU this process sees. The dataset is
-<data_dir>/<label>/<rd_mode>/ in the genotype-store layout; widedeepgp/train.py says what a run
-writes.
+A run tunes itself on the free GPUs minus one (widedeepgp/tuning.py; methods.md section 8); with
+--wide on, the default, its model is always the network on top of the linear PRS (the linear model
+alone is an ablation; 'off' is the network alone, 'only' the linear model). --tune_trials 0 trains
+the given settings once, on the GPU this process sees. The dataset is <data_dir>/<label>/<rd_mode>/
+in the genotype-store layout; widedeepgp/train.py says what a run writes.
 """
 import os
 import sys

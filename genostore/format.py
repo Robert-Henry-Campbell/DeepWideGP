@@ -115,7 +115,7 @@ def decode_packed(packed, ovr, width=None):
     """
     packed = np.asarray(packed)
     lead, nbytes = packed.shape[:-1], packed.shape[-1]
-    codes = ((packed[..., None] >> SHIFTS) & 3).reshape(*lead, nbytes * 4)[..., :width]
+    codes = ((packed[..., None] >> SHIFTS) & 3).reshape(*lead, nbytes * 4)[..., :None if width == nbytes * 4 else width]
     q = VALUE_OF[codes]
     m = codes == 3
     n_exc = int(m.sum())
@@ -155,7 +155,7 @@ def chrom_paths(store_dir, chrom):
 
 
 def samples_digest(sample_ids):
-    return hashlib.sha256("".join(str(s) + "\n" for s in sample_ids).encode()).hexdigest()[:16]
+    return hashlib.sha256(b"".join(str(s).encode() + b"\n" for s in sample_ids)).hexdigest()[:16]
 
 
 def create_store(store_dir, sample_ids, block_variants=BLOCK_VARIANTS, provenance=None):

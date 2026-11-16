@@ -1,39 +1,23 @@
-# -*- coding: utf-8 -*-
 """Throttled sequential page-cache prefetcher (stdlib only).
 
-Why this exists
----------------
-The UKB .pgen files live on a rotational disk that other jobs seek on. Ordinary buffered
-reads then degrade to read_ahead_kb-sized (128 KB) requests that each wait for a scheduler
-slot: ~0.3 MB/s was measured for a plain sequential reader on 2026-11-10, i.e. days per
-chromosome. ``posix_fadvise(WILLNEED)`` lets us queue a *burst* of max_sectors_kb-sized
-requests at once, which the elevator serves as one sequential sweep (tens of MB/s), after
-which the real reader (pgenlib) finds every page already in the page cache.
+The UKB .pgen files live on a rotational disk that other jobs seek on, where buffered reads
+degrade to read_ahead_kb-sized (128 KB) requests that each wait for a scheduler slot (~0.3 MB/s
+measured on 2026-11-10: days per chromosome). ``posix_fadvise(WILLNEED)`` queues a burst of
+max_sectors_kb-sized requests at once, which the elevator serves as one sequential sweep (tens of
+MB/s); the real reader (pgenlib) then finds every page in the page cache.
 
-Politeness
-----------
-While our bursts are queued, other readers of the same disk are nearly starved, so their
-demand cannot be measured during a burst. We therefore go quiet for ``probe_s`` at intervals
-and read /proc/diskstats: bytes read from the disk during that window are all somebody
-else's. Two policies:
+Politeness: our queued bursts starve other readers, so their demand is measured in quiet probes
+(``probe_s`` with nothing of ours in flight; every disk read /proc/diskstats then counts is theirs).
+  idle (default)  never read while anyone else reads the disk: a burst only follows a quiet probe;
+                  when others start we stop within ``probe_every`` s and wait for the disk to be idle
+                  again, so the most another job loses is one ~0.3 s burst.
+  share           read alongside others, sleeping after each burst so our share of disk time is at
+                  most ``duty``: faster, but it slows them, so only when those jobs are yours to slow.
+Cache riding (``ride_cache``, default on): what another job reading the same file (e.g. a GWAS)
+has already put in the page cache is taken with non-blocking reads (preadv2 + RWF_NOWAIT), which
+never queue a request on the disk, so we follow that job at its pace even while the disk is busy.
 
-``idle`` (default)  never read while anyone else is reading the disk. A burst is issued only
-                    after a quiet probe saw no other activity; if others show up we stop
-                    within ``probe_every`` seconds and wait until the disk is idle again.
-                    The most this can cost another job is one ~0.3 s burst.
-``share``           read alongside others, sleeping after each burst so that our share of
-                    disk time is at most ``duty``. Faster for us, but it does slow the other
-                    readers, so only use it when those jobs are yours to slow down.
-
-Riding the cache
-----------------
-If another job is already reading the same file (e.g. a GWAS over the same .pgen), its
-reads put our data in the page cache. ``ride_cache`` (default on) consumes whatever is
-already cached with non-blocking reads (preadv2 + RWF_NOWAIT), which never queue a request
-on the disk, so we can follow such a job at its own pace even while the disk is "busy".
-
-Usable as a library (``Prefetcher``) or standalone to warm a whole file:
-    python -m genostore.prefetch /path/to/file.pgen
+    python -m genostore.prefetch /path/to/file.pgen      # warm a whole file
 """
 import argparse
 import ctypes
@@ -44,8 +28,6 @@ import threading
 import time
 
 REQ_BYTES = 1280 * 1024  # one WILLNEED call triggers at most max(io_pages, ra_pages) of readahead
-
-
 RWF_NOWAIT = 8
 
 
@@ -82,8 +64,7 @@ class CacheProbe:
             iov = _IoVec(ctypes.addressof(self.buf), want)
             r = _preadv2(self.fd, ctypes.byref(iov), 1, off + done, RWF_NOWAIT)
             if r < 0:
-                e = ctypes.get_errno()
-                if e not in (errno.EAGAIN, errno.EINTR):
+                if ctypes.get_errno() not in (errno.EAGAIN, errno.EINTR):
                     self.supported = False      # e.g. EOPNOTSUPP on this filesystem
                 break
             done += r
@@ -136,11 +117,9 @@ def disk_read_bytes(dev):
 class Prefetcher(threading.Thread):
     """Warm ``[start, end)`` of ``path`` into the page cache, sequentially, in bursts.
 
-    consumer protocol (optional):
-        pf.set_consumed(pos)   # the reader has finished with everything below ``pos``
-        pf.wait_until(pos)     # block until everything below ``pos`` has been prefetched
-    The prefetcher never runs more than ``max_ahead`` bytes ahead of the consumed position,
-    so prefetched pages are used before the kernel has a reason to evict them.
+    A reader may report pf.set_consumed(pos) (done with everything below ``pos``) and call
+    pf.wait_until(pos) (block until everything below ``pos`` is prefetched); the prefetcher then
+    stays at most ``max_ahead`` bytes ahead, so its pages are used before the kernel evicts them.
     """
 
     def __init__(self, path, start=0, end=None, burst_reqs=16, policy="idle", duty=0.5,
@@ -148,39 +127,26 @@ class Prefetcher(threading.Thread):
                  backoff_s=5.0, ride_cache=True, log=None, log_every=30.0):
         super().__init__(daemon=True)
         self.path = path
-        self.size = os.path.getsize(path)
-        self.start_pos = (start // REQ_BYTES) * REQ_BYTES
-        self.end = self.size if end is None else min(end, self.size)
+        size = os.path.getsize(path)
+        self.pos = self.consumed = (start // REQ_BYTES) * REQ_BYTES      # everything below pos is prefetched
+        self.end = size if end is None else min(end, size)
         self.burst_reqs = int(burst_reqs)
         if policy not in ("idle", "share"):
             raise ValueError("policy must be 'idle' or 'share'")
-        self.policy = policy
-        self.duty = float(duty)
-        self.backoff_s = backoff_s
-        self.t_wait_idle = 0.0
-        self.ride_cache = ride_cache
-        self.bytes_from_cache = 0
+        self.policy, self.duty = policy, float(duty)
         self.last_progress = time.time()
         self.max_ahead = None if max_ahead is None else int(max_ahead)
-        self.contended_bps = contended_bps
-        self.probe_every = probe_every
-        self.probe_s = probe_s
-        self.others_bps = float('nan')
-        self.log = log
-        self.log_every = log_every
+        self.contended_bps, self.probe_every, self.probe_s = contended_bps, probe_every, probe_s
+        self.backoff_s, self.ride_cache = backoff_s, ride_cache
+        self.log, self.log_every = log, log_every
         self.dev = disk_of(path)
-        self.pos = self.start_pos          # everything below pos is prefetched
-        self.consumed = self.start_pos
         self.cv = threading.Condition()
         self.stop_flag = False
         self.error = None
-        self.bytes_done = 0
-        self.t_sleep = 0.0
-        self.t_io = 0.0
-        self.contended_cycles = 0
-        self.cycles = 0
+        self.bytes_done = self.bytes_from_cache = 0
+        self.t_io = self.t_wait_idle = 0.0
+        self.others_bps = float("nan")
 
-    # ---- consumer side -------------------------------------------------------------
     def set_consumed(self, pos):
         with self.cv:
             if pos > self.consumed:
@@ -204,7 +170,6 @@ class Prefetcher(threading.Thread):
             self.stop_flag = True
             self.cv.notify_all()
 
-    # ---- worker --------------------------------------------------------------------
     def run(self):
         try:
             self._run()
@@ -223,20 +188,26 @@ class Prefetcher(threading.Thread):
         self.others_bps = (d1 - d0) / self.probe_s
         return self.others_bps > self.contended_bps
 
+    def _advance(self, pos, n, from_cache):
+        with self.cv:
+            self.pos = pos + n
+            self.bytes_done += n
+            if from_cache:
+                self.bytes_from_cache += n
+            self.last_progress = time.time()
+            self.cv.notify_all()
+
     def _run(self):
         fd = os.open(self.path, os.O_RDONLY)
         probe = None
         try:
-            contended = True                  # assume the disk is busy until a probe says otherwise
-            t_probe = -1e18                   # force a probe before the very first burst
+            contended, t_probe = True, -1e18      # the disk counts as busy until a probe says otherwise
             probe = CacheProbe(self.path) if self.ride_cache else None
             if probe is not None and not probe.supported:
                 probe.close()
                 probe = None
             riding = False
-            t_log = time.time()
-            b_log = 0
-            t_wait_log = 0.0
+            t_log, b_log, t_wait_log = time.time(), 0, 0.0
             while True:
                 with self.cv:
                     while (not self.stop_flag and self.max_ahead is not None
@@ -245,27 +216,20 @@ class Prefetcher(threading.Thread):
                     if self.stop_flag or self.pos >= self.end:
                         break
                     pos = self.pos
-                burst = min(self.burst_reqs * REQ_BYTES, self.end - pos)
+                n = min(self.burst_reqs * REQ_BYTES, self.end - pos)
                 if probe is not None:
-                    # Whatever is already cached (typically read by another job) costs the disk nothing.
-                    got = probe.cached(pos, burst)
+                    # whatever is already cached (typically read by another job) costs the disk nothing
+                    got = probe.cached(pos, n)
                     if got >= min(REQ_BYTES, self.end - pos):
                         got = self.end - pos if pos + got >= self.end else (got // 4096) * 4096
-                        with self.cv:
-                            self.pos = pos + got
-                            self.bytes_done += got
-                            self.bytes_from_cache += got
-                            self.last_progress = time.time()
-                            self.cv.notify_all()
+                        self._advance(pos, got, True)
                         b_log += got
                         riding = True
                         continue
                 if self.dev is not None and (contended or time.perf_counter() - t_probe >= self.probe_every):
                     contended = self._probe()
-                    self.t_sleep += self.probe_s
                     if self.policy == "idle" and contended:
-                        # Somebody else is using the disk: do not queue anything. Come back later
-                        # (the cached fast path above is retried first every time).
+                        # queue nothing while others read; the cached path above is retried first
                         if self.log is not None and time.time() - t_wait_log >= 300:
                             self.log(f"prefetch {os.path.basename(self.path)}: disk busy (others reading "
                                      f"{self.others_bps / 1e6:.1f} MB/s); waiting, at {self.pos / 1e9:.2f}/"
@@ -277,36 +241,24 @@ class Prefetcher(threading.Thread):
                         self.t_wait_idle += nap
                         continue
                     t_probe = time.perf_counter()
-                n = burst
                 t0 = time.perf_counter()
                 off = pos
                 while off < pos + n:
                     os.posix_fadvise(fd, off, min(REQ_BYTES, pos + n - off), os.POSIX_FADV_WILLNEED)
                     off += REQ_BYTES
-                # Wait for the burst: a blocking read of its last page returns once the
-                # (in-order) readahead has reached it.
-                os.pread(fd, 1, pos + n - 1)
+                os.pread(fd, 1, pos + n - 1)      # returns once the (in-order) readahead reaches the last page
                 dt = time.perf_counter() - t0
                 self.t_io += dt
                 if self.policy == "share" and contended and self.duty < 1.0:
-                    sleep_s = min(2.0, dt * (1.0 / self.duty - 1.0))
-                    time.sleep(sleep_s)
-                    self.t_sleep += sleep_s
-                self.cycles += 1
-                self.contended_cycles += int(contended)
-                with self.cv:
-                    self.pos = pos + n
-                    self.bytes_done += n
-                    self.last_progress = time.time()
-                    self.cv.notify_all()
+                    time.sleep(min(2.0, dt * (1.0 / self.duty - 1.0)))
+                self._advance(pos, n, False)
                 b_log += n
                 if self.log is not None and time.time() - t_log >= self.log_every:
                     el = time.time() - t_log
                     self.log(f"prefetch {os.path.basename(self.path)}: {self.pos / 1e9:.2f}/{self.end / 1e9:.2f} GB "
                              f"({b_log / el / 1e6:.1f} MB/s over the last {el:.0f}s; {self.bytes_from_cache / 1e9:.2f} GB "
                              f"taken from cache; waited for the disk {self.t_wait_idle / 60:.1f} min in total)")
-                    t_log = time.time()
-                    b_log = 0
+                    t_log, b_log = time.time(), 0
         finally:
             os.close(fd)
             if probe is not None:
@@ -319,7 +271,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Warm a file into the page cache with large queued reads.")
     ap.add_argument("path")
     ap.add_argument("--start", type=int, default=0)
-    ap.add_argument("--end", type=int, default=None)
+    ap.add_argument("--end", type=int)
     ap.add_argument("--policy", choices=["idle", "share"], default="idle",
                     help="idle: only read while nobody else reads the disk; share: read alongside others")
     ap.add_argument("--duty", type=float, default=0.5, help="with --policy share: max share of disk time")
@@ -329,8 +281,7 @@ def main(argv=None):
     def log(m):
         print(time.strftime("%H:%M:%S"), m, flush=True)
 
-    pf = Prefetcher(a.path, a.start, a.end, burst_reqs=a.burst, policy=a.policy, duty=a.duty, max_ahead=None,
-                    log=log, log_every=30.0)
+    pf = Prefetcher(a.path, a.start, a.end, burst_reqs=a.burst, policy=a.policy, duty=a.duty, max_ahead=None, log=log)
     t0 = time.time()
     pf.start()
     pf.join()

@@ -1,9 +1,5 @@
-# -*- coding: utf-8 -*-
-"""Reader for the DeepGP genotype store (numpy only; safe to use from DataLoader workers).
-
-Nothing is loaded up front except small indexes; genotypes are memory-mapped and only the
-rows asked for are read.
-"""
+"""Reader for the genotype store (numpy only; safe in DataLoader workers): genotypes are
+memory-mapped and only the rows asked for are read."""
 import glob
 import os
 import re
@@ -13,13 +9,10 @@ import numpy as np
 
 from .format import MISSING, decode_packed, read_json, chrom_paths
 
-# Raw (still encoded) genotypes of some rows for variants [v0, v0 + n) of one chromosome.
-#   full     : uint8 [n_full_blocks, B, block_bytes] or None   (full-width blocks)
-#   full_ovr : uint8 1-D, exception bytes for ``full`` in C order (block, sample, variant)
-#   tail     : uint8 [B, tail_bytes] or None                   (the chromosome's last, narrower block)
-#   tail_ovr : uint8 1-D
-#   skip     : variants to drop from the front after decoding (v0 is rarely block-aligned)
-#   n        : number of variants wanted
+# Encoded genotypes of some rows for variants [v0, v0 + n) of one chromosome: ``full`` uint8
+# [full blocks, B, block bytes] and ``tail`` uint8 [B, tail bytes] (the narrower last block), None
+# when absent, each with its exception bytes (C order: block, row, variant); after decoding,
+# ``skip`` variants are dropped from the front (v0 is rarely block-aligned).
 RawRegion = namedtuple("RawRegion", "full full_ovr tail tail_ovr tail_width skip n")
 
 _EMPTY = np.empty(0, dtype=np.uint8)
@@ -57,7 +50,6 @@ class GenoStore:
         self._maps = {}
         self._pid = None
 
-    # ---- small metadata ----------------------------------------------------------------
     @property
     def samples(self):
         if self._samples is None:
@@ -98,29 +90,28 @@ class GenoStore:
         cs = self.chroms if chrom is None else [str(chrom)]
         return sum(self.info[c]["base_bytes"] + self.info[c]["ovr_bytes"] for c in cs)
 
-    # ---- memory maps (opened lazily, once per process) ----------------------------------
     def _open(self, chrom):
+        """Memory maps of one chromosome, opened once per process."""
         if self._pid != os.getpid():        # forked DataLoader worker: do not share handles
             self._maps, self._pid = {}, os.getpid()
         chrom = str(chrom)
-        mp = self._maps.get(chrom)
-        if mp is None:
-            inf, p = self.info[chrom], chrom_paths(self.dir, chrom)
-            n, m, nb = self.n_samples, inf["n_variants"], inf["n_blocks"]
-            n_full = m // self.w
-            tail_width = m - n_full * self.w
-            full = (np.memmap(p["base"], dtype=np.uint8, mode="r", shape=(n_full, n, self.block_bytes))
-                    if n_full else None)
-            tail = (np.memmap(p["base"], dtype=np.uint8, mode="r", offset=n_full * n * self.block_bytes,
-                              shape=(n, (tail_width + 3) // 4)) if tail_width else None)
-            ovr = np.memmap(p["ovr"], dtype=np.uint8, mode="r") if inf["ovr_bytes"] else _EMPTY
-            ptr = np.memmap(p["ptr"], dtype="<u4", mode="r", shape=(nb, n + 1))
-            mp = {"full": full, "tail": tail, "ovr": ovr, "ptr": ptr, "n_full": n_full,
-                  "tail_width": tail_width, "bstart": np.asarray(inf["ovr_block_start"], dtype=np.int64)}
-            self._maps[chrom] = mp
+        mp = self._maps.get(chrom)          # one read: threads sharing a store may reset _maps
+        if mp is not None:
+            return mp
+        inf, p = self.info[chrom], chrom_paths(self.dir, chrom)
+        n, m, nb = self.n_samples, inf["n_variants"], inf["n_blocks"]
+        n_full = m // self.w
+        tail_width = m - n_full * self.w
+        full = (np.memmap(p["base"], dtype=np.uint8, mode="r", shape=(n_full, n, self.block_bytes))
+                if n_full else None)
+        tail = (np.memmap(p["base"], dtype=np.uint8, mode="r", offset=n_full * n * self.block_bytes,
+                          shape=(n, (tail_width + 3) // 4)) if tail_width else None)
+        ovr = np.memmap(p["ovr"], dtype=np.uint8, mode="r") if inf["ovr_bytes"] else _EMPTY
+        ptr = np.memmap(p["ptr"], dtype="<u4", mode="r", shape=(nb, n + 1))
+        mp = self._maps[chrom] = {"full": full, "tail": tail, "ovr": ovr, "ptr": ptr, "n_full": n_full,
+                                  "tail_width": tail_width, "bstart": np.asarray(inf["ovr_block_start"], dtype=np.int64)}
         return mp
 
-    # ---- reading -----------------------------------------------------------------------
     def read_raw(self, chrom, rows, v0=0, v1=None):
         """Encoded genotypes of ``rows`` (int array) for variants [v0, v1) of ``chrom``."""
         mp = self._open(chrom)
@@ -140,7 +131,7 @@ class GenoStore:
             full_ovr = np.asarray(mp["ovr"][idx]) if len(idx) else _EMPTY
         tail, tail_ovr = None, _EMPTY
         if b1 >= mp["n_full"]:                               # region reaches the narrow last block
-            b = mp["n_full"]
+            b = mp["n_full"]                                 # indexed: a ptr without this block raises
             tail = np.ascontiguousarray(mp["tail"][rows])
             p0 = mp["ptr"][b][rows].astype(np.int64)
             p1 = mp["ptr"][b][rows + 1].astype(np.int64)
@@ -149,7 +140,7 @@ class GenoStore:
         return RawRegion(full, full_ovr, tail, tail_ovr, mp["tail_width"], v0 - b0 * self.w, v1 - v0)
 
     def decode(self, raw):
-        """RawRegion -> uint8 q [B, n] (reference numpy decoder; the training path decodes on GPU)."""
+        """RawRegion -> uint8 q [B, n]; the numpy twin of torch_decode.decode_segment."""
         parts = []
         if raw.full is not None:
             nbf, bsz, _ = raw.full.shape
@@ -168,6 +159,5 @@ class GenoStore:
         """float32 dosage [len(rows), v1 - v0]; NaN = missing."""
         q = self.read_q(chrom, rows, v0, v1)
         d = q.astype(np.float32) / np.float32(self.meta["dosage_scale"])
-        if (q == MISSING).any():
-            d[q == MISSING] = np.nan
+        d[q == MISSING] = np.nan
         return d

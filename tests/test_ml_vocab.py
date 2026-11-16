@@ -83,12 +83,22 @@ def test_the_cov_embedding_step_is_still_the_published_module_s(tmp_path):
         assert torch.equal(model._embed(0, x), model.dataEmbed[0](x))
 
 
+def test_vocab_needs_the_linear_path_off():
+    """The linear PRS path's prior and learning rate assume standardised SNPs; vocab reads raw dosages."""
+    from types import SimpleNamespace
+    from widedeepgp.train import wide_hparams
+    for wide in ("on", "only"):
+        with pytest.raises(ValueError, match="use --wide off"):
+            wide_hparams(SimpleNamespace(wide=wide, snp_embed="vocab", prs_grid=None), None)
+    assert wide_hparams(SimpleNamespace(wide="off", snp_embed="vocab", prs_grid=None), None) == {}
+
+
 @gpu
 def test_a_vocab_model_trains(tmp_path):
-    """A short run with --snp_embed vocab trains and validates."""
+    """A short run with --snp_embed vocab (the network alone) trains and validates."""
     import widedeepgp.train as T
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
-    cfg = make_cfg(data_dir, "multi", snp_embed="vocab", run_dir=str(tmp_path / "runs"), experiment="t",
+    cfg = make_cfg(data_dir, "multi", snp_embed="vocab", wide="off", run_dir=str(tmp_path / "runs"), experiment="t",
                    exp_name="vocab", steps_per_epoch_equiv=12, val_per_epoch=2, stop_patience=0,
                    snapshots_per_decade=4, max_epoch_equiv=1.0)
     out = T.run_training(cfg)

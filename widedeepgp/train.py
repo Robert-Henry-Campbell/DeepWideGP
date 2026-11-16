@@ -132,6 +132,9 @@ def wide_hparams(cfg, dm):
     grid = parse_grid(getattr(cfg, "prs_grid", None))
     if grid and wide != "only":
         raise ValueError("--prs_grid trains one linear model per prior variance side by side; it needs --wide only")
+    if wide != "off" and getattr(cfg, "snp_embed", "cov") == "vocab":
+        raise ValueError("--snp_embed vocab reads raw dosages, and the linear PRS path assumes standardised "
+                         "SNPs (methods.md 4.10): use --wide off")
     if wide == "off":
         return {}
     from .losses import WideLoss
@@ -425,7 +428,8 @@ def run_training(cfg, trial=None, extra_callbacks=()):
               "covariates": dm.cov_names, "resumed": bool(resume),
               "covariate_scaling": ({"mean": [float(v) for v in dm.cov_cm[0]], "sd": [float(v) for v in dm.cov_cs[0]]}
                                     if getattr(dm, "cov_cm", None) is not None else None),
-              "snp_scaling": dm.snp_stats, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+              "snp_scaling": dm.snp_stats if dm.snp_mean is not None else "none",
+              "started": time.strftime("%Y-%m-%d %H:%M:%S"),
               "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
               "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), **code_version()}
     with open(os.path.join(run_dir, "config.json"), "w") as f:
@@ -461,7 +465,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
     m = runlog.metrics_at.get(int(state.get("global_step", -1)))
     if m is None:
         logits, y = predict_split(model, dm, "val", device)
-        m = M.per_label_metrics(logits, y, model.loss_fn.logit_shift.cpu().numpy(), model.label_names)
+        m = model.val_metrics(logits, y)            # as the pass computed them (with a grid: per grid point)
     out = {"run_dir": run_dir, "best_checkpoint": best_path, "best_val_auroc_mean": float(m["auroc_mean"]),
            "best_step": int(state.get("global_step", 0)), "best_samples_seen": int(state.get("samples_seen", 0)),
            "val": {name: {k: float(m[k][j]) for k in ("auroc", "ap", "bce")} for j, name in enumerate(m["labels"])},

@@ -47,6 +47,22 @@ def is_store_dataset(configs):
     return os.path.exists(os.path.join(dataset_dir(configs), "store.json"))
 
 
+def _numbers(df, cols, dtype, split):
+    """df[cols] as numbers. A cell that is not one is not quoted: it may be an ID or a phenotype
+    (CLAUDE.md section 3), and 'from None' keeps pandas' own message out of the traceback."""
+    try:
+        return df[cols].to_numpy(dtype=dtype)
+    except (TypeError, ValueError):
+        raise ValueError(f"samples_{split}.tsv: a cell of the columns {list(cols)} is not a number") from None
+
+
+def _check_binary(split, y):
+    """One label must be 0 or 1; the error counts the other values instead of listing them."""
+    n = int((~np.isin(y, [0, 1])).sum())
+    if n:
+        raise ValueError(f"{split} labels must be encoded as 0/1; {n} are not")
+
+
 def default_regions(store):
     return [[[c, 0, store.n_variants(c)]] for c in store.chroms]
 
@@ -177,9 +193,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         te = self._read_table("test", row_of)
         if not self.cont and not self.multilabel:
             for name, t in (("train", tr), ("test", te)):
-                vals = np.unique(t["y"])
-                if not np.all(np.isin(vals, [0, 1])):
-                    raise ValueError(f"{name} labels must be encoded as 0/1, found {vals.tolist()}")
+                _check_binary(name, t["y"])
         if self.multilabel and os.path.exists(os.path.join(self.dir, "samples_val.tsv")):
             self.splits = {"train": tr, "val": self._read_table("val", row_of), "test": te}
         else:
@@ -212,16 +226,16 @@ class SNPStoreDataModule(pl.LightningDataModule):
         rows = np.array([row_of[s] for s in df["IID"]], dtype=np.int64)
         if not self.multilabel:
             covs = [c for c in df.columns if c not in ("IID", "label")]
-            return {"rows": rows, "y": df["label"].to_numpy(), "cov": df[covs].to_numpy(dtype=np.float64)}
+            return {"rows": rows, "y": df["label"].to_numpy(), "cov": _numbers(df, covs, np.float64, split)}
         absent = [c for c in self.label_names + self.cov_names if c not in df.columns]
         if absent:
             raise KeyError(f"samples_{split}.tsv lacks the columns {absent} named in store.json")
-        y = df[self.label_names].to_numpy(dtype=np.float32)          # empty cell -> NaN -> not applicable
+        y = _numbers(df, self.label_names, np.float32, split)        # empty cell -> NaN -> not applicable
         bad = ~(np.isnan(y) | (y == 0) | (y == 1))
         if bad.any():
             col = self.label_names[int(np.argwhere(bad)[0, 1])]
             raise ValueError(f"samples_{split}.tsv: labels must be 0, 1 or empty; column {col} has other values")
-        cov = df[self.cov_names].to_numpy(dtype=np.float64)
+        cov = _numbers(df, self.cov_names, np.float64, split)
         if np.isnan(cov).any():
             raise ValueError(f"samples_{split}.tsv: covariates {self.cov_names} contain missing values")
         return {"rows": rows, "y": y, "cov": cov}
@@ -394,9 +408,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def eval_dataloder(self, pheno):
         sp = self._read_table(pheno, self._row_of)
         if not self.cont and not self.multilabel:
-            vals = np.unique(sp["y"])
-            if not np.all(np.isin(vals, [0, 1])):
-                raise ValueError(f"{pheno} labels must be encoded as 0/1, found {vals.tolist()}")
+            _check_binary(pheno, sp["y"])
         if self.scaling:
             if sp["cov"].shape[1]:
                 sp["cov"] = (sp["cov"] - self.cov_cm[0]) / self.cov_cs[0]

@@ -859,11 +859,13 @@ deliberately reproduced, so that the comparison with the published model is like
 
 The alternative value embedding, `--snp_embed vocab` (a table of 201 vectors, one per hundredth
 of a dosage, in place of the convolution), reads raw dosages: SNPs are not standardised for it.
-WideDeepGP indexes the table by the genotype store's own code, the dosage times 100 rounded (a
-missing dosage is 0). The published module's forward rounds to two decimals and then truncates
-in float32, which puts 6 of the 201 levels (0.53, 0.59, 1.05, 1.06, 1.17 and 1.18) one code low.
-Until 16 November 2026 WideDeepGP passed the dosages to the table unconverted, which fails at
-the first forward pass, so no run has used this option.
+WideDeepGP indexes the table by the genotype store's own code, the dosage times 100 rounded; a
+missing dosage takes the vector of dosage 0, where the convolution sees the mean. The published
+module's forward rounds to two decimals and then truncates in float32, which puts 6 of the 201
+levels (0.53, 0.59, 1.05, 1.06, 1.17 and 1.18) one code low. Because the linear PRS path
+(section 4.10) assumes standardised SNPs, vocab runs only with `--wide off`. Until 16 November
+2026 WideDeepGP passed the dosages to the table unconverted, which fails at the first forward
+pass, so no run has used this option.
 
 Two published options do not run: the parser's default pooling (`--final_pool concat`) and the
 SNP-only mode (`--dm snps`), which names a class that is not in the repository. WideDeepGP does
@@ -910,6 +912,17 @@ pair reads both ways, and reversing the input while exchanging the two blocks' w
 the output. With the Mamba-3 block the six-trait synthetic run passed the same bands as with the
 current block; this was the last of the five gates Mamba-3 had to pass before the pilot (record:
 `/mnt/sdg/robert/deepwidegp/runs/gate_evidence/multi6_mamba3_gate5`).
+
+Added on 16 November 2026: `tests/test_ml_vocab.py` checks that `--snp_embed vocab` looks up
+each of the store's 201 levels at its own code, equals the published module wherever the
+published conversion is right, refuses the linear PRS path, and trains (on a GPU), and that the
+default embedding is still the published one. `tests/test_genostore_identifiers.py` checks that
+no participant ID or value reaches an error, chained exceptions included (unknown participants
+are counted, a non-number cell is not quoted, other label values are counted), and that
+per-person scores are refused in a git work tree or a run directory. In `tests/test_ml_train.py`,
+on the CPU, a resumed run scores only what it lacks: the pass it repeats once, an earlier best
+step once more, with a grid as its validation passes did, and results.json matches metrics.csv
+in each case.
 
 ## 13. Software and reproduction
 

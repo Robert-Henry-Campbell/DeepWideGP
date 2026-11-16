@@ -217,6 +217,58 @@ def test_the_pass_a_resume_repeats_is_kept_for_results_but_not_logged_again(tmp_
     assert (later.n_validations, len(later.history), open(tmp_path / "metrics.csv").read()) == (1, 1, rows)
 
 
+@pytest.mark.parametrize("branch, grid", [("repeated", None), ("earlier", None), ("earlier", [0.1, 1.0, 10.0])])
+def test_a_resumed_run_scores_only_what_it_lacks(tmp_path, monkeypatch, branch, grid):
+    """--wide only, on the CPU. A resumed run rescores the pass it repeats on the whole tuning set;
+    results.json takes the best step's metrics from that when it is the best pass, and scores an
+    earlier best step from its checkpoint as a validation pass would (with a grid: per grid point).
+    Either way results.json holds what metrics.csv recorded for the best step."""
+    import inspect
+    import pytorch_lightning as pl
+    import widedeepgp.train as T
+
+    class Freeze(pl.Callback):                     # after the first pass nothing changes: it stays the best
+        def on_validation_end(self, trainer, pl_module):
+            for group in trainer.optimizers[0].param_groups:
+                group["lr"] = 0.0
+
+    class NoLearning(pl.Callback):
+        def on_train_start(self, trainer, pl_module):
+            for group in trainer.optimizers[0].param_groups:
+                group["lr"] = 0.0
+
+    callers, predict = [], T.predict_split
+
+    def record(*a, **k):
+        callers.append(inspect.stack()[1].function)
+        return predict(*a, **k)
+
+    monkeypatch.setattr(T, "predict_split", record)
+
+    def scorings():                                # a grid run's per-disease model is always scored once more
+        return [c for c in callers if c != "write_per_disease"]
+
+    data_dir, _ = synthetic_dataset(tmp_path, n=300, snps=60)
+    over = dict(wide="only", lr=3e-3, prs_grid=grid, run_dir=str(tmp_path / "runs"), experiment="t", exp_name="r",
+                steps_per_epoch_equiv=12, val_per_epoch=2, stop_patience=0, snapshots_per_decade=4)
+    first = T.run_training(make_cfg(data_dir, "multi", max_epoch_equiv=0.5 if branch == "repeated" else 1.0, **over),
+                           extra_callbacks=[] if branch == "repeated" else [Freeze()])
+    assert (first["best_step"] == first["history"][-1]["step"]) == (branch == "repeated") and scorings() == []
+    out = T.run_training(make_cfg(data_dir, "multi", max_epoch_equiv=2.0, resume=True, **over),
+                         extra_callbacks=[NoLearning()])
+    assert scorings() == ["on_validation_epoch_end"] + (["run_training"] if branch == "earlier" else [])
+    assert out["best_step"] == first["best_step"]
+    with open(os.path.join(out["run_dir"], "metrics.csv")) as f:
+        logged = {(r["label"], r["metric"]): float(r["value"]) for r in csv.DictReader(f)
+                  if int(r["step"]) == out["best_step"]}
+    with open(os.path.join(out["run_dir"], "results.json")) as f:
+        res = json.load(f)
+    got = {(name, k): m[k] for name, m in res["val"].items() for k in m}
+    got.update({("MEAN", k): v for k, v in res["val_mean"].items()})
+    assert set(got) == set(logged) and len(got) == 3 * (6 * (len(grid) if grid else 1) + 1)
+    assert all(np.isclose(got[k], logged[k], rtol=0, atol=1e-6, equal_nan=True) for k in got), (got, logged)
+
+
 def test_a_resume_starts_from_the_latest_last_checkpoint(tmp_path):
     """The highest last-vN.ckpt, which must also be the newest of them."""
     from widedeepgp.train import last_checkpoint

@@ -45,7 +45,7 @@ def vocab_codes(x):
     """Raw dosages [B, L, 1] (the store's codes times 0.01) -> those codes [B, L], 0 to 200, which
     index --snp_embed vocab's table. DataEmbeddingVocab.forward truncates instead of rounding and
     puts 6 of the 201 levels one code low (methods.md 11)."""
-    return torch.round(x[:, :, 0] * 100).long()
+    return torch.round(x[:, :, 0].float() * 100).long()             # float32 first: exact for every level
 
 
 def positions_digest(pos):
@@ -408,12 +408,9 @@ class WideDeepGP(pl.LightningModule):
             # reach the best checkpoint, early stopping or the grid's choices: score all of it.
             from .train import predict_split
             logits, y = predict_split(self, self.trainer.datamodule, "val", self.device)
+        m = self.val_metrics(logits, y)
         if self.grid:
-            m = M.per_label_metrics(logits, np.tile(y, (1, self.n_grid)), self.loss_fn.logit_shift.cpu().numpy(),
-                                    self.out_names)
-            self._grid_means(m)
-        else:
-            m = M.per_label_metrics(logits, y, self.loss_fn.logit_shift.cpu().numpy(), self.label_names)
+            self._keep_grid_best(m)
         self.last_val_metrics = m
         self.log("val/auroc_mean", m["auroc_mean"], prog_bar=True)
         self.log("val/ap_mean", m["ap_mean"])
@@ -441,9 +438,19 @@ class WideDeepGP(pl.LightningModule):
             return None
         return int(len(splits["val"]["y"]))
 
+    def val_metrics(self, logits, y):
+        """A validation pass's metrics of logits [N, n_out] against y [N, n_labels]; with a grid, per
+        grid point, and the means over diseases each at its best grid point."""
+        shift = self.loss_fn.logit_shift.cpu().numpy()
+        if not self.grid:
+            return M.per_label_metrics(logits, y, shift, self.label_names)
+        m = M.per_label_metrics(logits, np.tile(y, (1, self.n_grid)), shift, self.out_names)
+        self._grid_means(m)
+        return m
+
     def _grid_means(self, m):
-        """With a grid: the means are over diseases, each at its best grid point in this pass
-        (by AUROC), and each disease's best grid point and pass so far is kept (best_*)."""
+        """With a grid: the means are over diseases, each at its best grid point in this pass (by
+        AUROC); m["grid_pick"] holds those points (-1 for a disease without a finite AUROC)."""
         n, k = self.n_labels, self.n_grid
         auc = np.asarray(m["auroc"], dtype=np.float64).reshape(k, n)
         pick = np.full(n, -1)
@@ -457,12 +464,18 @@ class WideDeepGP(pl.LightningModule):
             v = v[np.isfinite(v)]
             m[key + "_mean"] = float(v.mean()) if len(v) else (0.5 if key == "auroc" else float("nan"))
         m["grid_pick"] = pick.tolist()
+
+    def _keep_grid_best(self, m):
+        """Each disease's best grid point and pass so far (best_*), from a pass's metrics m."""
         trainer = getattr(self, "_trainer", None)
         if trainer is not None and trainer.sanity_checking:
             return
+        n = self.n_labels
+        auc = np.asarray(m["auroc"], dtype=np.float64).reshape(self.n_grid, n)
+        pick = np.asarray(m["grid_pick"])
         step = int(trainer.global_step) if trainer is not None else -1
         with torch.no_grad():
-            for j in np.flatnonzero(ok):
+            for j in np.flatnonzero(pick >= 0):
                 value = float(auc[pick[j], j])
                 if not value > float(self.best_auroc[j]):    # strictly better: a repeated pass changes nothing
                     continue

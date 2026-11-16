@@ -1,23 +1,14 @@
 """Generate a synthetic multi-disease dataset in the genotype-store layout.
 
-Six traits on a liability scale, chosen so that mistakes in the multi-disease training code
-show up as a failed check rather than as a slightly worse number:
-
-    shared_a  30%   share one set of causal SNPs (genetic correlation ``rho``) and
-    shared_b  10%   each has causal SNPs of its own; shared_a also depends on a
-    shared_c   5%   non-genetic factor
-    solo_d    15%   causal SNPs of its own only
-    solo_e     2%   causal SNPs of its own only; rare, so imbalance handling is exercised
-    null_f    10%   NO genetic signal; depends on the same non-genetic factor as shared_a,
-                    so the two co-occur. Its AUROC must stay at 0.5: anything else means the
-                    covariates, the sampler or the loss manufactured signal.
-
-Each heritable trait depends on a few SNPs of large effect (two shared, two of its own by
-default), like the single-disease smoke test: a small model finds them within minutes, which
-a diffuse polygenic signal would not allow.
-
-Per-SNP annotations: channel ``causal`` marks every causal SNP; the other three carry no
-information. Covariates (age, sex, six "PCs") have no effect on any trait.
+Six liability-threshold traits (TRAITS), chosen so that mistakes in the multi-disease training
+code show up as a failed check rather than as a slightly worse number: shared_a, shared_b and
+shared_c share one set of causal SNPs (genetic correlation ``rho``) besides their own; solo_d and
+solo_e have causal SNPs of their own only (solo_e is rare, so imbalance handling is exercised);
+null_f has NO genetic signal but the non-genetic factor of shared_a, so the two co-occur. Its
+AUROC must stay at 0.5: anything else means the covariates, the sampler or the loss manufactured
+signal. Each heritable trait depends on a few SNPs of large effect, like the single-disease
+smoke test, so a small model finds them within minutes. Annotation channel ``causal`` marks
+every causal SNP; the other channels and the covariates (age, sex, six "PCs") carry nothing.
 
 Writes <base_dir>/<name>/<rd_mode>/ with the genotype store, samples_{train,val,test}.tsv,
 store.json (naming labels and covariates), labels.json, annotations.npz and truth.json (the
@@ -49,6 +40,7 @@ ANNOTATIONS = ["causal", "noise_binary", "noise_continuous", "maf"]
 
 
 def _auc(score, y):
+    # ties ranked in order of position, not averaged as in widedeepgp.metrics.auroc: truth.json depends on it
     order = np.argsort(score, kind="mergesort")
     ranks = np.empty(len(score))
     ranks[order] = np.arange(1, len(score) + 1)
@@ -102,9 +94,7 @@ def generate(name, n_participants=12000, n_snps=220, base_dir="pukb/genes", rd_m
     cov[:, 1] = rng.binomial(1, 0.5, size=n_participants)
 
     causal = np.zeros(m, dtype=bool)
-    causal[shared_idx] = True
-    for v in own_idx.values():
-        causal[v] = True
+    causal[picks] = True                                    # the shared set and every trait's own
     annot = np.stack([causal.astype(np.float32), rng.binomial(1, 0.2, size=m).astype(np.float32),
                       rng.standard_normal(m).astype(np.float32), maf.astype(np.float32)], axis=1)
 

@@ -50,7 +50,6 @@ BOXES = [
      ["cross-entropy divided by each person's sampling", "rate, weighted by class, averaged per disease", "and then across diseases"], 0),
     ("head", 130.5, 8, 49.5, 18, "changed", "Output head", ["shared hidden layer (256 units),", "then one logit per disease (30)"], 0),
 ]
-TAG = {"new": "new", "changed": "changed", "same": ""}
 
 # what the figure shows, as a table (d_model 32, one layer, 30 outputs, 12 covariates)
 COMPONENTS = [
@@ -110,12 +109,11 @@ def box(ax, x, y, w, h, status, title, lines, copies):
                                     fc="white", ec=edge, lw=0.6, zorder=2 - 0.1 * k))
     ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=1.0", fc=face, ec=edge, lw=lw, zorder=3))
     top = y + h - 2.1
-    ax.text(x + 1.6, top, title, fontsize=7, fontweight="bold", color=INK, va="top", ha="left", zorder=4)
+    ax.text(x + 1.6, top, title, fontweight="bold", color=INK, va="top", ha="left", zorder=4)
     for i, line in enumerate(lines):
-        ax.text(x + 1.6, top - 3.2 * (i + 1), line, fontsize=7, color=INK2, va="top", ha="left", zorder=4)
-    if TAG[status]:
-        ax.text(x + w - 1.4, y + 1.3, TAG[status], fontsize=7, fontstyle="italic", color=INK2, va="bottom", ha="right",
-                zorder=4)
+        ax.text(x + 1.6, top - 3.2 * (i + 1), line, color=INK2, va="top", ha="left", zorder=4)
+    if changed:
+        ax.text(x + w - 1.4, y + 1.3, status, fontstyle="italic", color=INK2, va="bottom", ha="right", zorder=4)
 
 
 def arrow(ax, p, q):
@@ -136,8 +134,8 @@ def draw():
     ax.set_ylim(0, H)
     ax.axis("off")
     b = {name: (x, y, w, h) for name, x, y, w, h, *_ in BOXES}
-    for name, x, y, w, h, status, title, lines, copies in BOXES:
-        box(ax, x, y, w, h, status, title, lines, copies)
+    for _, *spec in BOXES:
+        box(ax, *spec)
 
     mid = lambda n: b[n][1] + b[n][3] / 2
     right = lambda n: b[n][0] + b[n][2]
@@ -163,31 +161,29 @@ def draw():
     arrow(ax, (x_rail, mid("genotypes")), (b["genotypes"][0], mid("genotypes")))
     # the linear PRS path reads every SNP and the covariates from the batch; its logits join the head's
     arrow(ax, (x_rail, mid("prs")), (b["prs"][0], mid("prs")))
-    ax.text((x_rail + b["prs"][0]) / 2 + 0.8, mid("prs") + 0.9, "all SNPs,", fontsize=7, color=MUTED, ha="center",
-            va="bottom")
-    ax.text((x_rail + b["prs"][0]) / 2 + 0.8, mid("prs") - 0.9, "covariates", fontsize=7, color=MUTED, ha="center",
-            va="top")
+    ax.text((x_rail + b["prs"][0]) / 2 + 0.8, mid("prs") + 0.9, "all SNPs,", color=MUTED, ha="center", va="bottom")
+    ax.text((x_rail + b["prs"][0]) / 2 + 0.8, mid("prs") - 0.9, "covariates", color=MUTED, ha="center", va="top")
     x_join = b["head"][0] + 9
     line(ax, [(right("prs"), mid("prs")), (x_join, mid("prs"))])
     arrow(ax, (x_join, mid("prs")), (x_join, b["head"][1] + b["head"][3]))
-    ax.text(x_join + 1.2, (mid("prs") + b["head"][1] + b["head"][3]) / 2, "+ logits", fontsize=7, color=MUTED,
+    ax.text(x_join + 1.2, (mid("prs") + b["head"][1] + b["head"][3]) / 2, "+ logits", color=MUTED,
             ha="left", va="center")
 
     # labels on the long arrows
-    ax.text((right("batches") + b["loss"][0]) / 2, mid("batches") + 1.2, "labels", fontsize=7, color=MUTED, ha="center",
+    ax.text((right("batches") + b["loss"][0]) / 2, mid("batches") + 1.2, "labels", color=MUTED, ha="center",
             va="bottom", rotation=90)
-    ax.text((right("loss") + b["head"][0]) / 2, mid("head") + 1.2, "logits", fontsize=7, color=MUTED, ha="center",
+    ax.text((right("loss") + b["head"][0]) / 2, mid("head") + 1.2, "logits", color=MUTED, ha="center",
             va="bottom", rotation=90)
     # the bracket over the per-chromosome parts
     x0, x1, yb = b["genotypes"][0], right("pool") + 1.8, Y_CHR + 16 + 4.6
     line(ax, [(x0, yb - 1.2), (x0, yb), (x1, yb), (x1, yb - 1.2)])
     ax.text((x0 + x1) / 2, yb + 0.8, "22 chromosomes, each with its own embedding and encoder (weights not shared)",
-            fontsize=7, color=INK, ha="center", va="bottom")
+            color=INK, ha="center", va="bottom")
     # key
     for x, (face, edge, lw, label) in zip((4, 60), ((PLAIN, EDGE, 0.7, "as in single-phenotype DeepGP"),
                                                     (BLUE_TINT, BLUE, 1.1, "new or changed for many phenotypes"))):
         ax.add_patch(FancyBboxPatch((x, 1.6), 5, 3.2, boxstyle="round,pad=0,rounding_size=0.6", fc=face, ec=edge, lw=lw))
-        ax.text(x + 6.5, 3.2, label, fontsize=7, color=INK2, va="center", ha="left")
+        ax.text(x + 6.5, 3.2, label, color=INK2, va="center", ha="left")
     return fig
 
 

@@ -4,12 +4,10 @@
     python score_snapshots.py --run runs/<experiment>/<run>                       # every snapshot, validation set
     python score_snapshots.py --run ... --snapshots best --split test --unlock_test --save_scores
 
-Writes, in the run directory,
-    scores_<split>.csv            one row per snapshot, label and metric (AUROC, average
-                                  precision, population-scale cross-entropy), with what the
-                                  snapshot cost (steps, participants seen, training seconds),
-                                  plus rows for a covariates-only logistic model
-    scores_<split>_summary.csv    the last snapshot scored against the covariates-only model
+Writes, in the run directory, scores_<split>.csv (one row per snapshot, label and metric: AUROC,
+average precision and population-scale cross-entropy, with what the snapshot cost, plus rows for
+a covariates-only logistic model) and scores_<split>_summary.csv (the last snapshot against the
+covariates-only model).
 
 The test split is locked: scoring it needs --unlock_test, and every access is appended to
 test_access.log in the run directory. Model selection belongs on the validation split.
@@ -28,7 +26,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-_torch_load = torch.load
+_torch_load = torch.load                      # Lightning checkpoints hold Python objects (as main_multilabel.py)
 torch.load = lambda *a, **k: _torch_load(*a, **{**k, "weights_only": False})
 
 from widedeepgp import metrics as M
@@ -54,9 +52,9 @@ def covariates_only(dm, split, names):
 
 def pick_snapshots(run, which):
     """[(file relative to the run, its row of snapshots.csv)]. "best" is the checkpoint that
-    results.json names, when the run has finished, and "last" the one a resume would continue
-    from (train.last_checkpoint): a run directory copied and then resumed before RunCheckpoint
-    existed holds best-v1.ckpt and last-v1.ckpt beside the stale best.ckpt and last.ckpt."""
+    results.json names once the run has finished, "last" the one a resume would continue from:
+    a run copied and resumed before RunCheckpoint existed has best-v1.ckpt and last-v1.ckpt beside
+    stale best.ckpt and last.ckpt."""
     table = []
     path = os.path.join(run, "snapshots.csv")
     if os.path.exists(path):
@@ -64,24 +62,23 @@ def pick_snapshots(run, which):
             table = list(csv.DictReader(f))
     if which == "all":
         return [(r["file"], r) for r in table]
-    if which in ("best", "last"):
-        rel = os.path.join("checkpoints", which + ".ckpt")
-        results = os.path.join(run, "results.json")
-        if which == "best" and os.path.exists(results):
-            with open(results) as f:             # a path inside the run, which may have moved since
-                rel = os.path.join("checkpoints", os.path.basename(json.load(f)["best_checkpoint"]))
-        if which == "last":
-            latest = last_checkpoint(os.path.join(run, "checkpoints"))
-            if latest:
-                rel = os.path.relpath(latest, run)
-        return [(rel, {"snapshot": which, "step": "", "samples_seen": "", "epoch_equiv": "", "train_seconds": ""})]
-    want = {int(s) for s in which.split(",")}
-    return [(r["file"], r) for r in table if int(r["step"]) in want]
+    if which not in ("best", "last"):
+        want = {int(s) for s in which.split(",")}
+        return [(r["file"], r) for r in table if int(r["step"]) in want]
+    rel = os.path.join("checkpoints", which + ".ckpt")
+    results = os.path.join(run, "results.json")
+    if which == "last":
+        latest = last_checkpoint(os.path.join(run, "checkpoints"))
+        if latest:
+            rel = os.path.relpath(latest, run)
+    elif os.path.exists(results):
+        with open(results) as f:                 # a path inside the run, which may have moved since
+            rel = os.path.join("checkpoints", os.path.basename(json.load(f)["best_checkpoint"]))
+    return [(rel, {"snapshot": which, "step": "", "samples_seen": "", "epoch_equiv": "", "train_seconds": ""})]
 
 
 def chosen_trial(run):
-    """The folder to score: a run that tuned itself (widedeepgp/tuning.py) holds one folder per
-    trial, and its results.json names the chosen one, which lies inside the run's folder."""
+    """The folder to score: for a run that tuned itself, the chosen trial its results.json names."""
     path = os.path.join(run, "results.json")
     if os.path.exists(path) and not os.path.exists(os.path.join(run, "config.json")):
         with open(path) as f:
@@ -120,7 +117,7 @@ def main(argv=None):
     dm = build_data(cfg)
     names = config["model"]["label_names"]
 
-    rows, last = [], None
+    rows = []
     for rel, info in snaps:
         model, ckpt = load_model(os.path.join(a.run, rel), dm, a.device)
         logits, y = predict_split(model, dm, a.split, a.device)
@@ -131,7 +128,6 @@ def main(argv=None):
                     samples_seen=info["samples_seen"] or ckpt.get("samples_seen", ""),
                     epoch_equiv=info["epoch_equiv"], train_seconds=info["train_seconds"], split=a.split)
         rows += M.to_rows(m, **meta)
-        last = (tag, m)
         print(f"{tag}: mean AUROC {m['auroc_mean']:.4f}, mean cross-entropy {m['bce_mean']:.4f}", flush=True)
         if a.save_scores:
             base = a.scores_dir or os.path.join(config["dataset_dir"], "scores")
@@ -146,9 +142,8 @@ def main(argv=None):
         base_m = covariates_only(dm, a.split, names)
         rows += M.to_rows(base_m, snapshot="covariates_only", step="", samples_seen="", epoch_equiv="",
                           train_seconds="", split=a.split)
-        tag, m = last
         with open(os.path.join(a.run, f"scores_{a.split}_summary.csv"), "w", newline="") as f:
-            w = csv.writer(f)
+            w = csv.writer(f)                    # tag and m are the last snapshot scored
             w.writerow(["snapshot", "label", "n", "n_cases", "auroc", "auroc_covariates_only", "auroc_gain",
                         "bce", "bce_covariates_only"])
             for j, name in enumerate(names):

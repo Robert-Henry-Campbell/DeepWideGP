@@ -1,23 +1,17 @@
 #!/bin/bash
-# Build the second Python environment, widedeepgp-m3, for the Mamba-3 sequence block.
-#
-# Why a second environment: published DeepGP uses the bidirectional Mamba block of the
-# Vision-Mamba fork, which installs as `mamba_ssm`; Mamba-3 ships in upstream `mamba_ssm`
-# (installed from source). The two packages share a name and cannot be installed together.
-# Everything else is pinned to the versions of the existing widedeepgp environment.
+# Build the second Python environment, widedeepgp-m3, for the Mamba-3 sequence block. Published
+# DeepGP uses the Vision-Mamba fork, which installs as `mamba_ssm`; Mamba-3 ships in upstream
+# `mamba_ssm` (from source), so the two cannot share an environment. Everything else is pinned to
+# the versions of the widedeepgp environment.
 #
 #   bash scripts/setup_mamba3_env.sh [env_dir]      # default /mnt/sdg/robert/envs/widedeepgp-m3
+#   /mnt/sdg/robert/envs/widedeepgp-m3/bin/python main_multilabel.py --mixer mamba3 ...
 #
-# Afterwards:  /mnt/sdg/robert/envs/widedeepgp-m3/bin/python main_multilabel.py --mixer mamba3 ...
-#
-# Upstream mamba_ssm is installed WITHOUT its declared dependencies. Its metadata pulls in
-# tilelang, apache-tvm-ffi and quack-kernels, which serve the multi-input (MIMO) and
-# step-function kernels that DeepGP does not use, and which (11 Nov 2026):
-#   * upgrade torch to 2.14 and numpy to 2.x, breaking the pins above;
-#   * make `import mamba_ssm` fail on Python 3.10 (tvm_ffi raises AttributeError, which
-#     mamba3.py's `except ImportError` does not catch).
-# Without them the optional imports fall away cleanly and the single-input (SISO) kernels,
-# which need only Triton (it comes with PyTorch), work.
+# Upstream mamba_ssm goes in WITHOUT its declared dependencies (tilelang, apache-tvm-ffi and
+# quack-kernels, for multi-input and step kernels DeepGP does not use): on 11 Nov 2026 they
+# upgraded torch to 2.14 and numpy to 2.x, and made `import mamba_ssm` fail on Python 3.10
+# (tvm_ffi raises AttributeError, which mamba3.py's `except ImportError` misses). Without them
+# the single-input (SISO) kernels work; they need only Triton, which comes with PyTorch.
 set -euo pipefail
 ENV=${1:-/mnt/sdg/robert/envs/widedeepgp-m3}
 PYTHON=${PYTHON:-/usr/bin/python3.10}

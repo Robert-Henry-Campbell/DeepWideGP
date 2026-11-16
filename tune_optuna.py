@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Hyper-parameter search for the multi-disease model with Optuna.
+"""Stand-alone hyper-parameter search for the multi-disease model with Optuna (the search inside
+every run, widedeepgp/tuning.py, uses suggest, open_study and load_study from here).
 
 Start one worker per GPU; all workers of a study share one journal file and so one search:
 
@@ -8,20 +9,11 @@ Start one worker per GPU; all workers of a study share one journal file and so o
     CUDA_VISIBLE_DEVICES=3 python tune_optuna.py --study tune1 --n_trials 20 -- <same arguments>
 
 Everything after "--" is passed to the training code as for main_multilabel.py and fixes what
-is not searched. Each trial is an ordinary run under runs/<study>/trial_NNNN/ (TensorBoard,
-metrics, snapshots), trained by widedeepgp.train.run_training, the same function that trains
-the final model.
-
-Searched (--space optim): learning rate, weight decay, embedding dropout, accumulation, warm-up.
-With --space full, also the class-weight exponent and cap, the sampler and the head's width.
-Model width, depth, the sequence block and annotations are experimental axes: they are set on
-the command line, never searched.
-
-The value maximised is the best mean validation AUROC of the trial. After each validation pass
-the value is reported, and successive halving stops the trials that trail (``--min_validations``
-passes before a trial may be stopped, keeping one in ``--reduction`` at each rung).
-
-To look at a study without writing to its journal, open it with ``load_study``.
+is not searched. Each trial is an ordinary run, runs/<study>/trial_NNNN/. Searched: learning
+rate, weight decay, embedding dropout, accumulation and warm-up (--space full: also the
+class-weight exponent and cap, the sampler and the head's width). The value maximised is the
+trial's best mean validation AUROC; successive halving stops trailing trials (after
+--min_validations passes, keeping one in --reduction at each rung).
 """
 import argparse
 import json
@@ -29,31 +21,24 @@ import os
 import sys
 import time
 
-import torch
-
-_torch_load = torch.load
-torch.load = lambda *a, **k: _torch_load(*a, **{**k, "weights_only": False})
-
 import optuna
+import torch
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend
+from optuna.trial import TrialState
 
-from main_multilabel import parse_args
+from main_multilabel import parse_args        # which also lets torch.load read Lightning checkpoints
 from widedeepgp.train import run_training
 
 
 def suggest(trial, cfg, space):
-    if space == "deep":                                  # the search inside every run (widedeepgp/tuning.py):
-        #                                                  the deep network, on top of the fixed PRS
-        cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
-        cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
-        cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
-        return
+    """Set the searched settings on cfg; space "deep" (a run's network stage) searches the first three only."""
     cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
     cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
     cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
-    cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
-    cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])
+    if space != "deep":
+        cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
+        cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])
     if space == "full":
         cfg.gamma = trial.suggest_categorical("gamma", [0.0, 0.5, 1.0])
         cfg.w_max = trial.suggest_categorical("w_max", [5.0, 20.0, 100.0])
@@ -74,8 +59,7 @@ def open_study(name, run_dir, min_validations=2, reduction=3, seed=None, n_start
 
 
 def load_study(name, run_dir):
-    """An existing study, opened read-only to inspect it. open_study is for workers: opening a
-    study that exists with create_study still appends a record to the journal."""
+    """An existing study, read only (opening it with open_study appends a record to its journal)."""
     path = os.path.join(run_dir, name, "optuna_journal.log")
     if not os.path.exists(path):                  # the journal backend would create an empty one
         raise FileNotFoundError(f"no study journal at {path}")
@@ -84,8 +68,8 @@ def load_study(name, run_dir):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    base = argv[argv.index("--") + 1:] if "--" in argv else []
-    own = argv[:argv.index("--")] if "--" in argv else argv
+    cut = argv.index("--") if "--" in argv else len(argv)
+    own, base = argv[:cut], argv[cut + 1:]              # this worker's arguments, the training arguments
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--study", required=True)
     ap.add_argument("--n_trials", type=int, default=10, help="trials this worker runs")
@@ -98,7 +82,7 @@ def main(argv=None):
     study = open_study(a.study, a.run_dir, a.min_validations, a.reduction, a.sampler_seed)
 
     def objective(trial):
-        cfg = parse_args(base)                       # the defaults of main_multilabel.py
+        cfg = parse_args(base)
         cfg.run_dir, cfg.experiment, cfg.exp_name = a.run_dir, a.study, f"trial_{trial.number:04d}"
         suggest(trial, cfg, a.space)
         try:
@@ -106,19 +90,18 @@ def main(argv=None):
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             raise optuna.TrialPruned("out of GPU memory")
-        trial.set_user_attr("run_dir", out["run_dir"])
-        trial.set_user_attr("epoch_equivalents", out["epoch_equivalents"])
-        trial.set_user_attr("train_seconds", out["train_seconds"])
+        for key in ("run_dir", "epoch_equivalents", "train_seconds"):
+            trial.set_user_attr(key, out[key])
         return out["best_val_auroc_mean"]
 
     study.optimize(objective, n_trials=a.n_trials, gc_after_trial=True)
-    done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    pruned = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
-    summary = {"study": a.study, "trials": len(study.trials), "complete": len(done), "pruned": len(pruned),
-               "written": time.strftime("%Y-%m-%d %H:%M:%S")}
-    if done:
-        summary.update(best_value=study.best_value, best_params=study.best_params, best_trial=study.best_trial.number,
-                       best_run_dir=study.best_trial.user_attrs.get("run_dir"))
+    states = [t.state for t in study.trials]
+    summary = {"study": a.study, "trials": len(states), "complete": states.count(TrialState.COMPLETE),
+               "pruned": states.count(TrialState.PRUNED), "written": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if TrialState.COMPLETE in states:
+        best = study.best_trial
+        summary.update(best_value=best.value, best_params=best.params, best_trial=best.number,
+                       best_run_dir=best.user_attrs.get("run_dir"))
     with open(os.path.join(a.run_dir, a.study, "best.json"), "w") as f:
         json.dump(summary, f, indent=1)
     print(json.dumps(summary, indent=1))

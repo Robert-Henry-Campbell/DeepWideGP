@@ -1,30 +1,13 @@
-# -*- coding: utf-8 -*-
-"""Store-backed replacement for utils.SNPPCACHRDataModule.
+"""Store-backed replacement for utils.SNPPCACHRDataModule (main_genome.py takes either): the same
+batches, ([x_seq_1, ..., x_seq_k, cov], y) with x float32 [B, L_i, 1] and y [B, n_labels] (NaN where
+a label does not apply), but genotypes stay on disk in the store and are decoded on the GPU per
+batch (unpickled into RAM as float32, the full UKB imputed set would need ~10 TB).
 
-Same interface and same batches -- ([x_seq_1, ..., x_seq_22, cov], y) with x float32
-[B, L_i, 1] -- but genotypes stay on disk in the compact store and are decoded on the GPU
-per batch, instead of being unpickled into RAM as float32 (which needs ~10 TB for the full
-UKB imputed set).
-
-Dataset directory (same place the legacy pickles live, so --label/--rd_mode still select it):
-    <data_dir>/<label>/<rd_mode>/store.json          {"store": "<path>", "pos_mode": "index"|"pos",
-                                                       "regions": optional, see below}
-    <data_dir>/<label>/<rd_mode>/samples_train.tsv   IID <TAB> label <TAB> covariate columns...
-    <data_dir>/<label>/<rd_mode>/samples_test.tsv
-    <data_dir>/<label>/<rd_mode>/samples_<ve>.tsv    optional external cohorts (--ve)
-
-Many diseases at once (the widened model): store.json names the columns to use,
-    {"store": ..., "labels": ["I10", "E11", ...], "covariates": ["birth_year", "sex", "pc1", ...]}
-Then y is [B, n_labels] (0, 1, or NaN where a label does not apply), every column that is not
-named is ignored, and samples_val.tsv, when present, is the validation set (otherwise 15% of
-the training table is split off at random). Without a "labels" key nothing changes: one "label"
-column, every other column a covariate, stratified split.
-
-"regions" defines the input sequences. Default: one sequence per chromosome in the store.
-Otherwise a list with one entry per sequence, each a list of [chrom, start, stop] segments
-(variant indices, stop exclusive) that are concatenated -- this is how sub-chromosome blocks,
-or sequences spanning several chromosomes, are expressed.
+A dataset directory <data_dir>/<label>/<rd_mode>/ holds store.json (keys in genostore/README.md; a
+"regions" segment [chrom, start, stop] excludes stop), samples_{train,test}.tsv, and when used
+samples_val.tsv (datasets with named labels) and samples_<ve>.tsv (external cohorts, --ve).
 """
+import hashlib
 import json
 import os
 
@@ -74,6 +57,10 @@ class LazyVariantIDs:
         return np.asarray(self._load(), dtype=dtype)
 
 
+def _as_tensor(a):
+    return torch.empty(0, dtype=torch.uint8) if a is None else torch.from_numpy(np.ascontiguousarray(a))
+
+
 class StoreBatchDataset(Dataset):
     """Indexing with a *list of sample indices* returns that whole batch, still encoded."""
 
@@ -101,10 +88,7 @@ class StoreBatchDataset(Dataset):
             segs = []
             for c, v0, v1 in seq:
                 r = self._gs.read_raw(c, rows, v0, v1)
-                segs.append([torch.from_numpy(r.full) if r.full is not None else torch.empty(0, dtype=torch.uint8),
-                             torch.from_numpy(np.ascontiguousarray(r.full_ovr)),
-                             torch.from_numpy(r.tail) if r.tail is not None else torch.empty(0, dtype=torch.uint8),
-                             torch.from_numpy(np.ascontiguousarray(r.tail_ovr))])
+                segs.append([_as_tensor(a) for a in (r.full, r.full_ovr, r.tail, r.tail_ovr)])
             geno.append(segs)
         out = {"geno": geno, "y": torch.from_numpy(self.y[bi])}
         if self.cov is not None:
@@ -125,7 +109,6 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.scaling = configs.scaling
         self.snp_embed = configs.snp_embed
         self.ve = configs.ve
-        self.shuffle = configs.shuffle
         self.snp_stats = getattr(configs, "snp_stats", "store")
         if getattr(configs, "non_add", False) or len(getattr(configs, "use_sim", "")) > 0:
             raise NotImplementedError("--non_add / --use_sim are only implemented for the legacy pickle loader")
@@ -172,16 +155,13 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.pos_chr = [self._positions(seq) for seq in self.regions]
         self.seq_len = [len(g) for g in self.genes_chr]
 
-        row_of = {s: i for i, s in enumerate(self.store.samples)}
-        tr = self._read_table("train", row_of)
-        te = self._read_table("test", row_of)
-        if not self.cont and not self.multilabel:
-            for name, t in (("train", tr), ("test", te)):
-                vals = np.unique(t["y"])
-                if not np.all(np.isin(vals, [0, 1])):
-                    raise ValueError(f"{name} labels must be encoded as 0/1, found {vals.tolist()}")
+        self._row_of = {s: i for i, s in enumerate(self.store.samples)}
+        tr = self._read_table("train", self._row_of)
+        te = self._read_table("test", self._row_of)
+        self._check_01("train", tr["y"])
+        self._check_01("test", te["y"])
         if self.multilabel and os.path.exists(os.path.join(self.dir, "samples_val.tsv")):
-            self.splits = {"train": tr, "val": self._read_table("val", row_of), "test": te}
+            self.splits = {"train": tr, "val": self._read_table("val", self._row_of), "test": te}
         else:
             # one label: stratified, as the pickle loader does; a label matrix cannot be stratified on
             strat = None if (self.cont or self.multilabel) else tr["y"]
@@ -192,11 +172,9 @@ class SNPStoreDataModule(pl.LightningDataModule):
                            "test": te}
         self.n_cov = int(self.splits["train"]["cov"].shape[1])
         self.n_labels = len(self.label_names) if self.multilabel else 1
-        self._row_of = row_of
         self._prepare_scaling()
         self._dev = {}
 
-    # ---- construction helpers ------------------------------------------------------------
     def _positions(self, seq):
         if self.pos_mode == "index":
             return np.arange(sum(v1 - v0 for _, v0, v1 in seq))
@@ -226,37 +204,45 @@ class SNPStoreDataModule(pl.LightningDataModule):
             raise ValueError(f"samples_{split}.tsv: covariates {self.cov_names} contain missing values")
         return {"rows": rows, "y": y, "cov": cov}
 
+    def _check_01(self, name, y):
+        """A single binary label column must hold 0/1 (named label columns are checked as they are read)."""
+        if self.cont or self.multilabel:
+            return
+        vals = np.unique(y)
+        if not np.all(np.isin(vals, [0, 1])):
+            raise ValueError(f"{name} labels must be encoded as 0/1, found {vals.tolist()}")
+
     def _prepare_scaling(self):
         self.snp_mean = self.snp_inv_std = None
+        if not self.scaling:
+            return
         tr = self.splits["train"]
-        if self.scaling:
-            if self.snp_embed == "cov":
-                if self.snp_stats == "train":
-                    mean, std = self._train_snp_stats(tr["rows"])
-                else:                       # statistics stored with the genotypes (all store samples)
-                    mean, std = [], []
-                    for seq in self.regions:
-                        ms = [self.store.stats(c) for c, _, _ in seq]
-                        mean.append(np.concatenate([m[0][v0:v1] for m, (_, v0, v1) in zip(ms, seq)]))
-                        std.append(np.concatenate([m[1][v0:v1] for m, (_, v0, v1) in zip(ms, seq)]))
-                self.snp_mean = [np.asarray(m, dtype=np.float32) for m in mean]
-                # a SNP with no variation carries no information: map it to 0 rather than inf/NaN
-                self.snp_inv_std = [np.where(s > 0, 1.0 / np.where(s > 0, s, 1.0), 0.0).astype(np.float32) for s in std]
-            if tr["cov"].shape[1]:
-                cm, cs = tr["cov"].mean(axis=0), tr["cov"].std(axis=0)
-                for sp in self.splits.values():
-                    sp["cov"] = (sp["cov"] - cm) / cs
-                self.cov_cm, self.cov_cs = [cm], [cs]
-            if self.cont:
-                lm, ls = tr["y"].mean(axis=0), tr["y"].std(axis=0)
-                for sp in self.splits.values():
-                    sp["y"] = (sp["y"] - lm) / ls
-                self.label_mean_std = (lm, ls)
+        if self.snp_embed == "cov":
+            if self.snp_stats == "train":
+                mean, std = self._train_snp_stats(tr["rows"])
+            else:                       # statistics stored with the genotypes (all store samples)
+                mean, std = [], []
+                for seq in self.regions:
+                    ms = [self.store.stats(c) for c, _, _ in seq]
+                    mean.append(np.concatenate([m[0][v0:v1] for m, (_, v0, v1) in zip(ms, seq)]))
+                    std.append(np.concatenate([m[1][v0:v1] for m, (_, v0, v1) in zip(ms, seq)]))
+            self.snp_mean = [np.asarray(m, dtype=np.float32) for m in mean]
+            # a SNP with no variation carries no information: map it to 0 rather than inf/NaN
+            self.snp_inv_std = [np.where(s > 0, 1.0 / np.where(s > 0, s, 1.0), 0.0).astype(np.float32) for s in std]
+        if tr["cov"].shape[1]:
+            cm, cs = tr["cov"].mean(axis=0), tr["cov"].std(axis=0)
+            for sp in self.splits.values():
+                sp["cov"] = (sp["cov"] - cm) / cs
+            self.cov_cm, self.cov_cs = [cm], [cs]
+        if self.cont:
+            lm, ls = tr["y"].mean(axis=0), tr["y"].std(axis=0)
+            for sp in self.splits.values():
+                sp["y"] = (sp["y"] - lm) / ls
+            self.label_mean_std = (lm, ls)
 
     def _train_snp_stats(self, rows):
-        """Training-split SNP statistics, computed once per (training rows, sequences) and kept in
-        the dataset directory: a pass over the training genotypes takes minutes at biobank scale."""
-        import hashlib
+        """Training-split SNP statistics, cached in the dataset directory per (training rows,
+        sequences): a pass over the training genotypes takes minutes at biobank scale."""
         h = hashlib.sha256(np.ascontiguousarray(rows, dtype=np.int64).tobytes())
         h.update(json.dumps(self.regions).encode())
         path = os.path.join(self.dir, f"snp_stats_train_{h.hexdigest()[:16]}.npz")
@@ -277,9 +263,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         """Per-SNP mean/std of the dosage over ``rows`` (what the legacy loader computes on train)."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ds = StoreBatchDataset(self.store_dir, self.regions, rows, None, np.zeros(len(rows)))
-        s0 = [torch.zeros(n, dtype=torch.float64, device=device) for n in self.seq_len]
-        s1 = [torch.zeros(n, dtype=torch.float64, device=device) for n in self.seq_len]
-        cnt = [torch.zeros(n, dtype=torch.float64, device=device) for n in self.seq_len]
+        s0, s1, cnt = ([torch.zeros(n, dtype=torch.float64, device=device) for n in self.seq_len] for _ in range(3))
         for i in range(0, len(rows), chunk):
             geno = ds[np.arange(i, min(len(rows), i + chunk))]["geno"]
             for k, q in enumerate(self.decode_q(geno, device)):
@@ -290,7 +274,6 @@ class SNPStoreDataModule(pl.LightningDataModule):
         std = [np.sqrt(np.maximum((b / c.clamp(min=1)).cpu().numpy() - m * m, 0.0)) for b, c, m in zip(s1, cnt, mean)]
         return mean, std
 
-    # ---- decoding (runs on the device the batch was moved to) ------------------------------
     def decode_q(self, geno, device=None):
         """Encoded batch -> list of uint8 q tensors [B, L_i], one per sequence."""
         w, out = self.store.w, []
@@ -312,9 +295,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
             self._dev[dev] = ([torch.from_numpy(m).to(dev) for m in self.snp_mean],
                               [torch.from_numpy(s).to(dev) for s in self.snp_inv_std])
         mean, inv = self._dev.get(dev, (None, None))
-        x_all = []
-        for k, q in enumerate(self.decode_q(batch["geno"])):
-            x_all.append(td.to_model_input(q, None if mean is None else mean[k], None if inv is None else inv[k]))
+        x_all = [td.to_model_input(q, None if mean is None else mean[k], None if inv is None else inv[k])
+                 for k, q in enumerate(self.decode_q(batch["geno"]))]
         if self.data_mode == "snps_covs":
             x_all.append(batch["cov"])
         if "target" in batch:
@@ -326,11 +308,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
 
     def annotations(self):
         """Per-SNP annotation vectors named by store.json, one float32 array [L_i, A] per input
-        sequence (following ``regions``), and their names. None if the dataset has none.
-
-        store.json: "annotations": {"file": "annotations.npz", "names": [...]}; the file holds
-        one array per chromosome under the key chr<chrom>.
-        """
+        sequence, and their names; (None, None) if the dataset has none."""
         with open(os.path.join(self.dir, "store.json")) as f:
             spec = json.load(f).get("annotations")
         if not spec:
@@ -347,11 +325,6 @@ class SNPStoreDataModule(pl.LightningDataModule):
             out.append(parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0))
         names = list(spec.get("names") or [f"a{i}" for i in range(out[0].shape[1])])
         return out, names
-
-    # ---- Lightning plumbing --------------------------------------------------------------
-    def shuffle_targets(self):
-        if self.shuffle:
-            self.splits["train"]["y"] = np.random.permutation(self.splits["train"]["y"])
 
     def _dataset(self, sp):
         cov = sp["cov"] if self.data_mode == "snps_covs" else None
@@ -393,10 +366,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
 
     def eval_dataloder(self, pheno):
         sp = self._read_table(pheno, self._row_of)
-        if not self.cont and not self.multilabel:
-            vals = np.unique(sp["y"])
-            if not np.all(np.isin(vals, [0, 1])):
-                raise ValueError(f"{pheno} labels must be encoded as 0/1, found {vals.tolist()}")
+        self._check_01(pheno, sp["y"])
         if self.scaling:
             if sp["cov"].shape[1]:
                 sp["cov"] = (sp["cov"] - self.cov_cm[0]) / self.cov_cs[0]

@@ -619,6 +619,31 @@ times too weak to hold the table and is gone). The run's log has `train/lr_table
 `train/grad_norm_table` beside the network's. Snapshots are written by the model
 (`WideDeepGP.snapshot`) with the table in bfloat16, which `load_model` reads back into float32.
 
+**The training recipe and its sources (17 November 2026, night).** After the first top-rung runs
+(next paragraph), Robert fixed the training recipe to the one Sigurdsson et al. (2023) used for their
+genome-local networks on 383,000 UK Biobank participants, the closest published system to this one,
+and `main_multilabel.py` carries it as its defaults: Adam learning rate 10⁻⁴ for the network with
+decoupled weight decay 10⁻³ (theirs: 1 × 10⁻⁴ and 1 × 10⁻³), dropout 0.5 (theirs, between layers),
+batch 64 (theirs), **40% of the SNPs set to missing at random on every training step** with the rest
+rescaled by 1 / 0.6 (`--input_mask 0.4`; theirs 40%, which they report was needed to stop the networks
+overfitting), a plateau schedule that multiplies every learning rate by 0.2 after ten validation passes
+without improvement (`--lr_schedule plateau`; theirs ×0.2 after ten validation steps), and early
+stopping after sixteen passes without improvement that may act only after a burn-in of 2,000
+optimiser steps (`--stop_patience 16 --stop_burnin 2000`; theirs: patience 16 to 20 with a burn-in of
+1,000 to 2,000 iterations). **The ridge warm start is the default starting point of every run of the
+scaling study**: the table starts from the rank-d_e decomposition of the rung's closed-form block
+ridge (section 4.11 above; `make_warm_start.py` in DeepWideGP-Scripts), so the tokens carry
+disease signal from the first step and the network learns to read them, and training then
+proceeds end to end. Nothing linear remains in the architecture; the warm start chooses where
+training begins. Under this recipe the table's epsilon was re-measured (batch 64, masking): a null
+entry's gradient has a root mean square of 3.3 × 10⁻⁸, so the default `--table_eps` is 2.5 × 10⁻⁷.
+What the search tunes under this recipe is the table's pace and decay only (`--tune_space table`;
+section 8). The other published systems were read for the same purpose and point the same way:
+Bellot et al. (2018) and van Hilten et al. (2021) trained networks only on pre-selected or
+gene-mapped variants, and the recent transformers either pre-select SNPs by GWAS (G2PT, Lee et al.,
+preprint) or prune to 13,615 SNPs before pretraining (SNPBERT, preprint); none trains a free table
+over a million SNPs, and none beats well-tuned linear scores by much on polygenic diseases.
+
 **Why these settings: the first top-rung runs (17 November 2026, afternoon).** With the first
 version (Adam with its usual epsilon, κ = 0.1, the loss penalty at τ = 1, the pruner acting after
 two validation passes and early stopping after eight), S1, S3 and S5 trained once each at the top
@@ -755,8 +780,11 @@ Three switches exist so that the choices above can be tested rather than assumed
 ## 6. Optimisation
 
 - **Optimiser.** AdamW (Loshchilov and Hutter, 2019). Until 17 November 2026 the default was a
-  constant learning rate, as in published DeepGP; since then `main_multilabel.py` defaults to a
-  linear warm-up of 200 optimiser steps and a cosine decay to zero over the run's budget
+  constant learning rate, as in published DeepGP; on 17 November `main_multilabel.py` moved to a
+  linear warm-up of 200 optimiser steps and a cosine decay, and the same night to the plateau
+  schedule of Sigurdsson et al. (2023), ×0.2 after ten validation passes without improvement
+  (`--lr_schedule plateau`, section 4.11); `cosine` remains an option:
+  a linear warm-up of `--warmup_steps` optimiser steps and a cosine decay to zero over the run's budget
   (section 4.11), and the SNP-mode recipes (the synthetic check and the classic comparator) pass
   `--lr_schedule constant --warmup_steps 0` to keep the published constant rate.
 - **Batch size and accumulation.** The batch is bounded by GPU memory, which grows with batch
@@ -826,7 +854,9 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   tuning participants costs 7 to 10 minutes at full size whatever the training size, so small
   training sets would otherwise spend most of their time validating.) Metrics are computed
   over all tuning participants at once, never per batch.
-- **Stopping and the model kept.** Training stops when the mean AUROC across diseases has not
+- **Stopping and the model kept.** Since 17 November 2026 early stopping may act only after
+  `--stop_burnin` optimiser steps (2,000 by default; Sigurdsson et al., 2023), and the default
+  patience is sixteen passes. Training stops when the mean AUROC across diseases has not
   improved for eight validation passes, or after 30 epoch-equivalents and at least 128,000
   participants seen (about 2,000 updates of 64). The checkpoint with the best mean tuning AUROC
   is the trial's model; section 8 says which trial is the run's.
@@ -898,7 +928,9 @@ November 2026, when the linear PRS path became an option): 12 trials proposed by
 tree-structured Parzen estimator (Akiba et al., 2019), each an ordinary training run, over the
 network's learning rate (10⁻⁴ to 3 × 10⁻³), weight decay (10⁻⁶ to 10⁻²), embedding dropout (0 to
 0.4) and, in blocks mode, the table's pace κ (`--table_kappa`, 0.01 to 0.03) and weight decay
-(`--table_decay`, 0.3 to 3; section 4.11), all but the dropout log-uniform. Asynchronous
+(`--table_decay`, 0.3 to 3; section 4.11), all but the dropout log-uniform; with `--tune_space table`
+the table's two settings alone, the rest held at the recipe of section 4.11, which is what the
+scaling study's chain does (six trials per cell). Asynchronous
 successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the trials whose mean
 tuning AUROC trails at each rung, after at least `--tune_min_validations` passes (2 by default; the
 chains of the scaling study use 8), and the
@@ -1224,6 +1256,8 @@ themselves, and untracked files, are not saved) and the Python interpreter that 
 
 - Akiba T, Sano S, Yanase T, Ohta T, Koyama M. Optuna: a next-generation hyperparameter
   optimization framework. *KDD* 2019.
+- Bellot P, de los Campos G, Pérez-Enciso M. Can deep learning improve genomic prediction of
+  complex human traits? *Genetics* 2018;210:809–819.
 - Bycroft C, Freeman C, Petkova D, et al. The UK Biobank resource with deep phenotyping and
   genomic data. *Nature* 2018;562:203–209.
 - Gazal S, Finucane HK, Furlotte NA, et al. Linkage disequilibrium-dependent architecture of
@@ -1246,8 +1280,12 @@ themselves, and untracked files, are not saved) and the Python interpreter that 
   case-control samples. *Genet Epidemiol* 2009;33:717–728.
 - Privé F, Albiñana C, Arbel J, Pasaniuc B, Vilhjálmsson BJ. Inferring disease architecture and
   predictive ability with LDpred2-auto. *Am J Hum Genet* 2023;110:2042–2055.
+- Sigurdsson AI, Louloudis I, Banasik K, et al. Deep integrative models for large-scale human genomics.
+  *Nucleic Acids Research* 2023;51:e67.
 - Sudlow C, Gallacher J, Allen N, et al. UK Biobank: an open access resource for identifying the
   causes of a wide range of complex diseases of middle and old age. *PLoS Med* 2015;12:e1001779.
+- van Hilten A, Kushner SA, Kayser M, et al. GenNet framework: interpretable deep learning for predicting
+  phenotypes from genetic data. *Communications Biology* 2021;4:1094.
 - Zheng Z, Liu S, Sidorenko J, et al. Leveraging functional genomic annotations and genome
   coverage to improve polygenic prediction of complex traits within and between ancestries.
   *Nat Genet* 2024;56:767–777.

@@ -24,7 +24,7 @@ def data_dir(tmp_path_factory):
 
 def _cfg(data_dir, **over):
     base = dict(input_mode="blocks", partition="uniform:2", mixer="transformer", final_pool="mean", n_heads=2, d_model=8,
-                embed_dim=4, lr_schedule="constant", warmup_steps=0)
+                embed_dim=4, lr_schedule="constant", warmup_steps=0, input_mask=0.0, stop_burnin=0)
     return make_cfg(data_dir, "multi", **{**base, **over})
 
 
@@ -164,6 +164,73 @@ def test_shapes_parameter_names_and_counts(data_dir):
     assert model.big_params() == list(model.encoder.tables)
 
 
+def test_input_masking_hides_a_share_of_the_snps_in_training_only(data_dir):
+    """With --input_mask 0.4 a training forward pass hides about 40% of the SNPs and rescales the rest, so the
+    pooled vectors vary between passes but keep their expectation; evaluation uses every SNP; the SNP-token model
+    and masks outside [0, 1) are refused."""
+    from widedeepgp.model import WideDeepGP
+    _, dm, model = _build(data_dir, input_mask=0.4, dropout=0.0)
+    x_all, _ = _val_batch(dm)
+    snps = x_all[:-1]
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for t in model.encoder.tables:
+            t.normal_()                                                       # the table starts at zero otherwise
+        full = model.encoder.pool(snps)
+        masked = torch.stack([model.encoder.pool(snps, [torch.rand(x.shape[:2]) < 0.4 for x in snps]) / 0.6 for _ in range(500)])
+    assert not torch.allclose(masked[0], masked[1])
+    deviation = (masked.mean(0) - full).abs().mean()                            # the same in expectation
+    assert deviation < 0.1 * full.abs().mean(), float(deviation)
+    model.eval()
+    with torch.no_grad():
+        a, b = model(x_all), model(x_all)
+    assert torch.equal(a, b)                                                  # no masking at evaluation
+    model.train()
+    with torch.no_grad():
+        assert not torch.equal(model(x_all), model(x_all))                       # masked, so passes differ
+    for change, message in ((dict(input_mask=1.0), "input_mask must be"), (dict(input_mode="snps", input_mask=0.4), "blocks-mode setting")):
+        with pytest.raises(ValueError, match=message):
+            WideDeepGP(dict(model.hp, **change), dm.pos_chr, blocks=dm.partition)
+
+
+def test_the_plateau_schedule_watches_the_tuning_auroc(data_dir):
+    _, dm, model = _build(data_dir, lr_schedule="plateau")
+    out = model.configure_optimizers()
+    sched = out["lr_scheduler"]
+    assert isinstance(sched["scheduler"], torch.optim.lr_scheduler.ReduceLROnPlateau)
+    assert (sched["monitor"], sched["interval"], sched["scheduler"].factor, sched["scheduler"].patience, sched["scheduler"].mode) == \
+        ("val/auroc_mean", "epoch", 0.2, 10, "max")
+    assert len(out["optimizer"].param_groups) == 2
+
+
+def test_early_stopping_waits_for_the_burn_in(monkeypatch):
+    from types import SimpleNamespace
+    from pytorch_lightning.callbacks import EarlyStopping
+    from widedeepgp.callbacks import EarlyStoppingOnce
+    checks = []
+    monkeypatch.setattr(EarlyStopping, "_run_early_stopping_check", lambda self, trainer: checks.append(trainer.global_step))
+    stop = EarlyStoppingOnce(monitor="val/auroc_mean", mode="max", patience=1, burnin=100)
+    for step in (10, 50, 99):
+        stop._run_early_stopping_check(SimpleNamespace(global_step=step))
+    assert checks == []                                                       # nothing counts before 100 steps
+    stop._run_early_stopping_check(SimpleNamespace(global_step=120))
+    stop._run_early_stopping_check(SimpleNamespace(global_step=120))        # a repeated pass counts once
+    assert checks == [120] and stop.burnin == 100
+
+
+def test_the_table_only_search_space():
+    import optuna
+    import tune_optuna
+    from types import SimpleNamespace
+    study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=1))
+    cfg = SimpleNamespace(input_mode="blocks", lr=1e-4, l2=1e-3, dropout=0.5)
+    tune_optuna.suggest(study.ask(), cfg, "table")
+    assert (cfg.lr, cfg.l2, cfg.dropout) == (1e-4, 1e-3, 0.5)                  # untouched: the recipe's values stand
+    assert 0.01 <= cfg.table_kappa <= 0.03 and 0.3 <= cfg.table_decay <= 3.0
+    tune_optuna.suggest(study.ask(), cfg, "deep")
+    assert cfg.lr != 1e-4 or cfg.l2 != 1e-3 or cfg.dropout != 0.5
+
+
 def test_a_transformer_block_keeps_the_block_interface():
     from widedeepgp.blocks import make_block
     block = make_block(8, "transformer", n_heads=2, dropout=0.0)
@@ -270,7 +337,7 @@ def test_a_run_trains_snapshots_in_bfloat16_scores_and_resumes(data_dir, tmp_pat
     assert (b["partition"], b["n_blocks"], b["n_tokens"], b["embed_dim"], b["snp_code"]) == ("uniform:2", 66, 67, 4, "dosage")
     assert b["n_embedding_parameters"] + b["n_non_embedding_parameters"] == config["n_parameters"] == out["n_parameters"]
     assert config["model"]["input_mode"] == "blocks" and config["model"]["final_pool"] == "mean"
-    assert config["model"]["lr_schedule"] == "cosine" and config["model"]["warmup_steps"] == 200   # the blocks-mode recipe
+    assert config["model"]["lr_schedule"] == "plateau" and config["model"]["input_mask"] == 0.4   # the recipe of Sigurdsson et al.
     assert config["n_encoder_parameters"] == b["n_parameters_by_module"]["mixer"] - 2 * 8
     snaps = sorted(os.listdir(os.path.join(run, "snapshots")))
     assert snaps and len(open(os.path.join(run, "snapshots.csv")).readlines()) == len(snaps) + 1
@@ -301,7 +368,7 @@ def test_a_search_records_the_new_scalars_and_a_retrain_reproduces_the_chosen_co
     assert out["chosen_stage"] == "deep" and set(out["best_params"]) == {"lr", "l2", "dropout", "table_kappa", "table_decay"}
     search = json.load(open(tmp_path / "t" / "s" / "search.json"))
     for key, value in (("input_mode", "blocks"), ("partition", "uniform:2"), ("snp_code", "dosage"), ("embed_dim", 4),
-                       ("table_kappa", 0.03), ("table_decay", 1.0), ("table_eps", 1e-7), ("tune_min_validations", 2),
+                       ("table_kappa", 0.03), ("table_decay", 1.0), ("table_eps", 2.5e-7), ("tune_min_validations", 8),
                        ("mixer", "transformer"), ("wide", "off")):
         assert search[key] == value
     trial = json.load(open(os.path.join(tmp_path / "t" / "s", out["best_trial_dir"], "config.json")))
@@ -363,6 +430,10 @@ def test_parse_args_defaults_to_blocks_mode_with_the_warm_up_and_cosine_recipe()
     cfg = main_multilabel.parse_args(["--label", "x"])
     assert (cfg.input_mode, cfg.wide, cfg.lr_schedule, cfg.warmup_steps, cfg.final_pool, cfg.embed_dim, cfg.snp_code,
             cfg.table_kappa, cfg.table_decay, cfg.table_eps, cfg.partition, cfg.init_encoder, cfg.freeze_encoder) == \
-        ("blocks", "off", "cosine", 200, "mean", 16, "dosage", 0.03, 1.0, 1e-7, None, None, False)
-    assert main_multilabel.parse_args(["--label", "x", "--input_mode", "snps"]).final_pool == "atten"
+        ("blocks", "off", "plateau", 0, "mean", 16, "dosage", 0.03, 1.0, 2.5e-7, None, None, False)
+    assert (cfg.lr, cfg.l2, cfg.dropout, cfg.batch_size, cfg.input_mask, cfg.stop_patience, cfg.stop_burnin,
+            cfg.tune_min_validations) == (1e-4, 1e-3, 0.5, 64, 0.4, 16, 2000, 8)
+    snps = main_multilabel.parse_args(["--label", "x", "--input_mode", "snps"])
+    assert (snps.final_pool, snps.input_mask) == ("atten", 0.0)                   # masking is a blocks-mode default
+    assert main_multilabel.parse_args(["--label", "x", "--input_mode", "snps", "--input_mask", "0.2"]).input_mask == 0.2
     assert main_multilabel.parse_args(["--label", "x", "--final_pool", "atten"]).final_pool == "atten"

@@ -97,7 +97,8 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
         "lr": float(cfg.lr), "l2": float(cfg.l2), "warmup_steps": int(cfg.warmup_steps),
         "lr_schedule": cfg.lr_schedule, "total_optimizer_steps": int(sched["optimizer_steps"]) if sched else 0,
         "wide": getattr(cfg, "wide", "off") or "off", **wide_hparams(cfg, dm),
-        "input_mode": getattr(cfg, "input_mode", "snps"), **block_hparams(cfg, dm),
+        "input_mode": getattr(cfg, "input_mode", "snps"), "input_mask": float(getattr(cfg, "input_mask", 0.0) or 0.0),
+        **block_hparams(cfg, dm),
     }
 
 
@@ -437,7 +438,8 @@ def run_training(cfg, trial=None, extra_callbacks=()):
                                 save_last=True, save_on_train_epoch_end=False, auto_insert_metric_name=False)
     callbacks = [best_ckpt, snaps, runlog] + list(extra_callbacks)
     if int(cfg.stop_patience) > 0:
-        callbacks.append(EarlyStoppingOnce(monitor=MONITOR, mode="max", patience=int(cfg.stop_patience)))
+        callbacks.append(EarlyStoppingOnce(monitor=MONITOR, mode="max", patience=int(cfg.stop_patience),
+                                           burnin=int(getattr(cfg, "stop_burnin", 0) or 0)))
     if trial is not None:
         callbacks.append(OptunaPruning(trial, MONITOR, steps_per_pass=sched["batches_per_validation"] // acc))
     logger = TensorBoardLogger(save_dir=run_dir, name="", version="tb", default_hp_metric=False)

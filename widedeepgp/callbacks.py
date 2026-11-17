@@ -200,16 +200,18 @@ class RunLog(pl.Callback):
 
 
 class EarlyStoppingOnce(EarlyStopping):
-    """Early stopping that counts every validation pass once: a resumed run repeats the pass its
-    checkpoint was written after, and the repeat must not use up patience."""
+    """Early stopping that counts every validation pass once (a resumed run repeats the pass its
+    checkpoint was written after, and the repeat must not use up patience) and not before ``burnin``
+    optimiser steps (Sigurdsson et al. 2023: a burn-in before the patience counts)."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, burnin=0, **kwargs):
         super().__init__(*args, **kwargs)
         self._seen_step = -1
+        self.burnin = int(burnin)
 
     def _run_early_stopping_check(self, trainer):
         step = int(trainer.global_step)
-        if step == self._seen_step:
+        if step == self._seen_step or step < self.burnin:
             return
         self._seen_step = step
         super()._run_early_stopping_check(trainer)

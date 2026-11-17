@@ -152,9 +152,12 @@ The blocks come from a partition file (`--partition`, required:
 dataset's store and recorded by digest in every checkpoint). Each block's sum is divided by the
 square root of its SNP count. The table has its own AdamW group: its learning rate
 `--table_kappa` √batch / √SNPs, a per-step weight decay `--table_decay` and a large epsilon
-`--table_eps` (so an entry with a tiny, inconsistent gradient barely moves); everything else
-trains by AdamW with a 200-step warm-up and a cosine decay. A run tunes itself: 12 Optuna trials
-over the learning rate, weight decay, dropout, `--table_kappa` and `--table_decay`.
+`--table_eps` (so an entry with a tiny, inconsistent gradient barely moves). The rest of the recipe is
+Sigurdsson et al. 2023's (methods.md 4.11): learning rate 1e-4, weight decay 1e-3, dropout 0.5,
+batch 64, 40% of SNPs masked on every training step (`--input_mask`), a plateau schedule, early
+stopping after 16 passes once 2,000 steps are done (`--stop_burnin`). The scaling study starts every
+run from the ridge warm start (`--init_encoder`). A run tunes itself: Optuna over `--table_kappa` and
+`--table_decay` (`--tune_space table`), or also the learning rate, weight decay and dropout (`run`).
 `pretrain_blocks.py` pretrains the
 first layer by masked-SNP prediction on the training rows and writes a file for `--init_encoder`.
 
@@ -217,8 +220,10 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--annot` | SNP mode: per-SNP annotation vectors as a gain and offset on the token embedding | off |
 | `--final_pool` | pooling of the mixer's tokens: blocks mode `mean` (the only setting it accepts); SNP mode `atten` (the published attention across the 23 vectors), `mean` or `last` | `mean` in blocks mode, `atten` in SNP mode |
 | `--precision bf16`, `--grad_ckpt`, `--accumulate N` | mixed precision (the first layer, covariate encoder and mixer in bf16; the mean over tokens, the head and the loss in float32), activation checkpointing (per mixer layer in blocks mode, per chromosome in SNP mode), gradient accumulation | off, off, 1 |
-| `--warmup_steps`, `--lr_schedule` | linear learning-rate warm-up (optimiser steps); `constant` or `cosine` decay after it; the table's and the network's rates follow the same schedule | 200, `cosine` (the SNP-mode recipes pass 0, `constant`, the published constant rate) |
-| `--val_per_epoch`, `--stop_patience`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, budget | 4, 8, 30 |
+| `--warmup_steps`, `--lr_schedule` | linear learning-rate warm-up (optimiser steps); `constant`, `cosine` (to zero over the budget) or `plateau` (x0.2 after 10 passes without improvement); the table's and the network's rates follow the same schedule | 0, `plateau` (the SNP-mode recipes pass `constant`) |
+| `--val_per_epoch`, `--stop_patience`, `--stop_burnin`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, optimiser steps before early stopping may act, budget | 4, 16, 2000, 30 |
+| `--input_mask` | blocks mode: share of SNPs set to missing on every training step, the rest rescaled | 0.4 |
+| `--tune_space` | what a run's search tunes: `table` (the table's pace and decay) or `run` (also learning rate, weight decay, dropout) | `run` |
 | `--eval_batch_size` | batch size for validation and scoring | the training batch size |
 | `--seed` | random seed (initial weights, dropout, batch order) | 1 (`main_genome.py`: 33) |
 | `--wide` | linear PRS path (SNP mode only): `off` (the network alone), `on` (beside the network), `only` (PRS and covariates alone) | `off` |

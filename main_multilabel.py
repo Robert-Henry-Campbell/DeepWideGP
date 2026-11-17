@@ -5,8 +5,9 @@
 
 A run tunes itself on the free GPUs minus one (widedeepgp/tuning.py; methods.md section 8). By
 default (--input_mode blocks, --wide off) its model is one network trained end to end from dosages:
-a per-SNP table pooled by LD block (--partition), then a mixer over the block tokens. The linear
-PRS path (--wide on, or only) is kept as an option and is never the reported model.
+a per-SNP table pooled by LD block (--partition), then a mixer over the block tokens, trained with
+the recipe of Sigurdsson et al. 2023 (DEFAULTS; methods.md sections 4.11 and 6). The linear PRS
+path (--wide on, or only) is kept as an option and is never the reported model.
 --tune_trials 0 trains the given settings once, on the GPU this process sees. The dataset is
 <data_dir>/<label>/<rd_mode>/ in the genotype-store layout; README.md says what a run writes.
 """
@@ -25,8 +26,11 @@ from widedeepgp.train import run_training
 
 # this script's defaults; the shared parser keeps main_genome.py's
 DEFAULTS = {"--snp_stats": "train", "--data_dir": "pukb/genes", "--seed": "1",    # the project's single seed
-            "--input_mode": "blocks", "--lr_schedule": "cosine", "--warmup_steps": "200",
-            "--tune_trials": "12", "--tune_gpus": "auto",
+            "--input_mode": "blocks",
+            # the recipe of Sigurdsson et al. 2023 (genome-local networks on UK Biobank; methods.md 4.11 and 6)
+            "--lr": "1e-4", "--l2": "1e-3", "--dropout": "0.5", "--batch_size": "64", "--lr_schedule": "plateau",
+            "--warmup_steps": "0", "--input_mask": "0.4", "--stop_patience": "16", "--stop_burnin": "2000",
+            "--tune_min_validations": "8", "--tune_trials": "12", "--tune_gpus": "auto",
             "--val_min_participants": "20000", "--val_max_epoch_equiv": "1", "--min_participants": "128000",
             "--snapshots_per_decade": "6", "--snapshots_max": "40"}
 
@@ -37,6 +41,8 @@ def parse_args(argv=None):
     cfg = args_initial([s for pair in DEFAULTS.items() for s in pair] + argv)
     if cfg.final_pool == "concat":            # the parser's default, which the model does not implement
         cfg.final_pool = "mean" if cfg.input_mode == "blocks" else "atten"
+    if cfg.input_mode != "blocks" and not any(a.startswith("--input_mask") for a in argv):
+        cfg.input_mask = 0.0                  # input masking is a blocks-mode setting; its default does not reach SNP mode
     return cfg
 
 

@@ -114,6 +114,9 @@ class WideDeepGP(pl.LightningModule):
                 raise ValueError("blocks mode pools the mixer's tokens by their mean (--final_pool mean)")
             if blocks is None or hp["partition_digest"] != blocks["digest"]:
                 raise ValueError("the block partition given does not match the one this model was configured for")
+        self.input_mask = float(hp.get("input_mask", 0.0) or 0.0)
+        if not 0.0 <= self.input_mask < 1.0 or (self.input_mask > 0 and not self.blocks):
+            raise ValueError("input_mask must be in [0, 1) and is a blocks-mode setting (the SNP-token model has none)")
         if self.wide == "only" and int(hp.get("annot_dim", 0)):
             raise ValueError("annotation vectors act on the deep network's input; --wide only has no deep network")
         if self.wide != "off" and hp.get("loss_outputs", "all") == "target":
@@ -280,7 +283,13 @@ class WideDeepGP(pl.LightningModule):
         """Blocks mode: the block tokens and the covariate token through the mixer, their mean beside the
         covariate vector into the head."""
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and x_all[0].is_cuda):
-            h = self.encoder(x_all[:-1] if self.use_cov else x_all)
+            snps = x_all[:-1] if self.use_cov else x_all
+            if self.training and self.input_mask > 0:    # input masking: a share of SNPs missing, the rest rescaled
+                masks = [torch.rand(x.shape[:2], device=x.device) < self.input_mask for x in snps]
+                pooled = self.encoder.pool(snps, masks) / (1.0 - self.input_mask)
+            else:
+                pooled = self.encoder.pool(snps)
+            h = self.encoder.tokens(pooled)
             if self.use_cov:
                 cov = self.cov_norm(self.covariate_encoder(x_all[-1]))
                 h = torch.cat([h, cov[:, None]], dim=1)
@@ -549,6 +558,10 @@ class WideDeepGP(pl.LightningModule):
         warm = int(self.hp.get("warmup_steps", 0) or 0)
         sched = self.hp.get("lr_schedule", "constant")
         total = int(self.hp.get("total_optimizer_steps", 0) or 0)
+        if sched == "plateau":                           # Sigurdsson et al. 2023: x0.2 after 10 passes without improvement
+            plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.2, patience=10)
+            return {"optimizer": opt, "lr_scheduler": {"scheduler": plateau, "monitor": "val/auroc_mean",
+                                                       "interval": "epoch", "strict": True}}
         if warm == 0 and sched == "constant":
             return opt                                   # as published: constant learning rate
 

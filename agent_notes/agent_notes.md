@@ -1213,3 +1213,23 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   decay; the programme (T0, grid top-down, top-rung side studies, lower-rung sweep and table width, scoring)
   and the GPU rule (up to three free GPUs, ten threads each) unchanged. Robert is to be told when the top
   rung is done.
+
+## 2026-11-17 (night, UTC) — The recipe of Sigurdsson et al. 2023, input masking, the ridge warm start as the start
+
+- Robert, after the literature read (methods 4.11 "The training recipe and its sources"): the ridge warm start
+  becomes every run's starting point, and the training recipe is fixed to Sigurdsson et al. 2023's (genome-local
+  networks, UK Biobank): learning rate 1e-4, weight decay 1e-3, dropout 0.5, batch 64, 40% input masking, a
+  plateau schedule, early stopping after 16 passes with a 2,000-step burn-in. Code: `--input_mask` (blocks mode:
+  a share of SNPs set to missing on every training step and the rest rescaled, in `WideDeepGP._block_logits`;
+  refused in SNP mode), `--lr_schedule plateau` (ReduceLROnPlateau x0.2, patience 10 passes, on val/auroc_mean,
+  in `configure_optimizers`), `--stop_burnin` (EarlyStoppingOnce skips checks before that step),
+  `--tune_space table` (tune_optuna.suggest: the table's pace and decay only; tuning.objective passes the space),
+  `main_multilabel.py` DEFAULTS carry the recipe (the SNP-mode scripts pass their own settings and
+  `--input_mask 0` explicitly). The table's epsilon default is 2.5e-7 (RMS null-entry gradient 3.3e-8 at batch
+  64 with masking). Tests: masking (expectation, train vs eval, refusals), the plateau scheduler, the burn-in,
+  the table-only space, the defaults' pins. README flag table, methods 4.11, 6, 7, 8 updated.
+- Chain (Scripts chains/run_chain.py): the comparators of every rung are built first (top rung on one GPU, the
+  others in turn on a second); the no-initialisation ablation at S3 runs meanwhile; T0 and every grid, sweep,
+  table-width and shape cell start from the rung's ridge warm start (`INIT = "ridge"`); the search is
+  `--tune_space table` with six trials (`SEARCH`); the recipe's flags are explicit. Not yet relaunched: the
+  previous chain (eps/decay changes, no warm start) is still running T0 as a reference until Robert decides.

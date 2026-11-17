@@ -31,14 +31,16 @@ from widedeepgp.train import run_training
 
 
 def suggest(trial, cfg, space):
-    """Set the searched settings on cfg; space "deep" (a run's network stage) searches the first three only."""
-    cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
-    cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
-    cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
-    if getattr(cfg, "input_mode", "snps") == "blocks":    # the table's pace and its per-step decay
+    """Set the searched settings on cfg: space "table" (blocks mode) the table's pace and per-step decay only,
+    "deep" (a run's network stage) also the learning rate, weight decay and dropout, the others more."""
+    if space != "table":
+        cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
+        cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
+        cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
+    if getattr(cfg, "input_mode", "snps") == "blocks":
         cfg.table_kappa = trial.suggest_float("table_kappa", 0.01, 0.03, log=True)
         cfg.table_decay = trial.suggest_float("table_decay", 0.3, 3.0, log=True)
-    if space != "deep":
+    if space not in ("deep", "table"):
         cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
         cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])
     if space == "full":

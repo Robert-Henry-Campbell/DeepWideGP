@@ -1179,3 +1179,9 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   the partitions. The masked-pretraining file under the simulated dataset was deleted (encoder-specific).
 - Not relaunched: without the readout the E0 gate at 13,199 participants is expected to fail (the probe),
   so where the gate sits is Robert's decision before the chain runs again.
+- Addendum (17:20 UTC): the blocks arms' synthetic seed bands re-measured without the readout (five seeds x two
+  mixers, three epoch-equivalents on the 8,000-participant six-trait store; scripts/multilabel_synthetic_seeds.csv,
+  commit 61e6af3): the three traits whose causal SNPs are shared by three diseases reach 0.77-0.79 for both
+  mixers (the SNP-token arm: 0.70-0.74), the two traits with two causal SNPs of their own stay at chance
+  (0.48-0.57), the null trait at 0.50. The bands therefore require 0.70-0.73 on the shared traits and nothing on
+  the solo ones; check_synthetic_run.py picks the arm from the run's configuration.

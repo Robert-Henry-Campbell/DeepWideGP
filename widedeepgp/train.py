@@ -102,8 +102,8 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
 
 
 def block_hparams(cfg, dm):
-    """Settings of blocks mode: the partition, the table's code, width, prior variance and learning
-    rate (blockencoder.table_learning_rate from --table_kappa)."""
+    """Settings of blocks mode: the partition, the table's code and width, and its optimiser (the learning rate
+    from --table_kappa by blockencoder.table_learning_rate, the weight decay and epsilon)."""
     if getattr(cfg, "input_mode", "snps") != "blocks":
         return {}
     if dm.partition is None:
@@ -111,8 +111,8 @@ def block_hparams(cfg, dm):
     batch_eff = int(cfg.batch_size) * max(1, int(cfg.accumulate))
     return {"partition": dm.partition["name"], "partition_digest": dm.partition["digest"],
             "n_blocks": int(dm.partition["n_blocks"]), "snp_code": cfg.snp_code, "embed_dim": int(cfg.embed_dim),
-            "table_var": float(cfg.table_var), "table_kappa": float(cfg.table_kappa),
-            "lr_table": table_learning_rate(cfg.table_kappa, cfg.table_var, batch_eff, int(sum(dm.seq_len))),
+            "table_kappa": float(cfg.table_kappa), "table_decay": float(cfg.table_decay), "table_eps": float(cfg.table_eps),
+            "lr_table": table_learning_rate(cfg.table_kappa, batch_eff, int(sum(dm.seq_len))),
             "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False))}
 
 

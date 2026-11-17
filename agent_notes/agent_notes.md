@@ -1185,3 +1185,31 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   mixers (the SNP-token arm: 0.70-0.74), the two traits with two causal SNPs of their own stay at chance
   (0.48-0.57), the null trait at 0.50. The bands therefore require 0.70-0.73 on the shared traits and nothing on
   the solo ones; check_synthetic_run.py picks the arm from the run's configuration.
+
+## 2026-11-17 (evening, UTC) — The table's optimiser after the first top-rung runs; the chain relaunched
+
+- The relaunched chain (real diseases only, T0 then the grid from the top rung down) showed the plain
+  blocks model learning nothing from the genotypes at 215,872 participants: T0's S1, S3 and S5 at fixed
+  settings reached mean tuning AUROCs 0.6610, 0.6624, 0.6619 against 0.6627 for a logistic model on the
+  covariates alone (fitted on the top rung's training split), and the 12-trial S1 search 0.6626. The logged
+  curves: at S3 the training loss fell for a third of the run and then rose while the table's sum of squares
+  grew a thousandfold and its gradient norm thirty-fold (Adam noise accumulating in the 20 million entries);
+  at S5 the table's gradient norm collapsed a hundredfold and the table shrank towards zero. Robert had the
+  chain killed and runs/blocks wiped, and asked for three changes before a second relaunch.
+- Code: the table's AdamW group now has its own epsilon (`--table_eps`, default 1e-7: about eight times the
+  measured per-entry gradient of a null SNP, RMS 1.3e-8 at batch 256 on the top rung with S3; median 6e-9,
+  99.9th percentile 8.5e-8, largest 3e-7) and a per-step weight decay (`--table_decay`, default 1, searched
+  log-uniform 0.3 to 3) in place of the loss penalty, which is gone (`--table_var` removed; `penalty()`
+  returns None in blocks mode; no `train/table_penalty`). The table's learning rate is now
+  `--table_kappa` sqrt(B)/sqrt(M) (no tau factor), kappa default 0.03, searched 0.01 to 0.03. `BlockEncoder.pool`
+  divides each block's sum by the square root of its SNP count (`block_scale`). New flag
+  `--tune_min_validations` (default 2) sets how many validation passes a trial completes before the pruner
+  may stop it (tuning.open_stage_study). Tests updated (test_ml_blocks: the optimiser group test, the pooling
+  and ridge tests with the 1/sqrt(n) scale, the search and retrain pins; test_ml_blocks_gpu: no penalty;
+  test_ml_entry_points: the tuner's parameter list). README and methods 4.11 (training; "why these settings"
+  with the top-rung numbers), 5.2, 8 and 12 updated.
+- Chain (Scripts chains/run_chain.py): `--table_eps 1e-7`, `--tune_min_validations 8`, `--stop_patience 16`,
+  20 epoch-equivalents; T0's fixed settings kappa 0.03 and decay 1; seed retrains pass the chosen kappa and
+  decay; the programme (T0, grid top-down, top-rung side studies, lower-rung sweep and table width, scoring)
+  and the GPU rule (up to three free GPUs, ten threads each) unchanged. Robert is to be told when the top
+  rung is done.

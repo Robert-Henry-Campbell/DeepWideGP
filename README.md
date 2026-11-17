@@ -149,10 +149,13 @@ transformer encoder layer (`--mixer transformer`), runs over the block tokens an
 token; the mean over the tokens, beside the covariate vector, feeds the head.
 The blocks come from a partition file (`--partition`, required:
 `data/reference/partitions/prive431`, `ldsplit2000` or `ldsplit5000`, checked against the
-dataset's store and recorded by digest in every checkpoint). The table has its own learning rate
-and an L2 penalty in the loss (`--table_var`, `--table_kappa`); everything else trains by AdamW
-with a 200-step warm-up and a cosine decay. A run tunes itself: 12 Optuna trials over the
-learning rate, weight decay, dropout and `--table_var`. `pretrain_blocks.py` pretrains the
+dataset's store and recorded by digest in every checkpoint). Each block's sum is divided by the
+square root of its SNP count. The table has its own AdamW group: its learning rate
+`--table_kappa` √batch / √SNPs, a per-step weight decay `--table_decay` and a large epsilon
+`--table_eps` (so an entry with a tiny, inconsistent gradient barely moves); everything else
+trains by AdamW with a 200-step warm-up and a cosine decay. A run tunes itself: 12 Optuna trials
+over the learning rate, weight decay, dropout, `--table_kappa` and `--table_decay`.
+`pretrain_blocks.py` pretrains the
 first layer by masked-SNP prediction on the training rows and writes a file for `--init_encoder`.
 
 **The SNP-token mode** (`--input_mode snps`) is the published network widened: one sequence of
@@ -181,7 +184,7 @@ python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <var
     --n_heads 4 --embed_dim 16 --precision bf16 --batch_size 256 --exp_name <run>
 python score_snapshots.py --run runs/default/<run> --split val --snapshots best   # the chosen model
 # one fixed setting, no search, on the GPU this process sees
-CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py ... --tune_trials 0 --table_var 1
+CUDA_VISIBLE_DEVICES=<gpu> python main_multilabel.py ... --tune_trials 0 --table_kappa 0.03 --table_decay 1
 # the first layer pretrained by masked-SNP prediction on the training rows, then a run started from it
 CUDA_VISIBLE_DEVICES=<gpu> python pretrain_blocks.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
     --partition <data>/reference/partitions/prive431 --embed_dim 16 --out <dataset dir>/blocks/pretrained_prive431.pt
@@ -202,7 +205,8 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--mixer` | `bimamba1` (the published block), `transformer` (a pre-norm `nn.TransformerEncoderLayer`, feed-forward width 4d, GELU) or `mamba3` (needs `scripts/setup_mamba3_env.sh`) | `bimamba1` |
 | `--snp_code` | blocks mode: `dosage` (one vector per SNP times its standardised dosage) or `genotype` (three vectors per SNP, for 0, 1 and 2 copies, interpolated; reads raw dosages) | `dosage` |
 | `--embed_dim` | blocks mode: width of the per-SNP table (d_e) | 16 |
-| `--table_var`, `--table_kappa` | blocks mode: prior variance τ of a table entry (the table's L2 penalty in the loss is Σ T² / (2 N τ), N the training participants) and the pace of its learning rate, κ τ √batch / √SNPs | 1 (searched over 0.01 to 100 in a search), 0.1 |
+| `--table_kappa`, `--table_decay`, `--table_eps` | blocks mode: the table's learning rate κ √batch / √SNPs, its AdamW weight decay (a per-step shrink of every entry) and its Adam epsilon (about eight times a null SNP's per-entry gradient at batch 256, measured 1.3e-8 at the top rung) | 0.03 (searched 0.01 to 0.03), 1 (searched 0.3 to 3), 1e-7 |
+| `--tune_min_validations` | validation passes a trial completes before the pruner may stop it | 2 |
 | `--init_encoder <file.pt>`, `--freeze_encoder` | blocks mode: start the first layer from a file written by `pretrain_blocks.py` (masked-SNP pretraining) or by the ridge warm start (DeepWideGP-Scripts `scripts/widedeepgp-blocks/make_warm_start.py`), checked for its partition, SNP code and width; keep the loaded parameters fixed | none, off |
 | `--labels a,b` | train on a subset of the dataset's diseases (one disease = the single-disease comparator) | all |
 | `--snp_stats` | SNP standardisation: `train` (training-split mean and SD) or `store` (all store samples) | `train` (`main_genome.py`: `store`) |
@@ -219,7 +223,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--seed` | random seed (initial weights, dropout, batch order) | 1 (`main_genome.py`: 33) |
 | `--wide` | linear PRS path (SNP mode only): `off` (the network alone), `on` (beside the network), `only` (PRS and covariates alone) | `off` |
 | `--prs_var`, `--wide_kappa` | the PRS's ridge penalty (prior variance of the PRS) and the pace of its weights (sets their learning rate) | 1 (a grid in a search), 0.03 (the runs of 13 to 16 November 2026 used 0.1) |
-| `--tune_trials` | trials of a run's search: Optuna over the network's learning rate, weight decay and dropout, plus `--table_var` in blocks mode (with `--wide on`, the second stage, the network on top of the linear model); 0 = no search, train the given settings once | 12 |
+| `--tune_trials` | trials of a run's search: Optuna over the network's learning rate, weight decay and dropout, plus `--table_kappa` and `--table_decay` in blocks mode (with `--wide on`, the second stage, the network on top of the linear model); 0 = no search, train the given settings once | 12 |
 | `--prs_grid` | with `--wide on` or `only`: prior variances of the linear stage, trained side by side; each disease keeps its best (`none`: one variance, `--prs_var`) | 0.003,0.01,…,10,30 (half-decade steps) in a search |
 | `--tune_gpus` | GPUs for the trials: `auto` (the free ones minus one), a list, or `none` (here, one after another) | `auto` |
 | `--val_min_participants`, `--val_max_epoch_equiv`, `--min_participants` | validate at most once per this many participants, at least once per this many epoch-equivalents; train at least this many participants | 20,000, 1, 128,000 |
@@ -242,7 +246,7 @@ weight snapshots with `snapshots.csv` (what each cost; the table is stored in bf
 `checkpoints/best.ckpt` and `last.ckpt`, and `results.json`.
 Tests: `python -m pytest tests/test_ml_*.py -q`. On the CPU: `tests/test_ml_blocks.py` (blocks
 mode with the transformer mixer: the partition and its checks, the pooling against numpy segment
-sums, the ridge PRS as a special case, the table's learning rate and penalty, `--init_encoder`,
+sums, the ridge PRS in the first layer, the table's optimiser group, `--init_encoder`,
 a run with bf16 snapshots, scoring and a resume, a search and a seed retrain, masked
 pretraining, and a learning check on the synthetic traits) and the linear path's
 `tests/test_ml_wide.py`. On a GPU: `tests/test_ml_blocks_gpu.py` (both mixers in bf16,

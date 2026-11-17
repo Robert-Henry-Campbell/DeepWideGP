@@ -17,11 +17,12 @@ def genotype_weights(x):
     return torch.stack([(1 - x).clamp_min(0), 1 - (x - 1).abs(), (x - 1).clamp_min(0)], -1)
 
 
-def table_learning_rate(kappa, table_var, batch_eff, n_snps):
-    """Adam learning rate of the table, kappa tau sqrt(B) / sqrt(M): the linear PRS path's rule
-    (model.wide_learning_rate) without its class-weight factor, as each entry's gradient is its dosage
-    times the block token's gradient, of order 1 / sqrt(M)."""
-    return float(kappa) * float(table_var) * float(batch_eff) ** 0.5 / float(n_snps) ** 0.5
+def table_learning_rate(kappa, batch_eff, n_snps):
+    """Learning rate of the table, kappa sqrt(B) / sqrt(M): the linear PRS path's rule (model.wide_learning_rate)
+    without its prior-variance and class-weight factors, as each entry's gradient is its dosage times the block
+    token's gradient, of order 1 / sqrt(M). The table's optimiser has a large epsilon and a per-step weight
+    decay (model.WideDeepGP.configure_optimizers), so an entry with a tiny, inconsistent gradient barely moves."""
+    return float(kappa) * float(batch_eff) ** 0.5 / float(n_snps) ** 0.5
 
 
 class BlockEncoder(nn.Module):
@@ -41,6 +42,9 @@ class BlockEncoder(nn.Module):
             self.lengths.append([int(c) * self.codes for c in counts])
             chrom += [i] * len(counts)
         self.tables = nn.ParameterList([nn.Parameter(torch.zeros(sum(rows), de)) for rows in self.lengths])
+        # each block's sum is divided by the square root of its SNP count, so blocks of 119 and 15,194 SNPs start on one scale
+        snps = [rows // self.codes for seq in self.lengths for rows in seq]
+        self.register_buffer("block_scale", torch.tensor(snps, dtype=torch.float32).rsqrt()[None, :, None], persistent=False)
         self.block_emb = nn.Embedding(len(chrom), de)
         self.chrom_emb = nn.Embedding(len(self.lengths), de)
         self.register_buffer("block_chrom", torch.tensor(chrom, dtype=torch.long), persistent=False)
@@ -49,8 +53,9 @@ class BlockEncoder(nn.Module):
 
     def pool(self, x_all, masks=None):
         """Dosages, one [B, L_i, 1] per sequence (standardised for the dosage code, raw for the genotype
-        code) -> the pooled vector of every block, [B, n_blocks, embed_dim]. ``masks``: optional bool
-        [B, L_i] per sequence; a masked SNP contributes nothing (pretraining)."""
+        code) -> the pooled vector of every block, [B, n_blocks, embed_dim]: the sum of the block's dosage-scaled
+        vectors over the square root of its SNP count. ``masks``: optional bool [B, L_i] per sequence; a masked
+        SNP contributes nothing (pretraining)."""
         out = []
         for i, (x, table, rows) in enumerate(zip(x_all, self.tables, self.lengths)):
             w = x[:, :, 0]
@@ -62,7 +67,7 @@ class BlockEncoder(nn.Module):
                 dt = torch.get_autocast_dtype("cuda")
                 w, table = w.to(dt), table.to(dt)
             out += [a @ t for a, t in zip(w.split(rows, 1), table.split(rows, 0))]
-        return torch.stack(out, 1)
+        return torch.stack(out, 1) * self.block_scale
 
     def hidden(self, pooled):
         """The MLP's hidden layer [B, n_blocks, 4 embed_dim] of pooled vectors with the identities added."""

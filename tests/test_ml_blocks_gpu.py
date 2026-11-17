@@ -43,7 +43,7 @@ def test_both_mixers_train_a_step_in_bf16(data_dir, mixer):
     model.cuda().train()
     x_all, y = _batch(dm)
     loss, _ = model.loss_fn(model(x_all), y, 0)
-    (loss + model.penalty()).backward()
+    loss.backward()                                                      # no loss penalty in blocks mode
     assert torch.isfinite(loss) and all(torch.isfinite(t.grad).all() and t.grad.abs().sum() > 0 for t in model.encoder.tables)
     assert model.encoder.tables[0].dtype == torch.float32                 # master weights stay in float32
 
@@ -100,7 +100,7 @@ def test_the_largest_planned_model_fits_at_2000_tokens(data_dir, mixer, layers, 
     torch.cuda.reset_peak_memory_stats()
     model, x_all, y = _big_model(data_dir, 2000, 256, layers, mixer, batch)
     loss, _ = model.loss_fn(model(x_all), y, 0)
-    (loss + model.penalty()).backward()
+    loss.backward()                                                      # no loss penalty in blocks mode
     torch.cuda.synchronize()
     peak = torch.cuda.max_memory_allocated() / 2 ** 30
     counts = model.parameter_counts()

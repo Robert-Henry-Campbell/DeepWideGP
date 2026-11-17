@@ -594,48 +594,50 @@ on the table axis at S3, d_e = 4 gives 5,032,800 table entries and N = 261,870, 
 80,524,800 and N = 293,790 (the block MLP grows with d_e).
 
 **Training.** Everything is trained by AdamW on the loss of section 5, from dosages, from
-scratch, in two parameter groups (section 6): the table at its own learning rate
+scratch, in two parameter groups (section 6). The table has its own group with three settings of
+its own, decided on 17 November 2026 after the first top-rung runs (below): a learning rate
 
-    lr_table = κ τ √B / √M
+    lr_table = κ √B / √M
 
-(`--table_kappa` κ = 0.1 and `--table_var` τ = 1 by default; B the effective batch size, M the
-number of SNPs; the rule of the linear PRS path without its class-weight factor, since each table
-entry's gradient is its dosage times the gradient of its block's token, of order 1/√M), with no
-weight decay but an L2 penalty in the loss,
+(`--table_kappa` κ = 0.03 by default, searched over 0.01 to 0.03; B the effective batch size, M the
+number of SNPs; the rule of the linear PRS path without its prior-variance and class-weight
+factors, since each table entry's gradient is its dosage times the gradient of its block's token,
+of order 1/√M); a per-step weight decay `--table_decay` (1 by default, searched over 0.3 to 3),
+AdamW's decoupled decay, so that every entry shrinks by lr_table × decay of itself at each step
+unless the data keep pushing it; and a large Adam epsilon `--table_eps` (10⁻⁷ by default). The
+epsilon is the point: Adam divides each entry's step by the root mean square of its gradient, which
+gives a SNP that does nothing the same step size as a SNP that matters, and 20 million such steps
+accumulate into noise. With ε about eight times a null entry's gradient (measured 1.3 × 10⁻⁸ per
+entry at batch 256 on the top rung, S3; the 99.9th percentile 8.5 × 10⁻⁸), an entry whose gradient
+is small and inconsistent moves at a fraction of the rate, and only an entry with a consistent
+gradient well above that scale moves at the full rate. Everything else trains at `--lr` with
+weight decay `--l2`. Both groups follow the same schedule, a linear warm-up of `--warmup_steps`
+(200) optimiser steps and a cosine decay to zero over the run's budget (`--lr_schedule cosine`),
+the default of `main_multilabel.py` since 17 November 2026. There is no penalty in the loss in
+blocks mode (the first version had Σ ‖T_s‖² / (2 N τ) with τ = `--table_var`; it was a million
+times too weak to hold the table and is gone). The run's log has `train/lr_table` and
+`train/grad_norm_table` beside the network's. Snapshots are written by the model
+(`WideDeepGP.snapshot`) with the table in bfloat16, which `load_model` reads back into float32.
 
-    penalty = Σ_s ‖T_s‖² / (2 N τ)
-
-(N the run's training participants; logged as `train/table_penalty`), which makes τ the prior
-variance of a table entry as `--prs_var` is the PRS's (section 5.2); and everything else at `--lr`
-with weight decay `--l2`. Both groups follow the same schedule, a linear warm-up of
-`--warmup_steps` (200) optimiser steps and a cosine decay to zero over the run's budget
-(`--lr_schedule cosine`), the default of `main_multilabel.py` since 17 November 2026. τ is
-searched with the learning rate, weight decay and dropout (section 8). The run's log has
-`train/lr_table` and `train/grad_norm_table` beside the network's. Snapshots are written by the
-model (`WideDeepGP.snapshot`) with the table in bfloat16, which `load_model` reads back into
-float32.
-
-**Pretraining and the warm start (`--init_encoder <file>`).** The first layer can start from a
-file holding a manifest (its kind, the partition digest, the SNP code and the width, all checked
-against the model) and a state with the tables and, optionally, the identity vectors and the
-MLP's first layer; `--freeze_encoder` keeps the loaded parameters fixed (a frozen table then has
-no optimiser group and no penalty), and `config.json` records the file's sha256. Two writers
-exist. `pretrain_blocks.py` pretrains the first layer by masked-SNP prediction on the dataset's
-training rows only, with no labels and no mixer: each SNP of a participant is hidden with
-probability `--mask_rate` (0.15) and contributes nothing to its block's pooled vector; the
-genotype class of every hidden SNP (0, 1 or 2 copies, the raw dosage rounded) is predicted from
-the hidden layer of its block's token through a linear map to three class vectors, shared by all
-SNPs, and a dot product with a per-SNP output vector; the cross-entropy over the hidden SNPs is
-minimised by AdamW at `--lr` for `--epochs` (1) passes over the training rows; the table, the
-identity vectors and the MLP's first layer are written owner-only, with the training rows'
-digest, the loss at the start and at the end and the accuracy against the majority class in the
-manifest. The ridge warm start, written by DeepWideGP-Scripts
-`scripts/widedeepgp-blocks/make_warm_start.py`, is the rank-d_e factorisation of a rung's
-closed-form block ridge (design document, section 6; dosage code). Both are ablations; the
-default is the plain dosage table from scratch.
+**Why these settings: the first top-rung runs (17 November 2026, afternoon).** With the first
+version (Adam with its usual epsilon, κ = 0.1, the loss penalty at τ = 1, the pruner acting after
+two validation passes and early stopping after eight), S1, S3 and S5 trained once each at the top
+rung with fixed settings reached mean tuning AUROCs of 0.6610, 0.6624 and 0.6619 against 0.6627
+for a logistic model on the covariates alone, and a 12-trial search at S1 reached 0.6626: the model
+learned nothing from the genotypes. The logged curves showed two failures. At S3 the training loss
+fell for the first third of the run and then rose while the table's sum of squares grew a
+thousandfold and its gradient norm thirty-fold: Adam noise accumulating in the 20 million entries
+and degrading the network. At S5 the table's gradient norm collapsed a hundredfold and the table
+shrank towards zero: the network settled on the covariates. The large epsilon and the per-step decay
+address the first failure; dividing each block's sum by the square root of its SNP count (above)
+keeps the first layer's output on one scale whatever the block size, which the deeper mixers need;
+κ at 0.03, the pruner held off until eight passes (`--tune_min_validations 8`) and early stopping
+after sixteen (`--stop_patience 16`) give a slow-starting table time, at the cost of searches two
+to three times longer. Whether the model then learns at 215,872 participants is the question the
+relaunched chain answers first.
 
 **Hyper-parameter search, selection and evaluation** are those of sections 7 to 9, with
-`--table_var` added to the searched settings.
+`--table_kappa` and `--table_decay` added to the searched settings.
 
 **What the mode cannot do.** Interactions between distant loci are representable in the mixer but
 not identifiable at this training size; within-block interactions beyond the pooled vector's
@@ -740,9 +742,9 @@ The sampling-rate correction does not change it (the expected loss is the cohort
 covariate weights and intercepts are not penalised. N is the run's own number of training
 participants, so the shrinkage grows as the training set shrinks. The test
 `test_the_penalty_correction_is_the_curvature_ratio` checks the curvature ratio numerically at
-three prevalences. The per-SNP table of blocks mode (section 4.11) carries the plain penalty
-Σ ‖T_s‖² / (2 N τ) without the curvature factor: its entries are shared by all diseases, so no
-disease's class weight applies to them.
+three prevalences. The per-SNP table of blocks mode (section 4.11) carries no penalty in the loss:
+it is held by its optimiser's weight decay, shared by all diseases, so no disease's class weight
+applies to it.
 
 ### 5.3 Variants kept for comparison
 
@@ -895,12 +897,14 @@ training set, is by default one search of the network alone (stage `deep`; the d
 November 2026, when the linear PRS path became an option): 12 trials proposed by Optuna's
 tree-structured Parzen estimator (Akiba et al., 2019), each an ordinary training run, over the
 network's learning rate (10⁻⁴ to 3 × 10⁻³), weight decay (10⁻⁶ to 10⁻²), embedding dropout (0 to
-0.4) and, in blocks mode, the table's prior variance τ (`--table_var`, 0.01 to 100; section
-4.11), all but the dropout log-uniform. Asynchronous successive halving (Jamieson and Talwalkar,
-2016; Li et al., 2020) stops the trials whose mean tuning AUROC trails at each rung, and the
+0.4) and, in blocks mode, the table's pace κ (`--table_kappa`, 0.01 to 0.03) and weight decay
+(`--table_decay`, 0.3 to 3; section 4.11), all but the dropout log-uniform. Asynchronous
+successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the trials whose mean
+tuning AUROC trails at each rung, after at least `--tune_min_validations` passes (2 by default; the
+chains of the scaling study use 8), and the
 run's model is the trial with the best mean tuning AUROC. A cell of the scaling study runs its
 search once with seed 1 and retrains the chosen settings with seeds 2 and 3 (`--tune_trials 0`
-with the chosen `--lr`, `--l2`, `--dropout` and `--table_var`; the retrain reproduces the trial's
+with the chosen `--lr`, `--l2`, `--dropout`, `--table_kappa` and `--table_decay`; the retrain reproduces the trial's
 model settings exactly but for the seed, `tests/test_ml_blocks.py`), and reports the mean of
 the three with the seed spread (Robert, 17 November 2026; the PGI arm stays at one seed).
 
@@ -1162,7 +1166,7 @@ loaded and may be frozen; a run trains, writes `config.json`'s `blocks` section 
 and non-embedding counts sum to the model's parameters) with the cosine recipe, snapshots the
 table in bfloat16 and loads it back in float32, is scored with `--save_scores`, resumes on the
 same data and refuses a resume with another `--embed_dim`; a one-trial search runs the `deep`
-stage alone, records the new scalars in `search.json`, searches `table_var`, and a retrain of
+stage alone, records the new scalars in `search.json`, searches the table's pace and decay, and a retrain of
 the chosen settings with seed 2 reproduces the trial's model settings (only the seed, the run's
 name and the GPU list differ); masked pretraining lowers its loss on the synthetic store, writes
 the file owner-only with the expected entries, a run starts from it with `--freeze_encoder` and

@@ -1,7 +1,7 @@
 """The hyper-parameter search inside every run (methods.md section 8), which main_multilabel.py
 starts with ``tune_run`` whenever --tune_trials > 0. With --wide off, the default, a run searches
 the network alone (stage "deep": Optuna trials over learning rate, weight decay, dropout and, in
-blocks mode, the table's prior variance). With --wide on it searches in two stages:
+blocks mode, the table's pace and decay). With --wide on it searches in two stages:
 
   1. linear   one grid run of the linear model alone (--wide only) over the prior variances of
               --prs_grid; each disease keeps its best variance and validation pass, and that
@@ -74,8 +74,8 @@ def open_stage_study(base, stage, worker_index=0):
     """A stage's study. Each worker's sampler is seeded with the run's seed plus its index (with
     one seed for all, every worker would start with the same random settings)."""
     import tune_optuna
-    return tune_optuna.open_study(stage, run_root(base), seed=int(base.seed) + int(worker_index), n_startup_trials=5,
-                                  prune=stage != "linear")
+    return tune_optuna.open_study(stage, run_root(base), min_validations=int(getattr(base, "tune_min_validations", 2)),
+                                  seed=int(base.seed) + int(worker_index), n_startup_trials=5, prune=stage != "linear")
 
 
 def free_gpus():

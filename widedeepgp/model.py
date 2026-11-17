@@ -150,8 +150,7 @@ class WideDeepGP(pl.LightningModule):
                 self.cov_norm = nn.LayerNorm(d)
             self.combine = FCN((1 + self.use_cov) * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
                                hidden_layers=int(hp["n_fcn"]))
-            self.lr_table = float(hp["lr_table"])
-            self.table_lambda = 1.0 / (2.0 * float(hp["label_counts"]["n"]) * float(hp["table_var"]))
+            self.lr_table, self.table_decay, self.table_eps = (float(hp[k]) for k in ("lr_table", "table_decay", "table_eps"))
 
         # built in the published class's order, so one seed gives the same initial weights
         encoders, data_embed, norms = [], [], []
@@ -342,12 +341,9 @@ class WideDeepGP(pl.LightningModule):
             return out
 
     def penalty(self):
-        """The L2 penalty of the per-SNP weights on the scale of the loss (None without one): the PRS
-        weights' ridge penalty, or the table's sum of squares over 2 N tau."""
-        if self.blocks:
-            tables = [t for t in self.encoder.tables if t.requires_grad]
-            return self.table_lambda * sum((t.float() ** 2).sum() for t in tables) if tables else None
-        if self.wide == "off" or self.wide_freeze:
+        """The ridge penalty of the PRS weights on the scale of the loss (None without one; the blocks-mode
+        table is held by its optimiser's weight decay instead)."""
+        if self.blocks or self.wide == "off" or self.wide_freeze:
             return None
         sq = sum((w.float() ** 2).sum(dim=0) for w in self.prs)
         return (self.prs_lambda * sq).mean()
@@ -385,8 +381,7 @@ class WideDeepGP(pl.LightningModule):
         pen = self.penalty()
         if pen is not None:
             loss = loss + pen
-            self.log("train/table_penalty" if self.blocks else "train/prs_penalty", pen, on_step=True, on_epoch=False,
-                     batch_size=y.shape[0])
+            self.log("train/prs_penalty", pen, on_step=True, on_epoch=False, batch_size=y.shape[0])
         self.samples_seen += int(y.shape[0])
         if self._train_sum is None:
             self._train_sum = torch.zeros_like(per_label, dtype=torch.float64)
@@ -530,12 +525,13 @@ class WideDeepGP(pl.LightningModule):
 
     def configure_optimizers(self):
         if self.blocks:
-            # the table carries its penalty in the loss (its optimum is the penalised one) and moves at its own pace
+            # the table: its own rate, a large epsilon (an entry with a tiny, inconsistent gradient barely moves; one
+            # with a consistent gradient moves normally) and a per-step decay that stops noise from accumulating
             tables = [t for t in self.encoder.tables if t.requires_grad]
             rest = [p for p in self.parameters() if p.requires_grad and not any(p is t for t in self.encoder.tables)]
             groups = [{"params": rest, "lr": self.lr, "weight_decay": self.l2}]
             if tables:
-                groups.append({"params": tables, "lr": self.lr_table, "weight_decay": 0.0})
+                groups.append({"params": tables, "lr": self.lr_table, "weight_decay": self.table_decay, "eps": self.table_eps})
             opt = torch.optim.AdamW(groups, lr=self.lr)
         elif self.wide == "off":
             opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.l2)

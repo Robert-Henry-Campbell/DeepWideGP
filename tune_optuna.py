@@ -9,7 +9,7 @@ Start one worker per GPU; all workers of a study share one journal file and so o
 
 Everything after "--" is passed to the training code as for main_multilabel.py and fixes what
 is not searched. Each trial is an ordinary run, runs/<study>/trial_NNNN/. Searched: learning
-rate, weight decay, dropout, in blocks mode the table's prior variance, accumulation and warm-up (--space full: also the
+rate, weight decay, dropout, in blocks mode the table's pace and decay, accumulation and warm-up (--space full: also the
 class-weight exponent and cap, the sampler and the head's width). The value maximised is the
 trial's best mean validation AUROC; successive halving stops trailing trials (after
 --min_validations passes, keeping one in --reduction at each rung).
@@ -35,8 +35,9 @@ def suggest(trial, cfg, space):
     cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
     cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
     cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
-    if getattr(cfg, "input_mode", "snps") == "blocks":    # the table's prior variance (its penalty and pace)
-        cfg.table_var = trial.suggest_float("table_var", 1e-2, 1e2, log=True)
+    if getattr(cfg, "input_mode", "snps") == "blocks":    # the table's pace and its per-step decay
+        cfg.table_kappa = trial.suggest_float("table_kappa", 0.01, 0.03, log=True)
+        cfg.table_decay = trial.suggest_float("table_decay", 0.3, 3.0, log=True)
     if space != "deep":
         cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
         cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])

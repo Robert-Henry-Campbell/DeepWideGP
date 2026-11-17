@@ -179,7 +179,7 @@ def test_the_stand_alone_tuner(tmp_path, monkeypatch, capsys):
                                               optuna.trial.TrialState.COMPLETE]
     assert study.trials[0].user_attrs == {"run_dir": "/r/trial_0000", "epoch_equivalents": 1.0, "train_seconds": 2.5}
     assert best["best_params"] == study.trials[2].params and list(best["best_params"]) == [
-        "lr", "l2", "dropout", "table_var", "accumulate", "warmup_steps"]        # table_var: blocks mode, the default
+        "lr", "l2", "dropout", "table_kappa", "table_decay", "accumulate", "warmup_steps"]   # the table's: blocks mode
     ref = tune_optuna.open_study("ref", str(tmp_path), seed=1).ask()   # the sampler has the project's seed
     tune_optuna.suggest(ref, SimpleNamespace(input_mode="blocks"), "optim")
     assert ref.params == study.trials[0].params

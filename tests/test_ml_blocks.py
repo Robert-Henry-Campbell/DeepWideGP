@@ -105,7 +105,7 @@ def test_pooling_is_the_segment_sum_of_dosage_scaled_vectors(data_dir, de):
         x, w = x_all[i][:, :, 0].numpy(), enc.tables[i].detach().numpy()
         for b in np.unique(ids):
             s = ids == b
-            np.testing.assert_allclose(pooled[:, k], x[:, s] @ w[s], rtol=1e-5, atol=1e-6)
+            np.testing.assert_allclose(pooled[:, k], (x[:, s] @ w[s]) / np.sqrt(s.sum()), rtol=1e-5, atol=1e-6)
             k += 1
     assert enc.hidden(enc.pool(x_all[:-1])).shape == (24, 3 * CHROMS, 4 * de)
     assert enc(x_all[:-1]).shape == (24, 3 * CHROMS, 8)
@@ -129,8 +129,9 @@ def test_the_genotype_code_interpolates_three_vectors_and_contains_the_dosage_co
 
 
 def test_the_first_layer_contains_a_ridge_prs(data_dir):
-    """At embed_dim 1 the pooled block values are the per-block sums of a ridge PRS, x @ w split by block, so
-    the first layer contains a ridge; what the model predicts from them goes through the mixer and head."""
+    """At embed_dim 1 the pooled block values are the per-block sums of a ridge PRS, x @ w split by block and
+    scaled by 1 / sqrt(block size), so the first layer contains a ridge; what the model predicts from them goes
+    through the mixer and head."""
     from widedeepgp.blockencoder import BlockEncoder
     _, dm, _ = _build(data_dir, embed_dim=1)
     enc = BlockEncoder(dm.partition, 1, 8)
@@ -141,7 +142,7 @@ def test_the_first_layer_contains_a_ridge_prs(data_dir):
     x_all, _ = _val_batch(dm)
     x = np.concatenate([v[:, :, 0].numpy() for v in x_all[:-1]], axis=1)
     pooled = enc.pool(x_all[:-1]).detach().numpy()[:, :, 0]
-    np.testing.assert_allclose(pooled.sum(1), x @ w, rtol=1e-4, atol=1e-5)        # the blocks' sums are the PRS
+    np.testing.assert_allclose(pooled.sum(1) * np.sqrt(2), x @ w, rtol=1e-4, atol=1e-5)   # two SNPs per block
     assert pooled.shape == (24, 3 * CHROMS)
 
 
@@ -203,22 +204,21 @@ def test_resume_and_init_from_refuse_another_partition(data_dir, tmp_path):
         run_training(cfg)
 
 
-def test_the_table_has_its_own_learning_rate_and_penalty(data_dir):
+def test_the_table_has_its_own_optimiser_group(data_dir):
+    """The table's learning rate is kappa sqrt(B) / sqrt(M); its AdamW group carries the per-step decay and the
+    large epsilon; nothing else in the model shares them, and there is no loss penalty in blocks mode."""
     from widedeepgp.blockencoder import table_learning_rate
-    cfg, dm, model = _build(data_dir, table_kappa=0.2, table_var=2.0, batch_size=16, accumulate=2, l2=1e-3, lr=1e-3)
-    assert table_learning_rate(0.2, 2.0, 32, SNPS) == pytest.approx(0.2 * 2.0 * np.sqrt(32) / np.sqrt(SNPS))
-    assert model.hp["lr_table"] == pytest.approx(table_learning_rate(0.2, 2.0, 32, SNPS))
+    cfg, dm, model = _build(data_dir, table_kappa=0.02, table_decay=2.0, table_eps=1e-4, batch_size=16, accumulate=2,
+                            l2=1e-3, lr=1e-3)
+    assert table_learning_rate(0.02, 32, SNPS) == pytest.approx(0.02 * np.sqrt(32) / np.sqrt(SNPS))
+    assert model.hp["lr_table"] == pytest.approx(table_learning_rate(0.02, 32, SNPS))
     groups = model.configure_optimizers().param_groups
-    assert [(g["lr"], g["weight_decay"], len(g["params"])) for g in groups] == \
-        [(1e-3, 1e-3, len(list(model.parameters())) - CHROMS), (model.hp["lr_table"], 0.0, CHROMS)]
-    n = dm.splits["train"]["y"].shape[0]
-    with torch.no_grad():
-        for t in model.encoder.tables:
-            t.copy_(torch.full(t.shape, 0.5))
-    assert float(model.penalty()) == pytest.approx(SNPS * 4 * 0.25 / (2 * n * 2.0))
+    assert [(g["lr"], g["weight_decay"], g["eps"], len(g["params"])) for g in groups] == \
+        [(1e-3, 1e-3, 1e-8, len(list(model.parameters())) - CHROMS), (model.hp["lr_table"], 2.0, 1e-4, CHROMS)]
+    assert model.penalty() is None
     for t in model.encoder.tables:
         t.requires_grad_(False)
-    assert model.penalty() is None and len(model.configure_optimizers().param_groups) == 1
+    assert len(model.configure_optimizers().param_groups) == 1
 
 
 def test_an_init_encoder_file_is_checked_loaded_and_may_be_frozen(data_dir, tmp_path):
@@ -298,15 +298,16 @@ def test_a_run_trains_snapshots_in_bfloat16_scores_and_resumes(data_dir, tmp_pat
 def test_a_search_records_the_new_scalars_and_a_retrain_reproduces_the_chosen_configuration(data_dir, tmp_path):
     import main_multilabel
     out = main_multilabel.main(_run_args(tmp_path, "s", data_dir=data_dir, tune_trials=1, tune_gpus="none"))
-    assert out["chosen_stage"] == "deep" and set(out["best_params"]) == {"lr", "l2", "dropout", "table_var"}
+    assert out["chosen_stage"] == "deep" and set(out["best_params"]) == {"lr", "l2", "dropout", "table_kappa", "table_decay"}
     search = json.load(open(tmp_path / "t" / "s" / "search.json"))
     for key, value in (("input_mode", "blocks"), ("partition", "uniform:2"), ("snp_code", "dosage"), ("embed_dim", 4),
-                       ("table_var", 1.0), ("table_kappa", 0.1), ("mixer", "transformer"), ("wide", "off")):
+                       ("table_kappa", 0.03), ("table_decay", 1.0), ("table_eps", 1e-7), ("tune_min_validations", 2),
+                       ("mixer", "transformer"), ("wide", "off")):
         assert search[key] == value
     trial = json.load(open(os.path.join(tmp_path / "t" / "s", out["best_trial_dir"], "config.json")))
     p = out["best_params"]
     again = main_multilabel.main(_run_args(tmp_path, "s_seed2", data_dir=data_dir, seed=2, lr=p["lr"], l2=p["l2"],
-                                           dropout=p["dropout"], table_var=p["table_var"]))
+                                           dropout=p["dropout"], table_kappa=p["table_kappa"], table_decay=p["table_decay"]))
     retrain = json.load(open(os.path.join(again["run_dir"], "config.json")))
     assert retrain["model"] == trial["model"]                            # the same model settings, another seed
     changed = {k for k in trial["args"] if trial["args"][k] != retrain["args"][k]}
@@ -361,7 +362,7 @@ def test_parse_args_defaults_to_blocks_mode_with_the_warm_up_and_cosine_recipe()
     import main_multilabel
     cfg = main_multilabel.parse_args(["--label", "x"])
     assert (cfg.input_mode, cfg.wide, cfg.lr_schedule, cfg.warmup_steps, cfg.final_pool, cfg.embed_dim, cfg.snp_code,
-            cfg.table_var, cfg.table_kappa, cfg.partition, cfg.init_encoder, cfg.freeze_encoder) == \
-        ("blocks", "off", "cosine", 200, "mean", 16, "dosage", 1.0, 0.1, None, None, False)
+            cfg.table_kappa, cfg.table_decay, cfg.table_eps, cfg.partition, cfg.init_encoder, cfg.freeze_encoder) == \
+        ("blocks", "off", "cosine", 200, "mean", 16, "dosage", 0.03, 1.0, 1e-7, None, None, False)
     assert main_multilabel.parse_args(["--label", "x", "--input_mode", "snps"]).final_pool == "atten"
     assert main_multilabel.parse_args(["--label", "x", "--final_pool", "atten"]).final_pool == "atten"

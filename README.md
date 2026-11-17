@@ -155,8 +155,10 @@ square root of its SNP count. The table has its own AdamW group: its learning ra
 `--table_eps` (so an entry with a tiny, inconsistent gradient barely moves). The rest of the recipe is
 Sigurdsson et al. 2023's (methods.md 4.11): learning rate 1e-4, weight decay 1e-3, dropout 0.5,
 batch 64, 40% of SNPs masked on every training step (`--input_mask`), a plateau schedule, early
-stopping after 16 passes once 2,000 steps are done (`--stop_burnin`). The scaling study starts every
-run from the ridge warm start (`--init_encoder`). A run tunes itself: Optuna over `--table_kappa` and
+stopping after 16 passes once 2,000 steps are done (`--stop_burnin`). Training draws uniform shuffled
+batches and uses plain cross-entropy at natural prevalence (`--sampler shuffled --gamma 0`, methods.md
+section 5; the rotation of disease-balanced batches with a square-root class weight is kept as a
+comparison variant). The scaling study starts every run from the ridge warm start (`--init_encoder`). A run tunes itself: Optuna over `--table_kappa` and
 `--table_decay` (`--tune_space table`), or also the learning rate, weight decay and dropout (`run`).
 `pretrain_blocks.py` pretrains the
 first layer by masked-SNP prediction on the training rows and writes a file for `--init_encoder`.
@@ -213,9 +215,9 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--init_encoder <file.pt>`, `--freeze_encoder` | blocks mode: start the first layer from a file written by `pretrain_blocks.py` (masked-SNP pretraining) or by the ridge warm start (DeepWideGP-Scripts `scripts/widedeepgp-blocks/make_warm_start.py`), checked for its partition, SNP code and width; keep the loaded parameters fixed | none, off |
 | `--labels a,b` | train on a subset of the dataset's diseases (one disease = the single-disease comparator) | all |
 | `--snp_stats` | SNP standardisation: `train` (training-split mean and SD) or `store` (all store samples) | `train` (`main_genome.py`: `store`) |
-| `--sampler` | `rotation`: each batch is balanced on one disease in turn; `shuffled` | `rotation` |
+| `--sampler` | `shuffled`: uniform shuffled batches; `rotation`: each batch is balanced on one disease in turn, with the loss's sampling-rate correction (a comparison variant, methods 5.3) | `shuffled` in `main_multilabel.py` (parser: `rotation`) |
 | `--loss_outputs` | `all`: every output learns from every batch; `target`: only the balanced disease | `all` |
-| `--gamma`, `--w_max` | class-weight exponent (0 none, 0.5 square root, 1 parity) and cap | 0.5, 20 |
+| `--gamma`, `--w_max` | class-weight exponent (0 none: plain cross-entropy at natural prevalence; 0.5 square root; 1 parity) and cap | 0 in `main_multilabel.py` (parser: 0.5), 20 |
 | `--no_sampling_correction` | do not divide each person's loss by their sampling rate | off |
 | `--annot` | SNP mode: per-SNP annotation vectors as a gain and offset on the token embedding | off |
 | `--final_pool` | pooling of the mixer's tokens: blocks mode `mean` (the only setting it accepts); SNP mode `atten` (the published attention across the 23 vectors), `mean` or `last` | `mean` in blocks mode, `atten` in SNP mode |

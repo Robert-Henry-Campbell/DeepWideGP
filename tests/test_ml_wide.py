@@ -167,6 +167,7 @@ def test_the_multi_disease_defaults():
         ("off", 0.03, None, 12, "auto", 20000, 1.0, 128000, 6, 40, 1)       # the ridge path is off by default (16 Nov 2026)
     assert (cfg.lr, cfg.l2, cfg.dropout, cfg.batch_size, cfg.lr_schedule, cfg.input_mask, cfg.stop_patience, cfg.stop_burnin) == \
         (1e-4, 1e-3, 0.5, 64, "plateau", 0.4, 16, 2000)                        # Sigurdsson et al. 2023's recipe (17 Nov 2026)
+    assert (cfg.sampler, cfg.gamma, cfg.no_sampling_correction, cfg.loss_outputs) == ("shuffled", 0.0, False, "all")  # plain BCE (18 Nov 2026)
     cfg = main_multilabel.parse_args(["--label", "x", "--wide", "on", "--tune_trials", "0"])
     assert (cfg.wide, cfg.tune_trials) == ("on", 0)
     legacy = args_initial(["--label", "x", "--rd_mode", "x"])       # the published script's parser is unchanged

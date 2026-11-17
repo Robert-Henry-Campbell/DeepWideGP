@@ -27,6 +27,22 @@ def test_one_label_shuffled_gamma0_is_the_published_loss():
     assert torch.allclose(loss.logit_shift, torch.zeros(1))
 
 
+def test_the_multi_disease_defaults_give_plain_cross_entropy():
+    """main_multilabel.py's defaults (18 Nov 2026): uniform batches and no class weight, so every disease's term
+    is its mean cross-entropy over the batch and the loss is their mean, whatever the prevalences."""
+    import main_multilabel
+    cfg = main_multilabel.parse_args(["--label", "x"])
+    y = random_labels(n=2000)
+    loss = WideLoss(y, gamma=cfg.gamma, w_max=cfg.w_max, sampler=cfg.sampler, correction=not cfg.no_sampling_correction,
+                    outputs=cfg.loss_outputs)
+    z = torch.randn(64, y.shape[1])
+    yb = torch.from_numpy(y[:64])
+    got, per = loss(z, yb, target=-1)
+    want = nn.BCEWithLogitsLoss(reduction="none")(z, yb).mean(dim=0)
+    assert torch.allclose(per, want, atol=1e-6) and abs(float(got) - float(want.mean())) < 1e-6
+    assert torch.allclose(loss.c1, torch.ones(y.shape[1])) and torch.allclose(loss.logit_shift, torch.zeros(y.shape[1]))
+
+
 def test_masked_entries_do_not_learn():
     y = random_labels(2000, missing=2)
     loss = WideLoss(y, sampler="rotation")

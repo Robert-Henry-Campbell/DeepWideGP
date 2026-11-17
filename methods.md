@@ -266,9 +266,10 @@ attention layer runs across the resulting 23 vectors, and a shared hidden layer 
 per disease. Stacked outlines mark the parts that exist once per chromosome, with weights that
 are not shared between chromosomes. Tinted boxes with a heavy outline are new or changed
 relative to single-phenotype DeepGP (tagged "new" or "changed"); plain boxes are as published.
-Training draws batches that are balanced on one disease at a time, in rotation, and every
-output learns from every batch through a loss that corrects for how often each participant is
-drawn. The annotation step is optional and is off in the base model. Its gain and offset are
+Training draws uniform shuffled batches and every output learns from every batch through a
+plain cross-entropy at natural prevalence (the default since 18 November 2026; the rotation of
+disease-balanced batches with its sampling-rate correction and the class weight are comparison
+variants, section 5). The annotation step is optional and is off in the base model. Its gain and offset are
 computed from 96 functional annotations and a no-annotation flag per SNP (97 channels) by one
 pair of maps shared by all chromosomes, so that box is drawn once, outside the stack. Beside the network, the
 linear PRS path (section 4.10) gives every SNP and disease a weight of its own, with a ridge
@@ -638,7 +639,9 @@ proceeds end to end. Nothing linear remains in the architecture; the warm start 
 training begins. Under this recipe the table's epsilon was re-measured (batch 64, masking): a null
 entry's gradient has a root mean square of 3.3 × 10⁻⁸, so the default `--table_eps` is 2.5 × 10⁻⁷.
 What the search tunes under this recipe is the table's pace and decay only (`--tune_space table`;
-section 8). The other published systems were read for the same purpose and point the same way:
+section 8). The objective under this recipe is the plain cross-entropy at natural prevalence of
+section 5 (uniform batches, no class weight; the default since 18 November 2026). The other
+published systems were read for the same purpose and point the same way:
 Bellot et al. (2018) and van Hilten et al. (2021) trained networks only on pre-selected or
 gene-mapped variants, and the recent transformers either pre-select SNPs by GWAS (G2PT, Lee et al.,
 preprint) or prune to 13,615 SNPs before pretraining (SNPBERT, preprint); none trains a free table
@@ -677,9 +680,16 @@ same ablation.
 
 ### 5.1 Batches
 
-Most diseases are uncommon, and a small batch drawn at random often contains no case of the
-rarer ones (with 21 participants, 45% of batches hold no case of the rarest phenotype). Batches
-are therefore drawn by a **rotation**:
+**Default since 18 November 2026: uniform shuffled batches** (`--sampler shuffled`): shuffled
+passes over the training participants, cut into batches of 64, so that every disease appears in a
+batch at its population rate (9% of batches hold no case of the rarest phenotype, acute
+myocardial infarction at 3.7%, and a batch holds 2.4 of its cases on average). This is how the
+published DeepGP, Dibaeinia et al. (2025) and the linear comparators draw their data; the reasons
+for the change are given at the end of 5.2.
+
+**The rotation (the default until 18 November 2026; `--sampler rotation`, kept as a comparison
+variant).** With the published model's batch of 21 a batch drawn at random often held no case of
+the rarer diseases (45% of batches, for the rarest), so batches were drawn by a **rotation**:
 
 - each batch has a *target* disease; half its participants are drawn from the target's cases
   and half from its non-cases (when the batch size *B* is odd, *B*/2 is rounded to an even
@@ -699,8 +709,8 @@ hypertension from 31.6% to 44.8%. No sampler could balance all 30 at once: a par
 need 15.
 
 All 30 outputs nevertheless learn from every batch, because a pass through the encoders is the
-whole cost of a step and discarding 29 of the 30 labels would waste it. Two consequences
-follow, and the loss handles both: the balance between cases and non-cases has to come from
+whole cost of a step and discarding 29 of the 30 labels would waste it. Under the rotation two
+consequences follow, and the loss handles both: the balance between cases and non-cases has to come from
 weights, and the people in a batch are not a random sample of the cohort.
 
 ### 5.2 Loss
@@ -718,7 +728,8 @@ the binary cross-entropy, *m* an indicator that the label applies to the partici
 for these 30 phenotypes) and π_j the prevalence of disease *j* in the training split; ρ is the
 share of a batch drawn from its target's cases, ½ when *B* is even.
 
-- **ω_k is the sampling rate of participant *k*:** how often the rotation draws them relative
+- **ω_k is the sampling rate of participant *k*** under the rotation (1 for everyone under
+  shuffled batches, where no correction is applied): how often the rotation draws them relative
   to drawing people uniformly, computed from the numbers of cases and non-cases that a batch
   actually holds. At an even batch size a participant with none of the 30 phenotypes has
   ω = 0.55, the median participant 0.80, and the 1% drawn most often more than 3.1; the mean
@@ -732,18 +743,21 @@ share of a batch drawn from its target's cases, ½ when *B* is even.
   draws of a rotation are worth 80% as many uniform draws (Kish's effective sample size,
   1/(mean ω · mean 1/ω); Kish, 1965).
 - **c_j is the class weight**, which sets how much a case counts relative to a non-case.
-  γ = 1 would weight every disease to parity, except that the cap (w_max = 20 by default) holds
-  the seven phenotypes with more than 20 non-cases per case at a weight of 20, below parity, and
-  γ = 0 leaves the population rate; the default is the square root, γ = ½, which keeps the
-  weights of these phenotypes at 5.1 or less where parity would need up to 25.7. Large weights
-  on the one or two cases a small batch holds make the gradient noisy.
+  γ = 0, the default since 18 November 2026, leaves the population rate: c_j(1) = 1 and every
+  disease's term is its plain mean cross-entropy. γ = 1 would weight every disease to parity,
+  except that the cap (w_max = 20 by default) holds the seven phenotypes with more than 20
+  non-cases per case at a weight of 20, below parity; the square root, γ = ½, the default until
+  18 November 2026 and now the comparison variant, keeps the weights of these phenotypes at 5.1
+  or less where parity would need up to 25.7. Large weights on the one or two cases a small batch
+  holds make the gradient noisy.
 - **Z_j and the factor 1/n** put every disease on the same scale (each term is a weighted
   average with expected total weight one) and average the diseases equally, so that a frequent
   disease does not dominate the sum.
 
 Because the objective is a class-weighted cross-entropy over the training cohort, a logit on
-the population scale is obtained by subtracting log c_j(1). With one disease, uniform sampling
-and γ = 0 the loss is exactly that of published DeepGP.
+the population scale is obtained by subtracting log c_j(1), which is zero at the default γ = 0.
+With one disease, uniform batches and γ = 0 the loss is exactly that of published DeepGP, so the
+default objective is the published one extended to 30 diseases and averaged over them.
 
 **Ridge penalty of the PRS weights** (section 4.10). The PRS weights carry a ridge penalty,
 added to the loss rather than applied as decoupled weight decay, so that the trained PRS
@@ -771,11 +785,36 @@ three prevalences. The per-SNP table of blocks mode (section 4.11) carries no pe
 it is held by its optimiser's weight decay, shared by all diseases, so no disease's class weight
 applies to it.
 
+**Why plain cross-entropy at natural prevalence (Robert, 18 November 2026).** The rotation and
+the square-root weight were built for batches of 21. At batch 64 and prevalences of 3.7% and
+above, 9% of uniform batches hold no case of the rarest disease and the mean batch holds 2.4, so
+the problem they solved is gone, and the correction they need costs a fifth of the draws (Kish's
+effective sample size, 80%). The class weight is a departure from maximum likelihood, the
+objective of the linear comparators and of the published model: for a mostly additive signal it
+does not remove bias, it adds variance. It also makes a rare disease's loss up to 3.82 times as
+curved as its information warrants (r_j above, 1.11 to 3.82 across the 30 diseases) against a
+table weight decay that is one number for all diseases, so the rare diseases' directions in the
+table are shrunk less than the common ones' where the data call for more; and the ridge warm start
+of section 4.11 is fitted at population weights, so under the weighted loss the table is pulled
+away from its starting point from the first step. The published systems point the same way:
+Dibaeinia et al. (2025) trained PRSformer on 3.8 million people with the plain sum of
+cross-entropies at natural prevalence (celiac disease at 0.6%) and found focal loss,
+task-uncertainty weighting and an averaged cross-entropy all worse; Sigurdsson et al. (2023)
+used inverse-frequency weighted sampling without testing it against uniform batches; Kelemen et
+al. (2025) oversampled cases to 50:50 and their networks lost to the LD-aware scores; and the
+studies that undersampled controls to 1:1 (Zhu et al., 2026; Yang et al., 2025) halved their
+effective sample size and weakened the linear baselines they compared with. The rotation with
+γ = ½ is kept as one paired ablation cell of the scaling study (transformer S3 at the top rung
+from the warm start; design document section 12, item 12); the runs before 18 November 2026 (the
+v2 and v3 reference runs) used it.
+
 ### 5.3 Variants kept for comparison
 
-Three switches exist so that the choices above can be tested rather than assumed: uniform
-(shuffled) batches with the same loss; the loss without the sampling-rate correction; and a
-"target-only" loss in which only the disease a batch was balanced on learns from it.
+Four switches exist so that the choices above can be tested rather than assumed: the rotation of
+disease-balanced batches (`--sampler rotation`, the default until 18 November 2026) with or
+without its sampling-rate correction (`--no_sampling_correction`); the class weight (`--gamma`,
+`--w_max`); and a "target-only" loss in which only the disease a batch was balanced on learns
+from it (`--loss_outputs target`, rotation only).
 
 ## 6. Optimisation
 
@@ -788,9 +827,9 @@ Three switches exist so that the choices above can be tested rather than assumed
   (section 4.11), and the SNP-mode recipes (the synthetic check and the classic comparator) pass
   `--lr_schedule constant --warmup_steps 0` to keep the published constant rate.
 - **Batch size and accumulation.** The batch is bounded by GPU memory, which grows with batch
-  size times number of SNPs. Gradients can be accumulated over several batches per update; the
-  rotation order is reshuffled every rotation so that the same diseases do not always share an
-  update.
+  size times number of SNPs. Gradients can be accumulated over several batches per update; under
+  the rotation sampler (section 5.1, a comparison variant) the rotation order is reshuffled every
+  rotation so that the same diseases do not always share an update.
 - **Mixed precision.** The encoders can run in 16-bit (bf16) arithmetic, and since the pilot
   this is the setting for full-size runs. Pooling, the head and the loss always run in 32-bit:
   participants differ by under 2% of a pooled chromosome vector, which is finer than bf16
@@ -1079,8 +1118,8 @@ layer.
 | Covariates | Eight | Year of birth, sex, ten principal components |
 | Sequence block | Bidirectional Mamba | The same, over SNP tokens (SNP mode) or over LD-block tokens, or a transformer encoder layer over the block tokens (blocks mode, section 4.11); Mamba-3 in a bidirectional wrapper was evaluated and not adopted |
 | Output | One sigmoid probability | 30 logits from the same hidden layer |
-| Batches | Shuffled | Rotation of disease-balanced batches |
-| Loss | Binary cross-entropy | Cross-entropy corrected for sampling rate, weighted by class, averaged per disease and then across diseases |
+| Batches | Shuffled | Shuffled (the default since 18 November 2026); a rotation of disease-balanced batches as a comparison variant |
+| Loss | Binary cross-entropy | Binary cross-entropy per disease, averaged across diseases (the default since 18 November 2026); a class weight and a sampling-rate correction as comparison variants |
 | Validation metric | Mean of per-batch AUROCs | AUROC of each disease over the whole tuning set; their mean for stopping |
 | Validation schedule | Every 300 batches | Four times per epoch-equivalent, but at most once per 20,000 participants and at least once per epoch-equivalent |
 | Saved models | The best | The best, the last, and snapshots along training |
@@ -1260,6 +1299,8 @@ themselves, and untracked files, are not saved) and the Python interpreter that 
   complex human traits? *Genetics* 2018;210:809–819.
 - Bycroft C, Freeman C, Petkova D, et al. The UK Biobank resource with deep phenotyping and
   genomic data. *Nature* 2018;562:203–209.
+- Dibaeinia P, German C, Shringarpure S, Auton A, Khan AA. PRSformer: disease prediction from
+  million-scale individual genotypes. bioRxiv 2025. doi:10.1101/2025.10.26.684578.
 - Gazal S, Finucane HK, Furlotte NA, et al. Linkage disequilibrium-dependent architecture of
   human complex traits shows action of negative selection. *Nat Genet* 2017;49:1421–1427.
 - Gu A, Dao T. Mamba: linear-time sequence modeling with selective state spaces.
@@ -1268,6 +1309,8 @@ themselves, and untracked files, are not saved) and the Python interpreter that 
   characteristic (ROC) curve. *Radiology* 1982;143:29–36.
 - Jamieson K, Talwalkar A. Non-stochastic best arm identification and hyperparameter
   optimization. *AISTATS* 2016.
+- Kelemen M, Xu Y, Jiang T, et al. Performance of deep-learning-based approaches to improve
+  polygenic scores. *Nat Commun* 2025;16:5122.
 - Kish L. *Survey sampling*. New York: Wiley, 1965.
 - Lahoti A, et al. Mamba-3: improved sequence modeling using state space principles.
   arXiv:2603.15569, 2026.
@@ -1286,11 +1329,13 @@ themselves, and untracked files, are not saved) and the Python interpreter that 
   causes of a wide range of complex diseases of middle and old age. *PLoS Med* 2015;12:e1001779.
 - van Hilten A, Kushner SA, Kayser M, et al. GenNet framework: interpretable deep learning for predicting
   phenotypes from genetic data. *Communications Biology* 2021;4:1094.
+- Yang Y, Guo K, Zhang Y, et al. MetaGeno: a chromosome-wise multi-task genomic framework for
+  ischaemic stroke risk prediction. *Brief Bioinform* 2025;26:bbaf348.
 - Zheng Z, Liu S, Sidorenko J, et al. Leveraging functional genomic annotations and genome
   coverage to improve polygenic prediction of complex traits within and between ancestries.
   *Nat Genet* 2024;56:767–777.
 - Zhu L, Liao B, Zhang Q, et al. Vision Mamba: efficient visual representation learning with
   bidirectional state space model. *ICML* 2024.
-- Zhu T, Ghose U, Climente-González H, Howson JMM, Hu S, Nevado-Holgado A. Multimodal deep
-  learning enhances genomic risk prediction for cardiometabolic diseases in UK Biobank.
-  medRxiv 2025. doi:10.1101/2025.04.28.25326564.
+- Zhu T, Ghose U, Climente-González H, Howson J, Hu S, Nevado-Holgado A. Multimodal deep
+  learning enhances genomic risk prediction for cardiometabolic diseases. *Brief Bioinform*
+  2026;27:bbag550.

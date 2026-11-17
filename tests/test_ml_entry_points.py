@@ -23,6 +23,7 @@ from ml_helpers import REPO, make_cfg, synthetic_dataset
 
 # main_multilabel.py's own defaults, spelled out
 GIVEN = ["--snp_stats", "train", "--data_dir", "pukb/genes", "--seed", "1", "--input_mode", "blocks",
+         "--sampler", "shuffled", "--gamma", "0",
          "--lr", "1e-4", "--l2", "1e-3", "--dropout", "0.5", "--batch_size", "64", "--lr_schedule", "plateau",
          "--warmup_steps", "0", "--input_mask", "0.4", "--stop_patience", "16", "--stop_burnin", "2000",
          "--tune_min_validations", "8", "--tune_trials", "12", "--tune_gpus", "auto",
@@ -57,7 +58,8 @@ def test_what_main_multilabel_changes_in_the_shared_defaults(monkeypatch):
     mine, shared = vars(main_multilabel.parse_args([])), vars(args_initial([]))
     assert {k: (shared[k], mine[k]) for k in shared if shared[k] != mine[k]} == {
         "snp_stats": ("store", "train"), "data_dir": (None, "pukb/genes"), "seed": (33, 1),
-        "input_mode": ("snps", "blocks"), "l2": (1e-5, 1e-3), "dropout": (0.25, 0.5), "lr_schedule": ("constant", "plateau"),
+        "input_mode": ("snps", "blocks"), "sampler": ("rotation", "shuffled"), "gamma": (0.5, 0.0),
+        "l2": (1e-5, 1e-3), "dropout": (0.25, 0.5), "lr_schedule": ("constant", "plateau"),
         "input_mask": (0.0, 0.4), "stop_patience": (8, 16), "stop_burnin": (0, 2000), "tune_min_validations": (2, 8),
         "tune_trials": (0, 12), "tune_gpus": (None, "auto"),
         "val_min_participants": (0, 20000), "val_max_epoch_equiv": (0.0, 1.0), "min_participants": (0, 128000),

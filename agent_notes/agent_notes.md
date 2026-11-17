@@ -1233,3 +1233,29 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   table-width and shape cell start from the rung's ridge warm start (`INIT = "ridge"`); the search is
   `--tune_space table` with six trials (`SEARCH`); the recipe's flags are explicit. Not yet relaunched: the
   previous chain (eps/decay changes, no warm start) is still running T0 as a reference until Robert decides.
+
+## 2026-11-17 (late night, UTC) — Plain cross-entropy at natural prevalence as the default objective
+
+- Robert, after a reading of ten genotype-to-phenotype papers (the one credible deep-learning win over LDpred2,
+  PRSformer at 3.8 million people, trains on plain summed cross-entropy at natural prevalence and found focal,
+  task-uncertainty and averaged losses worse; the studies that balanced cases and controls lost or weakened
+  their baselines): `main_multilabel.py` DEFAULTS gain `--sampler shuffled --gamma 0`. Every disease's term is
+  then its mean cross-entropy over the batch and the loss their mean, the published DeepGP's objective extended
+  to 30 diseases. The rotation of disease-balanced batches with its sampling-rate correction and the square-root
+  class weight (the defaults until now; built for the published batch of 21, where 45% of batches held no case of
+  the rarest disease; at batch 64 that share is 9%) stay as the comparison variants of methods 5.3. Reasons in
+  methods 5.2 ("Why plain cross-entropy at natural prevalence"): the correction costs a fifth of the draws (Kish),
+  the weight departs from the comparators' maximum likelihood, inflates rare diseases' loss curvature 1.11 to
+  3.82 against a shared table decay, and pulls the warm-started table off the population-weighted ridge.
+- No model or loss code changed: `WideLoss` with gamma 0 and the shuffled sampler was already the published loss.
+  `scripts/multilabel_synthetic.sh` now passes `--sampler rotation --gamma 0.5` explicitly so that its recorded
+  bands (`multilabel_synthetic_seeds.csv`, measured under the rotation) stay valid. Tests: the defaults' pins
+  (`test_ml_entry_points.py` GIVEN list and the differences dict, `test_ml_wide.py::test_the_multi_disease_defaults`)
+  and `test_ml_loss.py::test_the_multi_disease_defaults_give_plain_cross_entropy`. README flag table and recipe
+  paragraph, methods Figure 1 legend, 4.11, 5.1 to 5.3, 6 and the section 10 table updated; references added
+  (Dibaeinia 2025, Kelemen 2025, Yang 2025; Zhu now the published 2026 version).
+- Chain (Scripts chains/run_chain.py): `OBJECTIVE` appended to every cell's flags; `ROTATION` is one paired
+  ablation cell at the top rung (`transformer_S3_prive431_dosage_ridge_hm3plus_rotation`, from the warm start).
+  The chain was relaunched from the new export; the no-initialisation ablation search that had run 1.5 hours
+  under the old objective was stopped and its run folder removed so that it reruns under the new one; the
+  linear-comparator builds were restarted and resumed from their finished chromosome groups.

@@ -1,7 +1,9 @@
-"""WideDeepGP: the DeepGP network with one logit per disease, beside an optional linear PRS path,
-and its training logic (methods.md sections 4 and 10). The network keeps the published parameter
-names (dataEmbed, encoders, norm_f, mhsa, covariate_encoder, cov_norm, combine), so weights of
-models.DeepGP.SNPCOV_Model_mamba load into it."""
+"""WideDeepGP: the DeepGP network with one logit per disease, and its training logic (methods.md
+sections 4 and 10). Two input modes: 'blocks' (the default of main_multilabel.py), a per-SNP table
+pooled by LD block (blockencoder.py) and one mixer over the block tokens plus the covariate token;
+'snps', the published per-chromosome SNP encoders, which keep the published parameter names
+(dataEmbed, encoders, norm_f, mhsa, covariate_encoder, cov_norm, combine) so weights of
+models.DeepGP.SNPCOV_Model_mamba load into them, beside an optional linear PRS path (--wide)."""
 import hashlib
 import math
 import warnings
@@ -18,6 +20,7 @@ from layers.Transformer_EncDec import EncoderLayer
 from models.DeepGP import FCN, RMSNorm, layer_norm_fn
 
 from . import metrics as M
+from .blockencoder import BlockEncoder
 from .blocks import make_block
 from .losses import WideLoss
 
@@ -83,9 +86,10 @@ def prs_penalty(loss_fn, n_train, prs_var):
 
 class WideDeepGP(pl.LightningModule):
     """hp: a plain dict, saved with every checkpoint (train.model_hparams). pos: one array of
-    positions per input sequence. annot: optional standardised float arrays [L_i, A], one per sequence."""
+    positions per input sequence. annot: optional standardised float arrays [L_i, A], one per sequence.
+    blocks: the partition (genostore.datamodule.load_partition), required in blocks mode."""
 
-    def __init__(self, hp, pos, annot=None):
+    def __init__(self, hp, pos, annot=None, blocks=None):
         super().__init__()
         hp = dict(hp)
         self.save_hyperparameters({"hp": hp})
@@ -102,6 +106,14 @@ class WideDeepGP(pl.LightningModule):
         self.wide = hp.get("wide", "off") or "off"
         if self.wide not in WIDE_MODES:
             raise ValueError(f"wide must be one of {WIDE_MODES}")
+        self.blocks = hp.get("input_mode", "snps") == "blocks"
+        if self.blocks:
+            if self.wide != "off" or int(hp.get("annot_dim", 0)):
+                raise ValueError("blocks mode has no linear PRS path and no annotation vectors (--wide off, no --annot)")
+            if self.final_pool != "mean":
+                raise ValueError("blocks mode pools the mixer's tokens by their mean (--final_pool mean)")
+            if blocks is None or hp["partition_digest"] != blocks["digest"]:
+                raise ValueError("the block partition given does not match the one this model was configured for")
         if self.wide == "only" and int(hp.get("annot_dim", 0)):
             raise ValueError("annotation vectors act on the deep network's input; --wide only has no deep network")
         if self.wide != "off" and hp.get("loss_outputs", "all") == "target":
@@ -125,18 +137,36 @@ class WideDeepGP(pl.LightningModule):
         if hp["pos_digest"] != positions_digest(pos) or [len(p) for p in pos] != list(hp["seq_len"]):
             raise ValueError("the SNP positions given do not match the ones this model was configured for")
         embed = {"cov": DataEmbedding, "vocab": DataEmbeddingVocab}[hp["snp_embed"]]
+        block_kw = dict(bi_direct=bool(hp.get("bi_direct", False)), m3_d_state=hp.get("m3_d_state"),
+                        n_heads=int(hp["n_heads"]), dropout=float(hp["dropout"]))
+
+        if self.blocks:
+            # one sequence: the block tokens and the covariate token, then the mixer, a plain norm and the mean
+            self.encoder = BlockEncoder(blocks, hp["embed_dim"], d, hp["snp_code"], float(hp["dropout"]))
+            self.layers = nn.ModuleList([make_block(d, mixer, **block_kw) for _ in range(int(hp["e_layers"]))])
+            self.norm_f = nn.LayerNorm(d)
+            if self.use_cov:
+                self.covariate_encoder = FCN(int(hp["n_cov"]), d)
+                self.cov_norm = nn.LayerNorm(d)
+            self.combine = FCN((1 + self.use_cov) * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
+                               hidden_layers=int(hp["n_fcn"]))
+            # the linear readout of the table summed over all SNPs: logit_j += sum_e a_je sum_s x_s T_se (a rank-embed_dim
+            # ridge PRS), beside the mixer's reading of the blocks
+            self.readout = nn.Linear(int(hp["embed_dim"]), self.n_labels, bias=False)
+            self.lr_table = float(hp["lr_table"])
+            self.table_lambda = 1.0 / (2.0 * float(hp["label_counts"]["n"]) * float(hp["table_var"]))
 
         # built in the published class's order, so one seed gives the same initial weights
         encoders, data_embed, norms = [], [], []
-        for p in (pos if self.wide != "only" else []):
-            encoders.append(nn.ModuleList([make_block(d, mixer, bool(hp.get("bi_direct", False)), hp.get("m3_d_state"))
-                                           for _ in range(int(hp["e_layers"]))]))
+        for p in (pos if self.wide != "only" and not self.blocks else []):
+            encoders.append(nn.ModuleList([make_block(d, mixer, **block_kw) for _ in range(int(hp["e_layers"]))]))
             data_embed.append(embed(int(hp["enc_in"]), d, np.asarray(p), float(hp["dropout"])))
             norms.append(RMSNorm(d, eps=1e-5))
-        self.encoders = nn.ModuleList(encoders)
-        self.dataEmbed = nn.ModuleList(data_embed)
-        self.norm_f = nn.ModuleList(norms)
-        if self.wide != "only":
+        if not self.blocks:
+            self.encoders = nn.ModuleList(encoders)
+            self.dataEmbed = nn.ModuleList(data_embed)
+            self.norm_f = nn.ModuleList(norms)
+        if self.wide != "only" and not self.blocks:
             self.mhsa = EncoderLayer(AttentionLayer(FullAttention(mask_flag=False), d_model=d,
                                                     n_heads=int(hp["n_heads"])), d_model=d)
             if self.use_cov:
@@ -145,7 +175,7 @@ class WideDeepGP(pl.LightningModule):
             n_vec = self.n_seq + self.use_cov            # a vector per sequence, and the covariates'
             self.combine = FCN(n_vec * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
                                hidden_layers=int(hp["n_fcn"]))
-        for emb in self.dataEmbed:                       # position tables follow from the SNP list: not saved
+        for emb in (self.dataEmbed if not self.blocks else []):   # position tables follow from the SNP list: not saved
             emb.position_embedding.register_buffer("pe", emb.position_embedding.pe, persistent=False)
 
         # the linear PRS path (methods.md 4.10): logit_j += scale * sum_s x_s theta_sj + sum_k cov_k v_kj
@@ -250,12 +280,57 @@ class WideDeepGP(pl.LightningModule):
     def _encode_anchored(self, i, x, anchor):
         return self._encode(i, x) + 0.0 * anchor
 
+    def _block_logits(self, x_all):
+        """Blocks mode: the block tokens and the covariate token through the mixer, their mean beside the
+        covariate vector into the head, plus the linear readout of the pooled table."""
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and x_all[0].is_cuda):
+            pooled = self.encoder.pool(x_all[:-1] if self.use_cov else x_all)
+            h = self.encoder.tokens(pooled)
+            if self.use_cov:
+                cov = self.cov_norm(self.covariate_encoder(x_all[-1]))
+                h = torch.cat([h, cov[:, None]], dim=1)
+            residual = None
+            for layer in self.layers:
+                if self.grad_ckpt and self.training:
+                    h, residual = checkpoint(layer, h, residual, use_reentrant=False)
+                else:
+                    h, residual = layer(h, residual)
+            h = self.norm_f(h if residual is None else h + residual)
+        mean = h.float().mean(dim=1)
+        deep = self.combine(torch.cat([mean, cov.float()], dim=1) if self.use_cov else mean)
+        return deep + self.readout(pooled.float().sum(dim=1))
+
     def forward(self, x_all):
         """x_all: the input sequences, then the covariates. Returns logits [B, n_out]."""
+        if self.blocks:
+            return self._block_logits(x_all)
         if self.wide == "only":
             return self.wide_logits(x_all)
         logits = self._deep_logits(x_all)
         return logits if self.wide == "off" else logits.float() + self.wide_logits(x_all)
+
+    def big_params(self):
+        """The per-SNP weights (the PRS, or the table): their own learning rate, logged apart."""
+        if self.blocks:
+            return list(self.encoder.tables)
+        return list(self.prs) if self.wide != "off" else []
+
+    def parameter_counts(self):
+        """Blocks mode: parameters by module, for the size axes (the table and the identities are the
+        embedding parameters; the rest is Kaplan's N)."""
+        e = self.encoder
+        count = lambda *mods: int(sum(p.numel() for m in mods for p in m.parameters()))
+        return {"table": count(e.tables), "identity": count(e.block_emb, e.chrom_emb), "block_mlp": count(e.mlp),
+                "mixer": count(self.layers, self.norm_f),
+                "covariates": count(self.covariate_encoder, self.cov_norm) if self.use_cov else 0,
+                "head": count(self.combine, self.readout)}
+
+    def snapshot(self, step):
+        """A weights-only snapshot that load_model reads; the table in bfloat16 (it is most of the weights)."""
+        table = {f"encoder.tables.{i}" for i in range(self.n_seq)} if self.blocks else set()
+        return {"state_dict": {k: v.detach().to("cpu", torch.bfloat16 if k in table else v.dtype)
+                               for k, v in self.state_dict().items()},
+                "hyper_parameters": {"hp": self.hp}, "global_step": int(step), "samples_seen": int(self.samples_seen)}
 
     def prs_scores(self, x_all):
         """Each person's PRS per output [B, n_out]: the SNP part of the linear path, in float32."""
@@ -272,7 +347,11 @@ class WideDeepGP(pl.LightningModule):
             return out
 
     def penalty(self):
-        """The ridge penalty of the PRS weights on the scale of the loss (None without one)."""
+        """The L2 penalty of the per-SNP weights on the scale of the loss (None without one): the PRS
+        weights' ridge penalty, or the table's sum of squares over 2 N tau."""
+        if self.blocks:
+            tables = [t for t in self.encoder.tables if t.requires_grad]
+            return self.table_lambda * sum((t.float() ** 2).sum() for t in tables) if tables else None
         if self.wide == "off" or self.wide_freeze:
             return None
         sq = sum((w.float() ** 2).sum(dim=0) for w in self.prs)
@@ -311,7 +390,8 @@ class WideDeepGP(pl.LightningModule):
         pen = self.penalty()
         if pen is not None:
             loss = loss + pen
-            self.log("train/prs_penalty", pen, on_step=True, on_epoch=False, batch_size=y.shape[0])
+            self.log("train/table_penalty" if self.blocks else "train/prs_penalty", pen, on_step=True, on_epoch=False,
+                     batch_size=y.shape[0])
         self.samples_seen += int(y.shape[0])
         if self._train_sum is None:
             self._train_sum = torch.zeros_like(per_label, dtype=torch.float64)
@@ -454,7 +534,15 @@ class WideDeepGP(pl.LightningModule):
         return state, rows
 
     def configure_optimizers(self):
-        if self.wide == "off":
+        if self.blocks:
+            # the table carries its penalty in the loss (its optimum is the penalised one) and moves at its own pace
+            tables = [t for t in self.encoder.tables if t.requires_grad]
+            rest = [p for p in self.parameters() if p.requires_grad and not any(p is t for t in self.encoder.tables)]
+            groups = [{"params": rest, "lr": self.lr, "weight_decay": self.l2}]
+            if tables:
+                groups.append({"params": tables, "lr": self.lr_table, "weight_decay": 0.0})
+            opt = torch.optim.AdamW(groups, lr=self.lr)
+        elif self.wide == "off":
             opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.l2)
         else:
             # the PRS weights carry a ridge penalty in the loss instead of AdamW's decay, so that their

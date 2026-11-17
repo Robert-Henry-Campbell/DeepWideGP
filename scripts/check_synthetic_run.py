@@ -9,7 +9,8 @@ come from five training seeds of the smoke run (multilabel_synthetic.sh) in
 multilabel_synthetic_seeds.csv (methods.md section 12): a heritable trait, and the mean over
 heritable traits, must reach the lowest seed minus the larger of MARGIN and SD_MULTIPLE seed
 standard deviations; the null trait must stay in NULL_BAND. A run with annotation vectors is
-held to the annotated seeds' bands.
+held to the annotated seeds' bands, and a blocks-mode run (--input_mode blocks) to its mixer's
+(arms blocks_transformer and blocks_bimamba1, five seeds each, measured on 17 November 2026).
 """
 import csv
 import json
@@ -23,9 +24,18 @@ NULL_TRAIT, NULL_BAND = "null_f", (0.40, 0.60)
 MEAN = "mean over heritable traits"
 
 
-def bands(annot=False, table=SEEDS_TABLE):
-    """{trait: lowest acceptable validation AUROC}, plus the same for the mean over heritable traits."""
-    arm = "annotated" if annot else "plain"
+def arm_of(args):
+    """The seed-band arm of a run from its config.json arguments."""
+    if args.get("input_mode") == "blocks":
+        return f"blocks_{args['mixer']}"
+    return "annotated" if args.get("annot") else "plain"
+
+
+def bands(arm=False, table=SEEDS_TABLE):
+    """{trait: lowest acceptable validation AUROC}, plus the same for the mean over heritable traits.
+    ``arm``: an arm name, or the older bool (True: annotated, False: plain)."""
+    if isinstance(arm, bool):
+        arm = "annotated" if arm else "plain"
     by_trait, by_seed = {}, {}
     with open(table) as f:
         for r in csv.DictReader(f):
@@ -38,10 +48,11 @@ def bands(annot=False, table=SEEDS_TABLE):
     return {k: int(floor(v) * 100) / 100.0 for k, v in by_trait.items()}        # rounded down to 0.01
 
 
-def check(results, truth, verbose=True, annot=False):
+def check(results, truth, verbose=True, annot=False, arm=None):
     """results: results.json of a run; truth: truth.json of the dataset. Returns a list of failures."""
     ceiling = {t["label"]: t["oracle_auroc"]["val"] for t in truth["traits"]}
-    low = bands(annot)
+    arm = arm or ("annotated" if annot else "plain")
+    low = bands(arm)
     fails, herit = [], []
     if verbose:
         print(f"{'trait':<10}{'AUROC':>8}{'ceiling':>9}{'band':>16}")
@@ -60,13 +71,14 @@ def check(results, truth, verbose=True, annot=False):
     if mean < low[MEAN]:
         fails.append(f"mean AUROC of the heritable traits {mean:.3f} < {low[MEAN]:.2f}")
     if verbose:
-        print(f"{MEAN} {mean:.3f} (>= {low[MEAN]:.2f}; {'with' if annot else 'no'} annotation vectors)")
+        how = {"plain": "no annotation vectors", "annotated": "with annotation vectors"}.get(arm, f"arm {arm}")
+        print(f"{MEAN} {mean:.3f} (>= {low[MEAN]:.2f}; {how})")
     return fails
 
 
 if __name__ == "__main__":
     run, truth_path = sys.argv[1], sys.argv[2]
-    annot = bool(json.load(open(f"{run}/config.json"))["args"].get("annot"))
-    fails = check(json.load(open(f"{run}/results.json")), json.load(open(truth_path)), annot=annot)
+    arm = arm_of(json.load(open(f"{run}/config.json"))["args"])
+    fails = check(json.load(open(f"{run}/results.json")), json.load(open(truth_path)), arm=arm)
     print("PASS" if not fails else "FAIL: " + "; ".join(fails))
     sys.exit(1 if fails else 0)

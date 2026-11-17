@@ -22,9 +22,10 @@ import pytest
 from ml_helpers import REPO, make_cfg, synthetic_dataset
 
 # main_multilabel.py's own defaults, spelled out
-GIVEN = ["--snp_stats", "train", "--data_dir", "pukb/genes", "--seed", "1", "--wide", "on", "--wide_kappa", "0.1",
-         "--tune_trials", "12", "--tune_gpus", "auto", "--val_min_participants", "20000", "--val_max_epoch_equiv", "1",
-         "--min_participants", "128000", "--snapshots_per_decade", "6", "--snapshots_max", "40"]
+GIVEN = ["--snp_stats", "train", "--data_dir", "pukb/genes", "--seed", "1", "--input_mode", "blocks",
+         "--lr_schedule", "cosine", "--warmup_steps", "200", "--tune_trials", "12", "--tune_gpus", "auto",
+         "--val_min_participants", "20000", "--val_max_epoch_equiv", "1", "--min_participants", "128000",
+         "--snapshots_per_decade", "6", "--snapshots_max", "40"]
 
 
 # ---- main_multilabel.py ----
@@ -32,15 +33,16 @@ GIVEN = ["--snp_stats", "train", "--data_dir", "pukb/genes", "--seed", "1", "--w
 @pytest.mark.parametrize("argv", [
     [], ["--label", "x"],
     ["--label", "x", "--seed", "7", "--snp_stats=store", "--data_dir", "d", "--final_pool", "last"],
-    ["--wide", "off", "--tune_trials", "0", "--final_pool", "concat", "--tune_gpus", "1,2", "--prs_grid", "none"],
+    ["--wide", "on", "--tune_trials", "0", "--final_pool", "concat", "--tune_gpus", "1,2", "--prs_grid", "none"],
+    ["--input_mode", "snps", "--final_pool", "concat"],
     ["--min_participants", "0", "--val_min_participants", "0", "--exp_name", "r", "--resume", "--data_dir=e"]])
 def test_parse_args_is_the_shared_parser_with_the_multi_disease_defaults(argv):
     import main_multilabel
     from args_generator import args_initial
     got = vars(main_multilabel.parse_args(argv))
     want = vars(args_initial(GIVEN + argv))
-    if want["final_pool"] == "concat":                   # the parser's default, given or not, becomes atten
-        want["final_pool"] = "atten"
+    if want["final_pool"] == "concat":                   # the parser's default, given or not: mean (blocks) or atten
+        want["final_pool"] = "mean" if want["input_mode"] == "blocks" else "atten"
     assert list(got) == list(want)                       # the order of config.json's and search.json's keys
     assert got == want
 
@@ -50,10 +52,11 @@ def test_what_main_multilabel_changes_in_the_shared_defaults(monkeypatch):
     from args_generator import args_initial
     mine, shared = vars(main_multilabel.parse_args([])), vars(args_initial([]))
     assert {k: (shared[k], mine[k]) for k in shared if shared[k] != mine[k]} == {
-        "snp_stats": ("store", "train"), "data_dir": (None, "pukb/genes"), "seed": (33, 1), "wide": ("off", "on"),
-        "wide_kappa": (0.03, 0.1), "tune_trials": (0, 12), "tune_gpus": (None, "auto"),
+        "snp_stats": ("store", "train"), "data_dir": (None, "pukb/genes"), "seed": (33, 1),
+        "input_mode": ("snps", "blocks"), "lr_schedule": ("constant", "cosine"), "warmup_steps": (0, 200),
+        "tune_trials": (0, 12), "tune_gpus": (None, "auto"),
         "val_min_participants": (0, 20000), "val_max_epoch_equiv": (0.0, 1.0), "min_participants": (0, 128000),
-        "snapshots_per_decade": (8, 6), "snapshots_max": (0, 40), "final_pool": ("concat", "atten")}
+        "snapshots_per_decade": (8, 6), "snapshots_max": (0, 40), "final_pool": ("concat", "mean")}
     monkeypatch.setattr(sys, "argv", ["main_multilabel.py", "--label", "y", "--seed", "5"])
     cfg = main_multilabel.parse_args()                   # the command line when no argv is given
     assert (cfg.label, cfg.seed, cfg.snp_stats, cfg.data_dir) == ("y", 5, "train", "pukb/genes")
@@ -68,7 +71,7 @@ def test_main_trains_once_and_reports(monkeypatch, capsys):
     seen = []
     monkeypatch.setattr(main_multilabel, "run_training", lambda cfg: seen.append(cfg) or out)
     assert main_multilabel.main(["--label", "x", "--tune_trials", "0", "--exp_name", "r"]) is out
-    assert seen[0].exp_name == "r" and seen[0].tune_trials == 0 and seen[0].wide == "on"
+    assert seen[0].exp_name == "r" and seen[0].tune_trials == 0 and seen[0].wide == "off"
     assert capsys.readouterr().out == (
         "\nrun directory: /runs/t/r\n"
         "best mean validation AUROC 0.6123 at step 40 (640 participants seen); trained 1.50 epoch-equivalents in "
@@ -161,7 +164,7 @@ def test_the_stand_alone_tuner(tmp_path, monkeypatch, capsys):
     out = tune_optuna.main(["--study", "st", "--n_trials", "3", "--run_dir", runs, "--", "--label", "x", "--seed", "3"])
     assert [c.exp_name for c in seen] == ["trial_0000", "trial_0001", "trial_0002"]
     for c in seen:                                       # main_multilabel.py's defaults, then the given arguments
-        assert (c.run_dir, c.experiment, c.seed, c.snp_stats, c.wide, c.tune_trials) == (runs, "st", 3, "train", "on", 12)
+        assert (c.run_dir, c.experiment, c.seed, c.snp_stats, c.wide, c.tune_trials) == (runs, "st", 3, "train", "off", 12)
         assert {"lr", "l2", "dropout", "accumulate", "warmup_steps"} <= set(vars(c))
     with open(os.path.join(runs, "st", "best.json")) as f:
         best = json.load(f)
@@ -176,9 +179,9 @@ def test_the_stand_alone_tuner(tmp_path, monkeypatch, capsys):
                                               optuna.trial.TrialState.COMPLETE]
     assert study.trials[0].user_attrs == {"run_dir": "/r/trial_0000", "epoch_equivalents": 1.0, "train_seconds": 2.5}
     assert best["best_params"] == study.trials[2].params and list(best["best_params"]) == [
-        "lr", "l2", "dropout", "accumulate", "warmup_steps"]
+        "lr", "l2", "dropout", "table_var", "accumulate", "warmup_steps"]        # table_var: blocks mode, the default
     ref = tune_optuna.open_study("ref", str(tmp_path), seed=1).ask()   # the sampler has the project's seed
-    tune_optuna.suggest(ref, SimpleNamespace(), "optim")
+    tune_optuna.suggest(ref, SimpleNamespace(input_mode="blocks"), "optim")
     assert ref.params == study.trials[0].params
     def out_of_memory(cfg, trial=None):
         raise torch.cuda.OutOfMemoryError("fake")

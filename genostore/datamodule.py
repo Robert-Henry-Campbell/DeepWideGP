@@ -70,6 +70,45 @@ def _as_tensor(a):
     return torch.empty(0, dtype=torch.uint8) if a is None else torch.from_numpy(np.ascontiguousarray(a))
 
 
+def partition_digest(ids):
+    """Digest of a partition as the model sees it: the block index of every SNP of every input sequence."""
+    h = hashlib.sha256()
+    for a in ids:
+        h.update(np.ascontiguousarray(a, dtype=np.int64).tobytes())
+    return h.hexdigest()[:16]
+
+
+def load_partition(spec, store, regions):
+    """The LD-block partition of the input sequences: {"ids": one int64 array per sequence with the block
+    index (0 .. n_blocks - 1, contiguous runs that never cross a sequence) of each SNP, "n_blocks",
+    "digest", "name"}. ``spec`` is a partition.npz (or its folder) in the layout of
+    DeepWideGP-Scripts scripts/widedeepgp-blocks/methods.md, checked against the store's variants, or
+    'uniform:<k>' (k SNPs per block, for tests). Blocks absent from the sequences' regions are dropped."""
+    if str(spec).startswith("uniform:"):
+        k, start, raw = int(str(spec).split(":", 1)[1]), 0, []
+        for seq in regions:
+            n = sum(v1 - v0 for _, v0, v1 in seq)
+            raw.append(np.arange(n) // k + start)
+            start = int(raw[-1][-1]) + 1
+        name = str(spec)
+    else:
+        path = spec if str(spec).endswith(".npz") else os.path.join(spec, "partition.npz")
+        z = np.load(path)
+        chroms = [str(c) for c in z["chroms"]]
+        if chroms != list(store.chroms) or [int(n) for n in z["n_variants"]] != [store.n_variants(c) for c in chroms]:
+            raise ValueError(f"{path}: the partition was built for other chromosomes or variant counts than the store's")
+        ids = np.concatenate([store.variants(c)["id"] for c in chroms])
+        if hashlib.sha256("\n".join(ids).encode()).hexdigest() != str(z["variant_digest"]):
+            raise ValueError(f"{path}: the partition was built for other variants than the store's")
+        raw = [np.concatenate([z[f"block_chr{c}"][v0:v1] for c, v0, v1 in seq]) for seq in regions]
+        name = os.path.basename(os.path.dirname(os.path.abspath(path)))
+    _, inv = np.unique(np.concatenate(raw), return_inverse=True)
+    out = np.split(inv.astype(np.int64), np.cumsum([len(a) for a in raw])[:-1])
+    if any(np.any(np.diff(a) < 0) for a in out) or any(a[-1] >= b[0] for a, b in zip(out, out[1:])):
+        raise ValueError(f"{spec}: blocks must be contiguous runs of SNPs in store order that do not cross sequences")
+    return {"ids": out, "n_blocks": int(inv.max()) + 1, "digest": partition_digest(out), "name": name}
+
+
 class StoreBatchDataset(Dataset):
     """Indexing with a *list of sample indices* returns that whole batch, still encoded."""
 
@@ -117,6 +156,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.cont = configs.cont_pheno
         self.scaling = configs.scaling
         self.snp_embed = configs.snp_embed
+        # standardised dosages, except for the SNP-code lookups (--snp_embed vocab, --snp_code genotype), which read raw ones
+        self.scale_snps = self.snp_embed == "cov" and getattr(configs, "snp_code", "dosage") != "genotype"
         self.ve = configs.ve
         self.shuffle = configs.shuffle
         self.snp_stats = getattr(configs, "snp_stats", "store")
@@ -164,6 +205,11 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.genes = range(sum(len(g) for g in self.genes_chr))
         self.pos_chr = [self._positions(seq) for seq in self.regions]
         self.seq_len = [len(g) for g in self.genes_chr]
+        self.partition = None
+        if getattr(configs, "input_mode", "snps") == "blocks":
+            if not getattr(configs, "partition", None):
+                raise ValueError("--input_mode blocks needs --partition (a partition.npz, its folder, or uniform:<k>)")
+            self.partition = load_partition(configs.partition, self.store, self.regions)
 
         self._row_of = {s: i for i, s in enumerate(self.store.samples)}
         tr = self._read_table("train", self._row_of)
@@ -227,7 +273,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         if not self.scaling:
             return
         tr = self.splits["train"]
-        if self.snp_embed == "cov":
+        if self.scale_snps:
             if self.snp_stats == "train":
                 mean, std = self._train_snp_stats(tr["rows"])
             else:                       # statistics stored with the genotypes (all store samples)

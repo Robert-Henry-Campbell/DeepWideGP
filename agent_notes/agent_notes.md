@@ -1095,3 +1095,63 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   widedeepgp.metrics, and DeepWideGP-Scripts' tests.
 - The harness can check later refactors: harness.py --code DIR --out DIR --gpu N, then
   compare.py out_old_1 DIR (usage in harness.py's docstring).
+
+## 2026-11-17 (03:00 UTC) — LD-block mode: the end-to-end block model, the default (plan revision 7, steps 1 to 5)
+
+- Tag `pre-blocks` marks `widening` before this work (7dc184d). `main_multilabel.py` now defaults to
+  `--input_mode blocks`, `--wide off` (the linear PRS path stays in the code as an option and is never the
+  reported model), `--lr_schedule cosine --warmup_steps 200`, and `--final_pool mean` in blocks mode
+  (`concat` maps to `atten` in snps mode as before); `--wide_kappa` is no longer set here (parser 0.03).
+  New flags in `args_generator.py`: `--input_mode`, `--partition`, `--snp_code`, `--embed_dim`, `--table_var`,
+  `--table_kappa`, `--init_encoder`, `--freeze_encoder`; `--mixer transformer`.
+- `widedeepgp/blockencoder.py` (new): `BlockEncoder`, the first layer of blocks mode: a learned table with
+  `embed_dim` numbers per SNP (dosage code: one vector times the standardised dosage; genotype code: three
+  vectors per SNP with hat-function weights, raw dosages), pooled by LD block as one matmul per contiguous
+  block (an exact segment sum), learned identity vectors per block and chromosome, a shared MLP
+  (d_e -> 4 d_e -> d, GELU) and dropout; `load_init` for `--init_encoder` files; `table_learning_rate`.
+- `widedeepgp/model.py`: the blocks branch (one sequence of block tokens plus the covariate token through
+  `--e_layers` mixer blocks, LayerNorm, mean over tokens concatenated with the covariate vector into the
+  head) **plus a linear readout of the table summed over all SNPs** (`readout`, Linear(embed_dim, n_labels),
+  added to the logits). Why: in a probe on synthetic traits (4,000 participants, 132 SNPs, six traits) the
+  model without it learned the three traits with shared causal SNPs only after a phase transition and never
+  the two traits with causal SNPs of their own (tuning AUROC 0.48 and 0.39 against ceilings 0.78 and 0.97;
+  with one SNP per block it learned nothing at all; a smaller table learning rate and shuffled batches did
+  not help): a zero-initialised table takes its gradient direction from a random, fast-moving downstream
+  network and its Adam steps never accumulate. With the readout every trait is learned after one pass
+  (mean heritable AUROC 0.83 against a ceiling of 0.86; the SNP-mode model reached 0.75 on the same data).
+  A rank-embed_dim ridge PRS is now an exact special case (head at zero), pinned by a test. The table has its
+  own AdamW group (`lr_table` = table_kappa x table_var x sqrt(batch) / sqrt(M), no decay) and an L2 penalty
+  sum(T^2) / (2 N table_var) in the loss (`train/table_penalty`); `--grad_ckpt` checkpoints per mixer layer;
+  `snapshot()` writes weights-only snapshots with the table in bfloat16 (Snapshots no longer calls
+  Lightning's save_checkpoint); `parameter_counts()` by module for config.json's `blocks` section;
+  `big_params()` for RunLog (`train/lr_table`, `train/grad_norm_table`). `widedeepgp/blocks.py`:
+  `TransformerBlock` (pre-norm nn.TransformerEncoderLayer, 4 d feed-forward, GELU) with the Block interface.
+- `genostore/datamodule.py`: `load_partition` (a partition.npz of the design document's layout, checked
+  against the store's chromosomes, variant counts and a sha256 of the variant IDs, or `uniform:<k>`; blocks
+  absent from a region subset are dropped and the rest renumbered; non-contiguous or cross-sequence blocks
+  refused), `partition_digest` (in every hp as `partition_digest`; refused on load, `--init_from`, resume);
+  the genotype code reads raw dosages (`scale_snps`). `widedeepgp/train.py`: `block_hparams`, the `blocks`
+  config section (partition, n_tokens, n_parameters_by_module, embedding and non-embedding counts,
+  init_encoder_sha256), `--init_encoder` loading, `file_digest`. `tune_optuna.suggest` adds `table_var`
+  (log-uniform 0.01 to 100) in blocks mode. `pretrain_blocks.py` (new): masked-SNP pretraining of the first
+  layer (15% of SNPs hidden, genotype class predicted from the block's hidden layer through a per-SNP output
+  vector) on a dataset's training rows, writing an `--init_encoder` file with a manifest.
+- Scripts: `multilabel_synthetic.sh` passes `--input_mode snps --lr_schedule constant --warmup_steps 0`
+  explicitly; `check_synthetic_run.py` picks a run's seed-band arm from its config (plain, annotated,
+  blocks_transformer, blocks_bimamba1; the blocks arms' rows are being measured, runs/blocks_bands).
+- Tests: `tests/test_ml_blocks.py` (18, CPU: the partition and its checks, pooling equals numpy segment sums
+  at embed_dim 1/16/64, the genotype code, the ridge special case, names and counts, refusals, the table's
+  learning rate and penalty, init files, a run with bf16 snapshots, scoring and a resume, a one-trial search
+  and a seed retrain reproducing the chosen configuration, learning on the synthetic traits, pretraining)
+  and `tests/test_ml_blocks_gpu.py` (7: both mixers in bf16, checkpointing changes nothing, the S5 models
+  at 2,001 tokens and batch 128 fit: transformer d256x8 22.8 GiB, Mamba d256x14 25.2 GiB; the size table).
+  Existing tests updated for the new defaults (test_ml_entry_points, test_ml_wide, test_ml_training_pieces,
+  test_ml_model_pieces, test_ml_train). CPU suite: 227 passed, 39 skipped, 1 deselected (the timing test
+  `test_free_workers_take_the_next_trial`, which fails under today's load as before). GPU: test_ml_model,
+  test_ml_train (not slow), test_ml_vocab, test_genostore_datamodule: 46 passed.
+- Mixer parameter counts (for the chains' size table): transformer S1-S5 (d16x1, d32x2, d64x4, d128x6,
+  d256x8) 3.3k, 25k, 200k, 1.19M, 6.32M; Mamba matched by depth (1, 2, 6, 9, 14 layers) 3.9k, 22k, 209k,
+  1.09M, 6.25M.
+- Not implemented (recorded in the plan): the frozen cross-fitted first-layer deep ablation (a third input
+  mode); E5 scoring on the held-out groups (another store; needs a scoring step that reuses the run's
+  standardisation). Documentation of this change: README and methods.md (section 4.11), updated the same day.

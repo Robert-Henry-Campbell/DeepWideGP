@@ -164,9 +164,9 @@ def test_the_multi_disease_defaults():
     cfg = main_multilabel.parse_args(["--label", "x"])
     assert (cfg.wide, cfg.wide_kappa, cfg.prs_grid, cfg.tune_trials, cfg.tune_gpus, cfg.val_min_participants,
             cfg.val_max_epoch_equiv, cfg.min_participants, cfg.snapshots_per_decade, cfg.snapshots_max, cfg.seed) == \
-        ("on", 0.1, None, 12, "auto", 20000, 1.0, 128000, 6, 40, 1)
-    cfg = main_multilabel.parse_args(["--label", "x", "--wide", "off", "--tune_trials", "0"])
-    assert (cfg.wide, cfg.tune_trials) == ("off", 0)
+        ("off", 0.03, None, 12, "auto", 20000, 1.0, 128000, 6, 40, 1)       # the ridge path is off by default (16 Nov 2026)
+    cfg = main_multilabel.parse_args(["--label", "x", "--wide", "on", "--tune_trials", "0"])
+    assert (cfg.wide, cfg.tune_trials) == ("on", 0)
     legacy = args_initial(["--label", "x", "--rd_mode", "x"])       # the published script's parser is unchanged
     assert (legacy.wide, legacy.tune_trials, legacy.gpus, legacy.snapshots_per_decade) == ("off", 0, 1, 8)
 
@@ -177,7 +177,7 @@ def test_a_run_tunes_itself(tmp_path):
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
     argv = ["--data_dir", data_dir, "--label", "multi", "--rd_mode", "store", "--d_model", "16", "--n_heads", "4",
             "--num_workers", "0", "--batch_size", "16", "--run_dir", str(tmp_path / "runs"), "--experiment", "t",
-            "--exp_name", "r", "--wide", "only", "--prs_grid", "0.1,1,10", "--max_epoch_equiv", "4",
+            "--exp_name", "r", "--wide", "only", "--input_mode", "snps", "--prs_grid", "0.1,1,10", "--max_epoch_equiv", "4",
             "--val_min_participants", "0", "--min_participants", "0", "--stop_patience", "0"]
     root = tmp_path / "runs" / "t" / "r"
     main_multilabel.main(argv)

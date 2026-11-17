@@ -379,7 +379,7 @@ def test_the_mamba3_settings_and_the_refused_wrappers():
 @pytest.mark.skipif(not have_fork() or have_mamba3(), reason="needs the fork's environment, without Mamba-3")
 def test_unknown_blocks_and_mamba3_outside_its_environment_are_refused():
     from widedeepgp.blocks import make_block
-    with pytest.raises(ValueError, match="mixer must be one of \\('bimamba1', 'mamba3'\\)"):
+    with pytest.raises(ValueError, match="mixer must be one of \\('bimamba1', 'mamba3', 'transformer'\\)"):
         make_block(16, "lstm")
     with pytest.raises(RuntimeError, match="widedeepgp-m3"):
         make_block(16, "mamba3")

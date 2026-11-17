@@ -70,7 +70,7 @@ class Snapshots(pl.Callback):
         if step in self.steps and step not in self.done:
             self.done.add(step)
             name = f"step_{step:09d}.ckpt"
-            trainer.save_checkpoint(os.path.join(self.dir, name), weights_only=True)
+            torch.save(pl_module.snapshot(step), os.path.join(self.dir, name))
             with open(self.table, "a", newline="") as f:
                 csv.DictWriter(f, self.FIELDS).writerow({
                     "step": step, "batches": int(trainer.fit_loop.total_batch_idx) + 1,
@@ -138,10 +138,10 @@ class RunLog(pl.Callback):
             groups = trainer.optimizers[0].param_groups
             log = {"perf/samples_per_s": rate, "perf/million_sample_snps_per_s": rate * self.n_snps / 1e6,
                    "train/lr": groups[0]["lr"]}             # the network's (with --wide only, the covariates')
-            prs = {id(p) for p in getattr(pl_module, "prs", [])}
-            wide = [g["lr"] for g in groups if any(id(p) in prs for p in g["params"])]
-            if wide:
-                log["train/lr_wide"] = wide[0]
+            big = {id(p) for p in pl_module.big_params()}
+            own = [g["lr"] for g in groups if any(id(p) in big for p in g["params"])]
+            if own:
+                log["train/lr_table" if pl_module.blocks else "train/lr_wide"] = own[0]
             if torch.cuda.is_available():
                 log["perf/gpu_peak_gib"] = self.peak_train_bytes / 2 ** 30
             pl_module.log_dict(log)
@@ -150,11 +150,11 @@ class RunLog(pl.Callback):
     def on_before_optimizer_step(self, trainer, pl_module, optimizer):
         if not self._writes_now(trainer):
             return
-        prs = {id(p) for p in getattr(pl_module, "prs", [])}
-        # the PRS weights apart, which would dominate the norm
-        pl_module.log("train/grad_norm", _grad_sq(p for p in pl_module.parameters() if id(p) not in prs) ** 0.5)
-        if prs:
-            pl_module.log("train/grad_norm_wide", _grad_sq(pl_module.prs) ** 0.5)
+        big = pl_module.big_params()
+        ids = {id(p) for p in big}                       # the per-SNP weights apart: they would dominate the norm
+        pl_module.log("train/grad_norm", _grad_sq(p for p in pl_module.parameters() if id(p) not in ids) ** 0.5)
+        if big:
+            pl_module.log("train/grad_norm_table" if pl_module.blocks else "train/grad_norm_wide", _grad_sq(big) ** 0.5)
 
     def on_validation_start(self, trainer, pl_module):
         if torch.cuda.is_available():

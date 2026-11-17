@@ -6,16 +6,30 @@
                --bi_direct, gives the backward direction weights of its own)
     mamba3     upstream Mamba-3, one direction only, as a pair reading forwards and backwards
                (BiDirectional); it needs its own environment (the fork and upstream share a name)
+    transformer  a pre-norm transformer encoder layer (torch.nn), for the block tokens; it keeps no
+               residual stream outside the layer, so it returns (hidden_states, None)
 """
 from functools import partial
 
 import torch
 import torch.nn as nn
 
-MIXERS = ("bimamba1", "mamba3")
+MIXERS = ("bimamba1", "mamba3", "transformer")
 
 
-def make_block(d_model, mixer="bimamba1", bi_direct=False, m3_d_state=None):
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, n_heads, dropout):
+        super().__init__()
+        self.layer = nn.TransformerEncoderLayer(d_model, n_heads, 4 * d_model, dropout, activation="gelu",
+                                                batch_first=True, norm_first=True)
+
+    def forward(self, hidden_states, residual=None):
+        return self.layer(hidden_states), None
+
+
+def make_block(d_model, mixer="bimamba1", bi_direct=False, m3_d_state=None, n_heads=1, dropout=0.0):
+    if mixer == "transformer":
+        return TransformerBlock(d_model, n_heads, dropout)
     from models.DeepGP import Block, create_block
 
     if mixer == "bimamba1":

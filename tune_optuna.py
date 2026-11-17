@@ -35,6 +35,8 @@ def suggest(trial, cfg, space):
     cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
     cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
     cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
+    if getattr(cfg, "input_mode", "snps") == "blocks":    # the table's prior variance (its penalty and pace)
+        cfg.table_var = trial.suggest_float("table_var", 1e-2, 1e2, log=True)
     if space != "deep":
         cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
         cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])

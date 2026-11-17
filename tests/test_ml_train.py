@@ -54,7 +54,8 @@ def test_the_multi_disease_entry_points_scale_snps_on_the_training_split():
     from args_generator import args_initial
     assert args_initial(["--label", "x", "--rd_mode", "x"]).seed == 33                # published default kept
     cfg = main_multilabel.parse_args(["--label", "x"])
-    assert cfg.final_pool == "atten" and cfg.data_dir == "pukb/genes"
+    assert cfg.final_pool == "mean" and cfg.data_dir == "pukb/genes"          # blocks mode, the default since 17 Nov 2026
+    assert main_multilabel.parse_args(["--label", "x", "--input_mode", "snps"]).final_pool == "atten"
     assert args_initial(["--label", "x"]).snp_stats == "store"         # main_genome.py keeps the parser's default
 
 
@@ -552,8 +553,8 @@ def test_the_tuner_runs_shared_trials_and_prunes(tmp_path):
     from widedeepgp.callbacks import OptunaPruning
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=154)
     base = ["--study", "tune", "--n_trials", "2", "--run_dir", str(tmp_path / "runs"), "--min_validations", "1", "--",
-            "--data_dir", data_dir, "--label", "multi", "--rd_mode", "store", "--final_pool", "atten", "--d_model", "16",
-            "--n_heads", "4", "--batch_size", "16", "--num_workers", "0", "--steps_per_epoch_equiv", "8",
+            "--data_dir", data_dir, "--label", "multi", "--rd_mode", "store", "--input_mode", "snps", "--final_pool", "atten",
+            "--d_model", "16", "--n_heads", "4", "--batch_size", "16", "--num_workers", "0", "--steps_per_epoch_equiv", "8",
             "--val_per_epoch", "2", "--max_epoch_equiv", "1.5", "--stop_patience", "0",
             "--min_participants", "0", "--val_min_participants", "0"]   # the floors are for real training sets
     env = dict(os.environ, PYTHONPATH=REPO)

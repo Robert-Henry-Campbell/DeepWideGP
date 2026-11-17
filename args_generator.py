@@ -66,7 +66,16 @@ def args_initial(argv=None):
 
     # ---- multi-disease training (widedeepgp / main_multilabel.py; main_genome.py ignores these) ----
     parser.add_argument('--labels', help="comma-separated subset of the dataset's label columns (default: all of them)")
-    parser.add_argument('--mixer', default='bimamba1', help="sequence block: 'bimamba1' (the published block) or 'mamba3'")
+    parser.add_argument('--mixer', default='bimamba1', help="sequence block: 'bimamba1' (the published block), 'mamba3', or 'transformer' (a pre-norm encoder layer)")
+    # LD-block mode (DeepWideGP-Scripts scripts/widedeepgp-blocks/methods.md): a per-SNP table pooled by LD block, then one mixer over the blocks
+    parser.add_argument('--input_mode', default='snps', help="'snps' (the published per-chromosome SNP encoders) or 'blocks' (a per-SNP table pooled by LD block, then one mixer over the block tokens)")
+    parser.add_argument('--partition', help="blocks mode: a partition.npz (or its folder) under data/reference/partitions/, or 'uniform:<k>' (k SNPs per block, tests)")
+    parser.add_argument('--snp_code', default='dosage', help="blocks mode: 'dosage' (one vector per SNP times its standardised dosage) or 'genotype' (three vectors per SNP, for 0, 1 and 2 copies, interpolated between)")
+    parser.add_argument('--embed_dim', type=int, default=16, help='blocks mode: width of the per-SNP table')
+    parser.add_argument('--table_var', type=float, default=1.0, help='blocks mode: prior variance of a table entry; its L2 penalty in the loss is 1 / (2 N table_var)')
+    parser.add_argument('--table_kappa', type=float, default=0.1, help="blocks mode: pace of the table's learning rate, kappa * table_var * sqrt(batch) / sqrt(SNPs)")
+    parser.add_argument('--init_encoder', help='blocks mode: file whose tables start the first layer (masked pretraining by pretrain_blocks.py, or a ridge warm start)')
+    parser.add_argument('--freeze_encoder', action='store_true', help='blocks mode: keep the parameters loaded by --init_encoder fixed')
     parser.add_argument('--sampler', default='rotation', help="'rotation' (each batch balanced on one disease) or 'shuffled'")
     parser.add_argument('--loss_outputs', default='all', help="'all': every output learns from every batch; 'target': only the disease the batch was balanced on")
     parser.add_argument('--gamma', type=float, default=0.5, help='class-weight exponent: 0 none, 0.5 square root, 1 full balance')

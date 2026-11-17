@@ -123,8 +123,9 @@ def test_the_stage_settings():
     import main_multilabel
     from widedeepgp import tuning
     base = main_multilabel.parse_args(["--label", "x", "--exp_name", "r", "--batch_size", "16", "--stop_patience", "8",
-                                       "--resume", "--tune_trials", "5"])
+                                       "--resume", "--tune_trials", "5", "--wide", "on"])
     assert tuning.stages(base) == [("linear", 1), ("joint", 5)]
+    assert tuning.stages(main_multilabel.parse_args(["--label", "x", "--tune_trials", "5"])) == [("deep", 5)]   # the default
     lin = tuning.stage_cfg(base, "linear")
     assert (lin.wide, lin.annot, lin.prs_grid, lin.batch_size, lin.accumulate, lin.lr, lin.lr_schedule,
             lin.warmup_steps, lin.stop_patience, lin.val_per_epoch, lin.val_max_epoch_equiv, lin.snapshots_per_decade,
@@ -230,11 +231,8 @@ def test_snapshot_steps_known_answers():
 
 def test_snapshots_are_saved_once_at_their_steps(tmp_path):
     from widedeepgp.callbacks import Snapshots
-    saved = []
-    trainer = types.SimpleNamespace(global_step=0, fit_loop=types.SimpleNamespace(total_batch_idx=0),
-                                    save_checkpoint=lambda path, weights_only: saved.append(
-                                        (os.path.relpath(path, tmp_path), weights_only)))
-    mod = types.SimpleNamespace(samples_seen=0)
+    trainer = types.SimpleNamespace(global_step=0, fit_loop=types.SimpleNamespace(total_batch_idx=0))
+    mod = types.SimpleNamespace(samples_seen=0, snapshot=lambda step: {"state_dict": {}, "global_step": step})
     snaps = Snapshots(str(tmp_path), [2, 4.0], n_train=8)
     snaps.on_fit_start(trainer, mod)
     assert os.path.isdir(tmp_path / "snapshots")
@@ -243,7 +241,8 @@ def test_snapshots_are_saved_once_at_their_steps(tmp_path):
         snaps.on_train_batch_start(trainer, mod, None, step - 1)
         snaps.on_train_batch_end(trainer, mod, None, None, step - 1)
     names = [os.path.join("snapshots", f"step_00000000{s}.ckpt") for s in (2, 4)]
-    assert saved == [(names[0], True), (names[1], True)]         # weights only
+    assert sorted(os.listdir(tmp_path / "snapshots")) == [os.path.basename(n) for n in names]   # the model's snapshots
+    assert [torch.load(tmp_path / n, weights_only=False)["global_step"] for n in names] == [2, 4]
     with open(tmp_path / "snapshots.csv") as f:
         rows = list(csv.DictReader(f))
     assert [(r["step"], r["batches"], r["samples_seen"], r["epoch_equiv"], r["file"]) for r in rows] == [
@@ -255,7 +254,7 @@ def test_snapshots_are_saved_once_at_their_steps(tmp_path):
     for step in (4, 6):                                          # step 4 was saved before the resume
         trainer.global_step = step
         resumed.on_train_batch_end(trainer, mod, None, None, step - 1)
-    assert saved[2:] == [(os.path.join("snapshots", "step_000000006.ckpt"), True)]
+    assert sorted(os.listdir(tmp_path / "snapshots"))[2:] == ["step_000000006.ckpt"]
     assert resumed.train_seconds == snaps.train_seconds
     with open(tmp_path / "snapshots.csv") as f:
         assert [r["step"] for r in csv.DictReader(f)] == ["2", "4", "6"]
@@ -283,7 +282,8 @@ def _module(prs, frozen):
     m.net = torch.nn.Linear(3, 2)
     if prs:
         m.prs = torch.nn.ParameterList([torch.nn.Parameter(torch.ones(4, 2)), torch.nn.Parameter(torch.ones(2, 2))])
-    m.samples_seen, m.label_names, m.last_val_metrics, m.logged = 0, ["a", "b"], None, []
+    m.samples_seen, m.label_names, m.last_val_metrics, m.logged, m.blocks = 0, ["a", "b"], None, [], False
+    m.big_params = lambda: list(m.prs) if prs else []
     m.log = lambda key, value: m.logged.append((key, value))
     m.log_dict = lambda d: m.logged.append(dict(d))
     m.net.weight.grad, m.net.bias.grad = torch.full((2, 3), 2.0), torch.full((2,), 1.0)     # squares sum to 26

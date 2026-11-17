@@ -1,0 +1,372 @@
+"""Blocks mode (--input_mode blocks): the partition, the LD-block first layer, the transformer mixer, the
+table's optimiser group and penalty, snapshots, a run, a search, a seed retrain and masked pretraining,
+all on the CPU with the transformer mixer (bimamba1 needs the GPU: tests/test_ml_blocks_gpu.py).
+    python -m pytest tests/test_ml_blocks.py -q
+"""
+import hashlib
+import json
+import os
+
+import numpy as np
+import pytest
+import torch
+import torch.nn as nn
+
+from ml_helpers import REPO, make_cfg, synthetic_dataset
+
+SNPS, CHROMS = 132, 22                                   # the synthetic store: six SNPs per chromosome
+
+
+@pytest.fixture(scope="module")
+def data_dir(tmp_path_factory):
+    return synthetic_dataset(tmp_path_factory.mktemp("d"))[0]
+
+
+def _cfg(data_dir, **over):
+    base = dict(input_mode="blocks", partition="uniform:2", mixer="transformer", final_pool="mean", n_heads=2, d_model=8,
+                embed_dim=4, lr_schedule="constant", warmup_steps=0)
+    return make_cfg(data_dir, "multi", **{**base, **over})
+
+
+def _build(data_dir, **over):
+    from widedeepgp.train import build_data, build_model
+    cfg = _cfg(data_dir, **over)
+    dm = build_data(cfg)
+    return cfg, dm, build_model(cfg, dm)
+
+
+def _val_batch(dm, n=24):
+    sp = dm.splits["val"]
+    ds = dm._dataset({k: v[:n] for k, v in sp.items()})
+    return dm.decode_batch(ds[list(range(n))])
+
+
+def _write_partition(path, store, ids_per_chrom):
+    """A partition.npz in the layout of the design document, from per-chromosome global block ids."""
+    ids = np.concatenate([store.variants(c)["id"] for c in store.chroms])
+    np.savez(path, chroms=np.array(store.chroms), n_variants=np.array([store.n_variants(c) for c in store.chroms]),
+             variant_digest=np.array(hashlib.sha256("\n".join(ids).encode()).hexdigest()),
+             n_blocks=np.int64(max(int(a.max()) for a in ids_per_chrom) + 1),
+             **{f"block_chr{c}": np.asarray(a, dtype=np.int32) for c, a in zip(store.chroms, ids_per_chrom)})
+
+
+# ---- the partition ------------------------------------------------------------------------------
+def test_a_uniform_partition_is_contiguous_blocks_numbered_across_sequences(data_dir):
+    _, dm, _ = _build(data_dir)
+    p = dm.partition
+    assert p["n_blocks"] == 3 * CHROMS and p["name"] == "uniform:2" and len(p["digest"]) == 16
+    assert [a.tolist() for a in p["ids"][:2]] == [[0, 0, 1, 1, 2, 2], [3, 3, 4, 4, 5, 5]]
+    _, dm6, _ = _build(data_dir, partition="uniform:6")
+    assert dm6.partition["n_blocks"] == CHROMS and dm6.partition["digest"] != p["digest"]
+    _, dm4, _ = _build(data_dir, partition="uniform:4")                 # 4 + 2 SNPs per chromosome
+    assert dm4.partition["ids"][1].tolist() == [2, 2, 2, 2, 3, 3]
+
+
+def test_a_partition_file_is_checked_against_the_store(data_dir, tmp_path):
+    from genostore.datamodule import load_partition, partition_digest
+    _, dm, _ = _build(data_dir)
+    store = dm.store
+    good = [np.arange(6) // 2 + 3 * i for i in range(CHROMS)]
+    _write_partition(tmp_path / "partition.npz", store, good)
+    p = load_partition(str(tmp_path), store, dm.regions)
+    assert p["name"] == tmp_path.name and p["digest"] == dm.partition["digest"]   # the same blocks as uniform:2
+    assert all(np.array_equal(a, b) for a, b in zip(p["ids"], dm.partition["ids"]))
+    # a region that keeps part of two chromosomes: the blocks present are renumbered from zero
+    sub = load_partition(str(tmp_path / "partition.npz"), store, [[["1", 2, 6]], [["2", 0, 4]]])
+    assert [a.tolist() for a in sub["ids"]] == [[0, 0, 1, 1], [2, 2, 3, 3]] and sub["n_blocks"] == 4
+    assert sub["digest"] == partition_digest(sub["ids"]) != p["digest"]
+    z = dict(np.load(tmp_path / "partition.npz"))
+    for change, message in ((dict(n_variants=z["n_variants"] + 1), "variant counts"),
+                            (dict(variant_digest=np.array("0" * 64)), "other variants"),
+                            (dict(block_chr1=np.array([0, 1, 0, 1, 2, 2], dtype=np.int32)), "contiguous"),
+                            (dict(block_chr2=np.array([2, 3, 3, 4, 4, 5], dtype=np.int32)), "contiguous")):
+        np.savez(tmp_path / "bad.npz", **{**z, **change})
+        with pytest.raises(ValueError, match=message):
+            load_partition(str(tmp_path / "bad.npz"), store, dm.regions)
+    with pytest.raises(ValueError, match="needs --partition"):
+        from widedeepgp.train import build_data
+        build_data(_cfg(data_dir, partition=None))
+
+
+# ---- the first layer ----------------------------------------------------------------------------
+@pytest.mark.parametrize("de", [1, 16, 64])
+def test_pooling_is_the_segment_sum_of_dosage_scaled_vectors(data_dir, de):
+    from widedeepgp.blockencoder import BlockEncoder
+    _, dm, _ = _build(data_dir)
+    enc = BlockEncoder(dm.partition, de, 8)
+    g = torch.Generator().manual_seed(de)
+    for t in enc.tables:
+        t.data = torch.randn(t.shape, generator=g)
+    x_all, _ = _val_batch(dm)
+    pooled = enc.pool(x_all[:-1]).detach().numpy()
+    assert pooled.shape == (24, 3 * CHROMS, de)
+    k = 0
+    for i, ids in enumerate(dm.partition["ids"]):
+        x, w = x_all[i][:, :, 0].numpy(), enc.tables[i].detach().numpy()
+        for b in np.unique(ids):
+            s = ids == b
+            np.testing.assert_allclose(pooled[:, k], x[:, s] @ w[s], rtol=1e-5, atol=1e-6)
+            k += 1
+    assert enc.hidden(enc.pool(x_all[:-1])).shape == (24, 3 * CHROMS, 4 * de)
+    assert enc(x_all[:-1]).shape == (24, 3 * CHROMS, 8)
+
+
+def test_the_genotype_code_interpolates_three_vectors_and_contains_the_dosage_code(data_dir):
+    from widedeepgp.blockencoder import BlockEncoder, genotype_weights
+    x = torch.tensor([0.0, 0.3, 1.0, 1.6, 2.0])
+    assert torch.allclose(genotype_weights(x), torch.tensor([[1, 0, 0], [.7, .3, 0], [0, 1, 0], [0, .4, .6], [0, 0, 1.]]))
+    _, dm, _ = _build(data_dir, snp_code="genotype")
+    assert dm.snp_mean is None                                           # the raw dosages, not standardised ones
+    enc3, enc1 = BlockEncoder(dm.partition, 4, 8, "genotype"), BlockEncoder(dm.partition, 4, 8, "dosage")
+    for t3, t1 in zip(enc3.tables, enc1.tables):
+        t1.data = torch.randn(t1.shape)
+        t3.data = (t1.data[:, None, :] * torch.tensor([0.0, 1.0, 2.0])[None, :, None]).reshape(-1, 4)  # rows 0, v, 2v
+    x_all, _ = _val_batch(dm)
+    assert torch.allclose(enc3.pool(x_all[:-1]), enc1.pool(x_all[:-1]), atol=1e-5)
+    assert sum(t.numel() for t in enc3.tables) == 3 * SNPS * 4
+    with pytest.raises(ValueError, match="snp_code must be"):
+        BlockEncoder(dm.partition, 4, 8, "haplotype")
+
+
+def test_the_model_contains_a_ridge_prs(data_dir):
+    """With the head's last layer at zero the logits are the linear readout of the table summed over all
+    SNPs: a rank-embed_dim ridge PRS. At embed_dim 1, disease j's logit is a_j times x @ w."""
+    _, dm, model = _build(data_dir, embed_dim=1, e_layers=2)
+    w = np.random.default_rng(0).standard_normal(SNPS).astype(np.float32)
+    with torch.no_grad():
+        for i, t in enumerate(model.encoder.tables):
+            t.copy_(torch.from_numpy(w[6 * i:6 * i + 6])[:, None])
+        model.combine.layers[-1].weight.zero_(); model.combine.layers[-1].bias.zero_()
+    a = model.readout.weight.detach().numpy()[:, 0]
+    model.eval()
+    x_all, _ = _val_batch(dm)
+    x = np.concatenate([v[:, :, 0].numpy() for v in x_all[:-1]], axis=1)
+    with torch.no_grad():
+        np.testing.assert_allclose(model(x_all).numpy(), np.outer(x @ w, a), rtol=1e-4, atol=1e-5)
+    # at embed_dim 16 the readout gives every disease its own combination of 16 per-SNP directions
+    _, dm, model = _build(data_dir, embed_dim=16)
+    with torch.no_grad():
+        for t in model.encoder.tables:
+            t.normal_()
+        model.combine.layers[-1].weight.zero_(); model.combine.layers[-1].bias.zero_()
+    T = np.concatenate([t.detach().numpy() for t in model.encoder.tables])
+    with torch.no_grad():
+        np.testing.assert_allclose(model(x_all).numpy(), (x @ T) @ model.readout.weight.detach().numpy().T,
+                                   rtol=1e-4, atol=1e-4)
+
+
+def test_shapes_parameter_names_and_counts(data_dir):
+    _, dm, model = _build(data_dir, e_layers=2)
+    x_all, _ = _val_batch(dm)
+    assert model(x_all).shape == (24, 6)
+    names = {k.split(".")[0] for k in model.state_dict()}
+    assert names == {"encoder", "layers", "norm_f", "covariate_encoder", "cov_norm", "combine", "readout", "loss_fn"}
+    assert tuple(model.readout.weight.shape) == (6, 4)
+    assert {k for k in model.state_dict() if k.startswith("encoder.") and not k.startswith("encoder.tables.")} == \
+        {"encoder.block_emb.weight", "encoder.chrom_emb.weight", "encoder.mlp.0.weight", "encoder.mlp.0.bias",
+         "encoder.mlp.2.weight", "encoder.mlp.2.bias"}
+    assert [tuple(model.state_dict()[f"encoder.tables.{i}"].shape) for i in range(CHROMS)] == [(6, 4)] * CHROMS
+    counts = model.parameter_counts()
+    assert counts["table"] == SNPS * 4 and counts["identity"] == (3 * CHROMS + CHROMS) * 4
+    assert counts["block_mlp"] == 4 * 16 + 16 + 16 * 8 + 8
+    assert sum(counts.values()) == sum(p.numel() for p in model.parameters())
+    assert counts["mixer"] == sum(p.numel() for p in model.layers.parameters()) + 2 * 8
+    assert model.big_params() == list(model.encoder.tables)
+
+
+def test_a_transformer_block_keeps_the_block_interface():
+    from widedeepgp.blocks import make_block
+    block = make_block(8, "transformer", n_heads=2, dropout=0.0)
+    h = torch.randn(3, 5, 8, requires_grad=True)
+    out, residual = block(h, None)
+    assert out.shape == h.shape and residual is None
+    out.sum().backward()
+    assert h.grad is not None and sum(p.numel() for p in block.parameters()) == 12 * 64 + 4 * 8 + 5 * 8 + 4 * 8
+    with pytest.raises(ValueError, match="mixer must be one of"):
+        make_block(8, "lstm")
+
+
+def test_refusals(data_dir):
+    from widedeepgp.model import WideDeepGP
+    from widedeepgp.train import check_resume_tables, run_training
+    _, dm, model = _build(data_dir)
+    for change, message in ((dict(wide="on"), "no linear PRS path"), (dict(annot_dim=2), "no linear PRS path"),
+                            (dict(final_pool="atten"), "pools the mixer's tokens by their mean"),
+                            (dict(partition_digest="0" * 16), "does not match")):
+        with pytest.raises(ValueError, match=message):
+            WideDeepGP(dict(model.hp, **change), dm.pos_chr, blocks=dm.partition)
+    with pytest.raises(ValueError, match="does not match"):
+        WideDeepGP(model.hp, dm.pos_chr)                                 # no partition given
+    with pytest.raises(ValueError, match="snp_code must be"):
+        WideDeepGP(dict(model.hp, snp_code="haplotype"), dm.pos_chr, blocks=dm.partition)
+
+
+def test_resume_and_init_from_refuse_another_partition(data_dir, tmp_path):
+    from widedeepgp.train import check_resume_tables, run_training
+    _, dm, model = _build(data_dir)
+    other = _build(data_dir, partition="uniform:3")[2]
+    torch.save(other.snapshot(0), tmp_path / "other.ckpt")
+    with pytest.raises(ValueError, match="partition_digest"):
+        check_resume_tables(str(tmp_path / "other.ckpt"), model.hp)
+    cfg = _cfg(data_dir, run_dir=str(tmp_path), experiment="t", exp_name="r", init_from=str(tmp_path / "other.ckpt"),
+               tune_trials=0)
+    with pytest.raises(ValueError, match="another block partition"):
+        run_training(cfg)
+
+
+def test_the_table_has_its_own_learning_rate_and_penalty(data_dir):
+    from widedeepgp.blockencoder import table_learning_rate
+    cfg, dm, model = _build(data_dir, table_kappa=0.2, table_var=2.0, batch_size=16, accumulate=2, l2=1e-3, lr=1e-3)
+    assert table_learning_rate(0.2, 2.0, 32, SNPS) == pytest.approx(0.2 * 2.0 * np.sqrt(32) / np.sqrt(SNPS))
+    assert model.hp["lr_table"] == pytest.approx(table_learning_rate(0.2, 2.0, 32, SNPS))
+    groups = model.configure_optimizers().param_groups
+    assert [(g["lr"], g["weight_decay"], len(g["params"])) for g in groups] == \
+        [(1e-3, 1e-3, len(list(model.parameters())) - CHROMS), (model.hp["lr_table"], 0.0, CHROMS)]
+    n = dm.splits["train"]["y"].shape[0]
+    with torch.no_grad():
+        for t in model.encoder.tables:
+            t.copy_(torch.full(t.shape, 0.5))
+    assert float(model.penalty()) == pytest.approx(SNPS * 4 * 0.25 / (2 * n * 2.0))
+    for t in model.encoder.tables:
+        t.requires_grad_(False)
+    assert model.penalty() is None and len(model.configure_optimizers().param_groups) == 1
+
+
+def test_an_init_encoder_file_is_checked_loaded_and_may_be_frozen(data_dir, tmp_path):
+    _, dm, model = _build(data_dir)
+    enc = model.encoder
+    state = {f"tables.{i}": torch.randn(6, 4) for i in range(CHROMS)}
+    state["mlp.0.weight"] = torch.randn(16, 4)
+    manifest = {"kind": "ridge", "partition_digest": dm.partition["digest"], "snp_code": "dosage", "embed_dim": 4}
+    torch.save({"manifest": manifest, "state": state}, tmp_path / "init.pt")
+    assert enc.load_init(str(tmp_path / "init.pt"), dm.partition["digest"], "dosage") == sorted(state)
+    assert torch.equal(enc.tables[3], state["tables.3"]) and torch.equal(enc.mlp[0].weight, state["mlp.0.weight"])
+    assert all(p.requires_grad for p in enc.parameters())
+    enc.load_init(str(tmp_path / "init.pt"), dm.partition["digest"], "dosage", freeze=True)
+    assert not enc.tables[0].requires_grad and not enc.mlp[0].weight.requires_grad and enc.mlp[0].bias.requires_grad
+    for bad_manifest, message in ((dict(manifest, snp_code="genotype"), "another partition, SNP code or width"),
+                                  (dict(manifest, embed_dim=16), "another partition, SNP code or width"),
+                                  (dict(manifest, partition_digest="x"), "another partition, SNP code or width")):
+        torch.save({"manifest": bad_manifest, "state": state}, tmp_path / "bad.pt")
+        with pytest.raises(ValueError, match=message):
+            enc.load_init(str(tmp_path / "bad.pt"), dm.partition["digest"], "dosage")
+    torch.save({"manifest": manifest, "state": {"tables.0": torch.randn(7, 4)}}, tmp_path / "bad.pt")
+    with pytest.raises(ValueError, match="misshaped"):
+        enc.load_init(str(tmp_path / "bad.pt"), dm.partition["digest"], "dosage")
+    torch.save({"manifest": manifest, "state": {"mlp.0.weight": torch.randn(16, 4)}}, tmp_path / "bad.pt")
+    with pytest.raises(ValueError, match="no tables"):
+        enc.load_init(str(tmp_path / "bad.pt"), dm.partition["digest"], "dosage")
+
+
+# ---- runs ---------------------------------------------------------------------------------------
+def _run_args(tmp_path, name, **over):
+    args = ["--label", "multi", "--rd_mode", "store", "--run_dir", str(tmp_path), "--experiment", "t", "--exp_name", name,
+            "--partition", "uniform:2", "--mixer", "transformer", "--d_model", "8", "--n_heads", "2", "--embed_dim", "4",
+            "--batch_size", "16", "--num_workers", "0", "--max_epoch_equiv", "1", "--val_per_epoch", "2",
+            "--min_participants", "0", "--val_min_participants", "0", "--stop_patience", "0", "--snapshots_per_decade", "2",
+            "--tune_trials", "0", "--eval_batch_size", "64"]
+    for k, v in over.items():
+        args += [f"--{k}", str(v)]
+    return args
+
+
+def test_a_run_trains_snapshots_in_bfloat16_scores_and_resumes(data_dir, tmp_path):
+    import main_multilabel
+    import score_snapshots
+    from widedeepgp.train import load_model
+    out = main_multilabel.main(_run_args(tmp_path, "r", data_dir=data_dir))
+    run = out["run_dir"]
+    config = json.load(open(os.path.join(run, "config.json")))
+    b = config["blocks"]
+    assert (b["partition"], b["n_blocks"], b["n_tokens"], b["embed_dim"], b["snp_code"]) == ("uniform:2", 66, 67, 4, "dosage")
+    assert b["n_embedding_parameters"] + b["n_non_embedding_parameters"] == config["n_parameters"] == out["n_parameters"]
+    assert config["model"]["input_mode"] == "blocks" and config["model"]["final_pool"] == "mean"
+    assert config["model"]["lr_schedule"] == "cosine" and config["model"]["warmup_steps"] == 200   # the blocks-mode recipe
+    assert config["n_encoder_parameters"] == b["n_parameters_by_module"]["mixer"] - 2 * 8
+    snaps = sorted(os.listdir(os.path.join(run, "snapshots")))
+    assert snaps and len(open(os.path.join(run, "snapshots.csv")).readlines()) == len(snaps) + 1
+    ck = torch.load(os.path.join(run, "snapshots", snaps[-1]), map_location="cpu", weights_only=False)
+    assert ck["state_dict"]["encoder.tables.0"].dtype == torch.bfloat16
+    assert ck["state_dict"]["encoder.mlp.0.weight"].dtype == torch.float32 and ck["global_step"] > 0
+    dm = out["datamodule"]
+    model, ck2 = load_model(os.path.join(run, "snapshots", snaps[-1]), dm)
+    assert model.encoder.tables[0].dtype == torch.float32 and ck2["samples_seen"] == ck["samples_seen"]
+    rows = score_snapshots.main(["--run", run, "--split", "val", "--snapshots", "best", "--save_scores",
+                                 "--scores_dir", str(tmp_path / "scores"), "--device", "cpu"])
+    assert {r["metric"] for r in rows} == {"auroc", "ap", "bce"}
+    z = np.load(os.path.join(tmp_path, "scores", "t", "r", "val_best.npz"))
+    assert sorted(z.files) == ["iid", "labels", "logit_population", "y"] and z["logit_population"].shape == (len(z["iid"]), 6)
+    summary = open(os.path.join(run, "scores_val_summary.csv")).readline().split(",")
+    assert summary[:5] == ["snapshot", "label", "n", "n_cases", "auroc"]
+    # a resume on the same data carries on (longer budget), with the same batches and settings checked
+    out2 = main_multilabel.main(_run_args(tmp_path, "r", data_dir=data_dir, max_epoch_equiv=2) + ["--resume"])
+    assert out2["samples_seen"] > out["samples_seen"] and len(out2["history"]) > len(out["history"])
+    assert json.load(open(os.path.join(run, "config.json")))["resumed"] is True
+    with pytest.raises(ValueError, match="other settings"):
+        main_multilabel.main(_run_args(tmp_path, "r", data_dir=data_dir, embed_dim=8) + ["--resume"])
+
+
+def test_a_search_records_the_new_scalars_and_a_retrain_reproduces_the_chosen_configuration(data_dir, tmp_path):
+    import main_multilabel
+    out = main_multilabel.main(_run_args(tmp_path, "s", data_dir=data_dir, tune_trials=1, tune_gpus="none"))
+    assert out["chosen_stage"] == "deep" and set(out["best_params"]) == {"lr", "l2", "dropout", "table_var"}
+    search = json.load(open(tmp_path / "t" / "s" / "search.json"))
+    for key, value in (("input_mode", "blocks"), ("partition", "uniform:2"), ("snp_code", "dosage"), ("embed_dim", 4),
+                       ("table_var", 1.0), ("table_kappa", 0.1), ("mixer", "transformer"), ("wide", "off")):
+        assert search[key] == value
+    trial = json.load(open(os.path.join(tmp_path / "t" / "s", out["best_trial_dir"], "config.json")))
+    p = out["best_params"]
+    again = main_multilabel.main(_run_args(tmp_path, "s_seed2", data_dir=data_dir, seed=2, lr=p["lr"], l2=p["l2"],
+                                           dropout=p["dropout"], table_var=p["table_var"]))
+    retrain = json.load(open(os.path.join(again["run_dir"], "config.json")))
+    assert retrain["model"] == trial["model"]                            # the same model settings, another seed
+    changed = {k for k in trial["args"] if trial["args"][k] != retrain["args"][k]}
+    assert changed == {"seed", "exp_name", "tune_gpus"}                 # a trial's own tune_trials is 0 already
+
+
+def test_the_blocks_model_learns_the_synthetic_traits(tmp_path):
+    """Three passes over 2,100 training participants: every heritable trait well above chance (the two solo
+    traits included: they have two causal SNPs of their own) and the null trait at chance. Without the linear
+    readout of the table the solo traits stayed at chance (probe of 17 Nov 2026)."""
+    import main_multilabel
+    data_dir, truth = synthetic_dataset(tmp_path, n=3000)
+    out = main_multilabel.main(_run_args(tmp_path, "learn", data_dir=data_dir, max_epoch_equiv=3, val_per_epoch=1,
+                                         dropout=0.1, embed_dim=8, d_model=16, n_heads=2, lr=1e-3))
+    auroc = {name: m["auroc"] for name, m in out["val"].items()}
+    assert all(auroc[t] > 0.6 for t in ("shared_a", "shared_b", "shared_c", "solo_d", "solo_e")), auroc
+    assert 0.35 <= auroc["null_f"] <= 0.65, auroc
+
+
+def test_masked_pretraining_writes_a_file_a_run_starts_from(data_dir, tmp_path, capsys):
+    import main_multilabel
+    import pretrain_blocks
+    out = str(tmp_path / "blocks" / "pretrained.pt")
+    m = pretrain_blocks.main(["--out", out, "--epochs", "4", "--log_every", "10", "--lr", "3e-3", "--data_dir", data_dir,
+                              "--label", "multi", "--rd_mode", "store", "--partition", "uniform:2", "--embed_dim", "4",
+                              "--batch_size", "32", "--num_workers", "0"])
+    f = torch.load(out, map_location="cpu", weights_only=False)
+    assert f["manifest"]["kind"] == "masked" and f["manifest"]["embed_dim"] == 4 and f["manifest"]["snp_code"] == "dosage"
+    assert set(f["state"]) == {f"tables.{i}" for i in range(CHROMS)} | {"block_emb.weight", "chrom_emb.weight",
+                                                                        "mlp.0.weight", "mlp.0.bias"}
+    assert m["source"]["loss_last"] < m["source"]["loss_first"]           # it learns the blocks' genotype structure
+    assert m["source"]["accuracy_last"] >= m["source"]["majority_accuracy_last"] - 0.05
+    assert oct(os.stat(out).st_mode)[-3:] == "600"
+    run = main_multilabel.main(_run_args(tmp_path, "warm", data_dir=data_dir, init_encoder=out) + ["--freeze_encoder"])
+    assert "first layer from" in capsys.readouterr().out
+    config = json.load(open(os.path.join(run["run_dir"], "config.json")))
+    assert config["blocks"]["init_encoder_sha256"] and config["model"]["freeze_encoder"] is True
+    model = run["model"]
+    assert torch.equal(model.encoder.tables[2].cpu(), f["state"]["tables.2"]) and not model.encoder.tables[2].requires_grad
+    assert torch.equal(model.encoder.mlp[0].weight.cpu(), f["state"]["mlp.0.weight"])
+    with pytest.raises(ValueError, match="another partition"):
+        main_multilabel.main(_run_args(tmp_path, "cold", data_dir=data_dir, init_encoder=out, partition="uniform:3"))
+
+
+def test_parse_args_defaults_to_blocks_mode_with_the_warm_up_and_cosine_recipe():
+    import main_multilabel
+    cfg = main_multilabel.parse_args(["--label", "x"])
+    assert (cfg.input_mode, cfg.wide, cfg.lr_schedule, cfg.warmup_steps, cfg.final_pool, cfg.embed_dim, cfg.snp_code,
+            cfg.table_var, cfg.table_kappa, cfg.partition, cfg.init_encoder, cfg.freeze_encoder) == \
+        ("blocks", "off", "cosine", 200, "mean", 16, "dosage", 1.0, 0.1, None, None, False)
+    assert main_multilabel.parse_args(["--label", "x", "--input_mode", "snps"]).final_pool == "atten"
+    assert main_multilabel.parse_args(["--label", "x", "--final_pool", "atten"]).final_pool == "atten"

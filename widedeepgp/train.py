@@ -6,6 +6,7 @@ An epoch-equivalent is as many training draws as there are training participants
 "epoch" is one validation interval, so every checkpoint written after validation sits on an
 epoch boundary and a resumed run continues the same batch sequence.
 """
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from genostore.datamodule import SNPStoreDataModule, dataset_dir, is_store_dataset
 
 from . import metrics as M
+from .blockencoder import table_learning_rate
 from .callbacks import EarlyStoppingOnce, OptunaPruning, RunCheckpoint, RunLog, Snapshots, snapshot_steps
 from .losses import WideLoss, label_counts
 from .model import WIDE_KEYS, WideDeepGP, annotations_digest, curvature_ratios, positions_digest, wide_learning_rate
@@ -95,7 +97,23 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
         "lr": float(cfg.lr), "l2": float(cfg.l2), "warmup_steps": int(cfg.warmup_steps),
         "lr_schedule": cfg.lr_schedule, "total_optimizer_steps": int(sched["optimizer_steps"]) if sched else 0,
         "wide": getattr(cfg, "wide", "off") or "off", **wide_hparams(cfg, dm),
+        "input_mode": getattr(cfg, "input_mode", "snps"), **block_hparams(cfg, dm),
     }
+
+
+def block_hparams(cfg, dm):
+    """Settings of blocks mode: the partition, the table's code, width, prior variance and learning
+    rate (blockencoder.table_learning_rate from --table_kappa)."""
+    if getattr(cfg, "input_mode", "snps") != "blocks":
+        return {}
+    if dm.partition is None:
+        raise ValueError("--input_mode blocks needs --partition")
+    batch_eff = int(cfg.batch_size) * max(1, int(cfg.accumulate))
+    return {"partition": dm.partition["name"], "partition_digest": dm.partition["digest"],
+            "n_blocks": int(dm.partition["n_blocks"]), "snp_code": cfg.snp_code, "embed_dim": int(cfg.embed_dim),
+            "table_var": float(cfg.table_var), "table_kappa": float(cfg.table_kappa),
+            "lr_table": table_learning_rate(cfg.table_kappa, cfg.table_var, batch_eff, int(sum(dm.seq_len))),
+            "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False))}
 
 
 def parse_grid(spec):
@@ -133,7 +151,7 @@ def wide_hparams(cfg, dm):
 
 def build_model(cfg, dm, sched=None):
     annot, annot_names = load_annotations(dm) if cfg.annot else (None, None)
-    return WideDeepGP(model_hparams(cfg, dm, sched, annot_names, annot), dm.pos_chr, annot)
+    return WideDeepGP(model_hparams(cfg, dm, sched, annot_names, annot), dm.pos_chr, annot, dm.partition)
 
 
 def load_model(path, dm, device="cpu"):
@@ -141,7 +159,7 @@ def load_model(path, dm, device="cpu"):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     hp = ckpt["hyper_parameters"]["hp"]
     annot = load_annotations(dm)[0] if hp.get("annot_dim") else None
-    model = WideDeepGP(hp, dm.pos_chr, annot)
+    model = WideDeepGP(hp, dm.pos_chr, annot, dm.partition)
     model.on_load_checkpoint(ckpt)
     model.load_state_dict(ckpt["state_dict"])
     return model.to(device).eval(), ckpt
@@ -161,6 +179,14 @@ def predict_split(model, dm, split, device=None):
         ys.append(out[1].float().cpu())
     model.train(was_training)
     return torch.cat(logits).numpy(), torch.cat(ys).numpy()
+
+
+def file_digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def code_version(code_dir=None):
@@ -354,12 +380,18 @@ def run_training(cfg, trial=None, extra_callbacks=()):
     model = build_model(cfg, dm, sched)
     if cfg.init_from:
         src = torch.load(cfg.init_from, map_location="cpu", weights_only=False)
-        src_labels = (src.get("hyper_parameters") or {}).get("hp", {}).get("label_names")
-        left_out = model.load_weights(src["state_dict"], allow_new_head=True, source_labels=src_labels)
+        src_hp = (src.get("hyper_parameters") or {}).get("hp", {})
+        if model.blocks and src_hp.get("partition_digest") != model.hp["partition_digest"]:
+            raise ValueError(f"--init_from {cfg.init_from}: it was trained on another block partition")
+        left_out = model.load_weights(src["state_dict"], allow_new_head=True, source_labels=src_hp.get("label_names"))
         print(f"initialised from {cfg.init_from}; not loaded: {left_out or 'nothing'}", flush=True)
     if getattr(cfg, "init_wide_from", None):
         load_wide_init(model, cfg.init_wide_from)
         print(f"linear PRS path from {cfg.init_wide_from}{' (fixed)' if model.hp.get('wide_freeze') else ''}", flush=True)
+    if model.hp.get("init_encoder"):
+        loaded = model.encoder.load_init(cfg.init_encoder, model.hp["partition_digest"], model.hp["snp_code"],
+                                         freeze=bool(cfg.freeze_encoder))
+        print(f"first layer from {cfg.init_encoder}{' (fixed)' if cfg.freeze_encoder else ''}: {loaded}", flush=True)
 
     run_dir = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name or "run")
     ckpt_dir = os.path.join(run_dir, "checkpoints")
@@ -371,11 +403,20 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         check_resume_args(os.path.join(run_dir, "config.json"), cfg)
     n_snps = int(sum(dm.seq_len))
     n_params = sum(p.numel() for p in model.parameters())
+    if model.blocks:                                     # the size axes: embedding parameters and Kaplan's N
+        counts = model.parameter_counts()
+        blocks = {"partition": model.hp["partition"], "partition_digest": model.hp["partition_digest"],
+                  "n_blocks": model.hp["n_blocks"], "n_tokens": model.hp["n_blocks"] + int(model.use_cov),
+                  "embed_dim": model.hp["embed_dim"], "snp_code": model.hp["snp_code"],
+                  "n_parameters_by_module": counts, "n_embedding_parameters": counts["table"] + counts["identity"],
+                  "n_non_embedding_parameters": counts["block_mlp"] + counts["mixer"] + counts["covariates"] + counts["head"],
+                  "init_encoder_sha256": file_digest(cfg.init_encoder) if model.hp.get("init_encoder") else None}
     config = {"args": {k: v for k, v in vars(cfg).items() if isinstance(v, (str, int, float, bool, type(None)))},
               "model": model.hp, "schedule": sched, "n_train": n_train,
               "n_val": int(len(dm.splits["val"]["y"])), "n_test": int(len(dm.splits["test"]["y"])),
               "n_snps": n_snps, "n_parameters": int(n_params),
-              "n_encoder_parameters": int(sum(p.numel() for p in model.encoders.parameters())),
+              "n_encoder_parameters": int(sum(p.numel() for p in (model.layers if model.blocks else model.encoders).parameters())),
+              **({"blocks": blocks} if model.blocks else {}),
               "dataset_dir": os.path.abspath(dm.dir), "store_dir": os.path.abspath(dm.store_dir),
               "covariates": dm.cov_names, "resumed": bool(resume),
               "covariate_scaling": ({"mean": [float(v) for v in dm.cov_cm[0]], "sd": [float(v) for v in dm.cov_cs[0]]}

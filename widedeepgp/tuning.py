@@ -1,6 +1,7 @@
 """The hyper-parameter search inside every run (methods.md section 8), which main_multilabel.py
-starts with ``tune_run`` whenever --tune_trials > 0. With --wide on, the default, a run searches
-in two stages:
+starts with ``tune_run`` whenever --tune_trials > 0. With --wide off, the default, a run searches
+the network alone (stage "deep": Optuna trials over learning rate, weight decay, dropout and, in
+blocks mode, the table's prior variance). With --wide on it searches in two stages:
 
   1. linear   one grid run of the linear model alone (--wide only) over the prior variances of
               --prs_grid; each disease keeps its best variance and validation pass, and that
@@ -8,10 +9,9 @@ in two stages:
   2. joint    Optuna trials of the network on top, started from stage 1's per-disease model
               with its PRS weights fixed (--init_wide_from, --wide_freeze).
 
-The run's model is always the joint one, whatever its tuning AUROC; the linear model alone is
-recorded as an ablation ("linear_only"). --wide only runs stage 1 alone, --wide off searches the
-network alone (stage "deep"). README.md lists what the run's folder holds; rerunning the same
-command continues the search.
+With --wide on the run's model is the joint one, whatever its tuning AUROC, and the linear model
+alone is recorded as an ablation ("linear_only"); --wide only runs stage 1 alone. README.md lists
+what the run's folder holds; rerunning the same command continues the search.
 """
 import contextlib
 import copy

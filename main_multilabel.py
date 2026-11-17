@@ -1,7 +1,7 @@
 """Train the multi-disease DeepGP (WideDeepGP).
 
     python main_multilabel.py --data_dir <data_dir> --label <dataset> --rd_mode <variant> \
-        --exp_name <run> --final_pool atten --d_model 32 --e_layers 1 --batch_size 16 ...
+        --partition <partition.npz or folder> --mixer transformer --d_model 64 --e_layers 4 --exp_name <run> ...
 
 A run tunes itself on the free GPUs minus one (widedeepgp/tuning.py; methods.md section 8). By
 default (--input_mode blocks, --wide off) its model is one network trained end to end from dosages:

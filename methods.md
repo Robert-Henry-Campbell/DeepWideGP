@@ -7,19 +7,21 @@ removed on 16 November 2026 and are in git history at 784009f); what it showed
 about the model itself is summarised in section 4.9 and should be read before the model is
 trained at full size.*
 
-**Status, 16 November 2026 (evening).** The design of the model changed after the first training
-size of the ladder showed the network adding nothing to the ridge PRS path (ridge alone 0.6634,
-ridge plus network 0.6633; the simulated-trait gate had shown the same). Robert decided that the
-deep arm of the scaling study is one network trained end to end from dosages, whose first layer is
-a learned table with a vector per SNP pooled by LD block, followed by a mixer (Mamba or a
-transformer) over the blocks; that the linear PRS path of section 4.10 stays in the code but is off
-by default and is never part of the reported model; that the study is styled after Kaplan et al.
-(2020), with model size, participants and compute as its axes. The design, its decisions and its
-costs are in DeepWideGP-Scripts `scripts/widedeepgp-blocks/methods.md` (branch `widening`); the
-implementation has not started. Until it lands, sections 4.10, 8 and 10 and the comparison table
-of section 10 describe the code as it stands (the path on by default, "the network on top of the
-linear model" as the run's model), and every statement of that rule in this document is
-superseded by the decision above.
+**Status, 17 November 2026.** The LD-block model decided on 16 November is implemented and is
+the default of `main_multilabel.py` (`--input_mode blocks`, `--wide off`): one network trained
+end to end from dosages, whose first layer is a learned table with a vector per SNP pooled by LD
+block, followed by a mixer (the published bidirectional Mamba block or a transformer encoder
+layer) over the block tokens, with a linear readout of the table beside the head. Section 4.11
+describes it; sections 4.10, 6, 7, 8, 10, 12 and 13 were brought up to the new default on the
+same day, with the earlier rules kept as dated notes. The decision followed the first training
+size of the ladder, where the network added nothing to the ridge PRS path (ridge alone 0.6634,
+ridge plus network 0.6633; the simulated-trait gate had shown the same). The linear PRS path of
+section 4.10 stays in the code as an option, off by default, and is never part of the reported
+model; the SNP-token mode of sections 4.1 to 4.9 remains as the published network widened
+(`--input_mode snps`), used by the classic single-disease comparator. The study is styled after
+Kaplan et al. (2020), with model size, participants and compute as its axes; its design, its
+decisions and its costs are in DeepWideGP-Scripts `scripts/widedeepgp-blocks/methods.md` (branch
+`widening`).
 
 ## 1. Question
 
@@ -251,7 +253,9 @@ covers 1,250,863 of the 1,258,200 SNPs (99.4%); the others get zeros and a 97th 
 ## 4. Model
 
 The network maps a participant's genotypes and covariates to one logit per disease. Sections
-4.2, 4.7 and 4.10 differ in kind from published DeepGP; section 10 lists every difference.
+4.1 to 4.10 describe the SNP-token mode (`--input_mode snps`), the published network widened,
+and section 4.11 the LD-block mode that is the default since 17 November 2026. Sections 4.2,
+4.7, 4.10 and 4.11 differ in kind from published DeepGP; section 10 lists every difference.
 
 ![Figure 1. WideDeepGP](figures/widedeepgp_architecture.png)
 
@@ -269,10 +273,11 @@ computed from 96 functional annotations and a no-annotation flag per SNP (97 cha
 pair of maps shared by all chromosomes, so that box is drawn once, outside the stack. Beside the network, the
 linear PRS path (section 4.10) gives every SNP and disease a weight of its own, with a ridge
 penalty, and every covariate and disease a weight; its 30 logits are added to the head's, so the
-network only has to add what a genome-wide PRS and the covariates miss (`--wide on`, the
-default; `off` is the network alone, `only` the path alone). With a model width of 32 and one
-encoder layer the network has 465,662 trainable parameters and the path 37,746,390. (Vector
-version and the component table: `figures/widedeepgp_architecture.pdf`,
+network only has to add what a genome-wide PRS and the covariates miss (`--wide on`; `off`, the
+default since 16 November 2026, is the network alone; `only` the path alone). With a model width
+of 32 and one encoder layer the network has 465,662 trainable parameters and the path
+37,746,390. The LD-block model that is the default since 17 November 2026 (section 4.11) is not
+drawn here. (Vector version and the component table: `figures/widedeepgp_architecture.pdf`,
 `figures/widedeepgp_architecture_data.csv`; drawn by `scripts/make_architecture_figure.py`.)
 
 ### 4.1 Input and token embedding
@@ -435,9 +440,15 @@ with no per-disease information, leaves the network without the means to learn S
 least at the scale tested. Of the ways SNP-specific information could enter (association
 statistics as annotation, GWAS-based selection of SNPs, or parameters of its own for each SNP),
 the third was chosen on 12 November 2026, keeping all SNPs and no GWAS: the linear PRS path of
-section 4.10.
+section 4.10. Since 17 November 2026 the per-SNP parameters are the first layer of the network
+itself (section 4.11), and the path is an option.
 
 ### 4.10 Linear PRS path
+
+*An option since 16 November 2026 (`--wide on` or `only`), off by default and never part of the
+reported model, available in SNP mode only: blocks mode (section 4.11) has per-SNP parameters of
+its own and refuses the path. Written 12–13 November 2026; the description below is of the path
+when it is on, as the runs of 13 to 16 November had it.*
 
 The linear PRS path gives the model a parameter of its own for every SNP and disease, beside
 the network. For disease *j*
@@ -456,9 +467,10 @@ base rate, logit(π′_j) (section 5.2); when the path is on, the network's last
 at zero, so that at the first step the model is the base-rate model and the network adds only
 what training gives it. Older weights load with the path at zero.
 
-Three settings of `--wide`: `on`, the default (network and path); `off`, the network alone (the
-model of the pilot); `only`, the path alone, with no network (a linear comparator inside
-WideDeepGP, trained by the same code; it also runs without a GPU). The path costs 151 MB of
+Three settings of `--wide`: `off`, the default since 16 November 2026 (the network alone: the
+model of the pilot in SNP mode, and the only setting of blocks mode); `on` (network and path; the
+default from 13 to 16 November 2026); `only`, the path alone, with no network (a linear comparator
+inside WideDeepGP, trained by the same code; it also runs without a GPU). The path costs 151 MB of
 weights (about 0.6 GB of GPU memory with the optimiser's state) and one matrix product per step,
 which is negligible next to the encoders. Its penalty and learning rate are described in
 sections 5.2 and 6, and how its settings are chosen in section 8.
@@ -480,6 +492,161 @@ run) and scored again on the tuning set, which reproduces the AUROC each disease
 Before this, one τ was searched for all diseases together; on the simulated traits (section
 8) the trait with 20 causal SNPs and heritability 0.3 trailed the others relative to GBLUP, which
 had each trait's own heritability.
+
+### 4.11 LD-block mode (the default since 17 November 2026)
+
+Blocks mode (`--input_mode blocks`) replaces the token embedding, the per-chromosome encoders,
+their pooling and the attention across chromosomes (sections 4.1 to 4.4 and 4.6) by a first layer
+with a parameter of its own for every SNP, pooled by LD block, and one mixer over the blocks. The
+decision and its reasons are in the status note at the top; the design document
+(DeepWideGP-Scripts `scripts/widedeepgp-blocks/methods.md`, sections 1 to 4) gives the full
+account and the experiments. For one participant, in order:
+
+**The per-SNP table (first layer; `widedeepgp/blockencoder.py`).** Every SNP *s* has a learned
+vector T_s of d_e numbers (`--embed_dim`, 16 by default; 4 and 64 on the table axis of the
+scaling study). With `--snp_code dosage` the participant's standardised dosage x_s scales the
+vector, and the pooled vector of block *b* is the sum Σ_{s∈b} x_s T_s. With `--snp_code genotype`
+every SNP has three vectors, for 0, 1 and 2 copies, and the raw dosage x (not standardised: the
+data module's unscaled path, as for `--snp_embed vocab`) weights them by the hat functions
+max(0, 1 − x), 1 − |x − 1| and max(0, x − 1), so a whole-number dosage selects one vector and a
+fractional one interpolates between two; dominance at a SNP is then exact in the first layer, at
+three times the table. Blocks are contiguous runs of SNPs in store order, so the pooling is an
+exact segment sum computed as one matrix product per block, of the batch's dosages of the run
+with the run's rows of the table (one table per chromosome, SNP-major; the per-SNP products are
+never materialised). The table starts at zero.
+
+**The block tokens.** A learned identity vector per block and per chromosome (the position
+encoding: with a fixed set of a few hundred to a few thousand tokens, position is identity, and
+no sinusoid is used) is added to the pooled vector, which then passes through one small MLP shared
+by all blocks (d_e → 4 d_e → d, GELU) and dropout (`--dropout`): one token of width *d* per block.
+The covariates pass through the covariate encoder of section 4.5 and a layer normalisation: the
+covariate token.
+
+**The mixer.** One sequence of all block tokens and the covariate token (431 + 1 tokens with the
+Privé partition) runs through `--e_layers` layers of the mixer: the published bidirectional Mamba
+block of section 4.3 (`--mixer bimamba1`) or a pre-norm transformer encoder layer
+(`--mixer transformer`: `torch.nn.TransformerEncoderLayer` with `--n_heads` heads, a feed-forward
+layer of width 4*d*, GELU and dropout `--dropout`), then a final layer normalisation (of the
+residual sum, for the Mamba block). `--d_model` and `--e_layers` set the mixer's size.
+
+**The head and the readout.** The mean over the tokens, concatenated with the covariate vector,
+feeds the head of section 4.7 (`combine`: a shared hidden layer of 256 units, then one logit per
+disease; `--final_pool mean` is the only pooling blocks mode accepts). To the head's logits is
+added a linear readout of the table pooled over *all* SNPs, the sum of the block vectors:
+
+    logit_j = head_j + Σ_e a_je Σ_s x_s T_se
+
+with *a* a 30 × d_e matrix without bias (`readout`). With the head's last layer at zero the model
+is therefore exactly a rank-d_e ridge PRS: every disease's logit is a linear combination of d_e
+genome-wide scores, and at d_e = 1 it is one PRS with a scale per disease
+(`tests/test_ml_blocks.py::test_the_model_contains_a_ridge_prs` pins both). The readout was added
+after a probe on 17 November 2026 on the synthetic six-trait dataset (4,000 participants, 132
+SNPs, six traits). Without it a zero-initialised table gets its gradient direction from a random,
+fast-moving downstream network and its Adam steps never accumulate: the model learned the three
+traits with shared causal SNPs only after a phase transition and never the two traits with causal
+SNPs of their own (AUROC 0.48 and 0.39 against ceilings of 0.78 and 0.97), and with one SNP per
+block it learned nothing at all. With the readout every trait is learned after one pass: a final
+mean AUROC of 0.83 over the heritable traits against a ceiling of 0.86, above the 0.75 of the
+SNP-token model on the same data. The model remains one network trained end to end from
+dosages; nothing is fitted outside it.
+
+**Precision and memory.** Under `--precision bf16` the first layer, the covariate encoder and the
+mixer run in bf16; the mean over the tokens, the head, the readout (of the block vectors summed
+in 32-bit) and the loss run in 32-bit, as the pooling and head of section 6 do, and the table's
+master weights stay in float32. `--grad_ckpt` checkpoints each mixer layer (outputs and
+gradients unchanged; `tests/test_ml_blocks_gpu.py` checks it on the GPU, and requires the largest
+planned transformer, d = 256 with 8 layers, over 2,001 tokens to train a batch of 128 in under
+40 GiB).
+
+**The partition and its digest.** `--partition` names a `partition.npz`, or its folder, under
+`data/reference/partitions/` (the layout of the design document, section 5: the store's
+chromosome names and variant counts, a sha256 of its variant IDs, and the global block id of
+every variant per chromosome), or `uniform:<k>` (k SNPs per block) for tests. The data module
+checks the chromosomes, the variant counts and the variant digest against the store, keeps the
+blocks of the dataset's regions renumbered from zero, and refuses blocks that are not contiguous
+runs in store order or that cross a chromosome. Three nested partitions exist, built on 17
+November 2026 (design document, section 5): `prive431` (Privé's 431 HapMap3+ blocks, 119 to
+15,194 of our SNPs each), `ldsplit2000` and `ldsplit5000`. The partition as the model sees it, the
+block index of every SNP of every sequence, is digested (sha256, 16 hexadecimal characters) and
+saved with every checkpoint's hyper-parameters as `partition_digest`; a model refuses to be
+built, loaded (`load_model`), started from (`--init_from`) or resumed against another partition.
+The partition's name, digest and block count are in `config.json`.
+
+**Parameter counts.** `config.json` holds, under `blocks`, the parameters by module and their
+split into embedding parameters (the table and the identity vectors, which Kaplan et al.'s N
+excludes) and non-embedding parameters (the block MLP, the mixer with its final normalisation,
+the covariate encoder, and the head with the readout: N), beside the number of tokens. Counted
+from constructed networks with the 1,258,200 SNPs, the `prive431` partition, 30 outputs, 12
+covariates and the head width the chains use, `--head_hidden` 4 d (so that the head does not outweigh a
+small mixer; the parser's default, 256, would give S1 a head of 16,638):
+
+| Size (transformer, *d* × layers) | Table (d_e = 16) | Identity | Block MLP | Mixer | Covariate encoder | Head with readout | N (non-embedding) | Total |
+|---|---|---|---|---|---|---|---|---|
+| S1, 16 × 1 | 20,131,200 | 7,248 | 2,128 | 3,312 | 7,472 | 4,542 | 17,454 | 20,155,902 |
+| S2, 32 × 2 | 20,131,200 | 7,248 | 3,168 | 25,472 | 11,616 | 12,670 | 52,926 | 20,191,374 |
+| S3, 64 × 4 | 20,131,200 | 7,248 | 5,248 | 200,064 | 19,904 | 41,214 | 266,430 | 20,404,878 |
+| S4, 128 × 6 | 20,131,200 | 7,248 | 9,408 | 1,189,888 | 36,480 | 147,454 | 1,383,230 | 21,521,678 |
+| S5, 256 × 8 | 20,131,200 | 7,248 | 17,728 | 6,318,592 | 69,632 | 556,542 | 6,962,494 | 27,100,942 |
+
+A transformer layer has 12 d² + 13 d parameters and the final normalisation 2 d. The Mamba block
+of section 4.3 has 11,008 parameters per layer at d = 32 and 34,816 at d = 64 (section 4.8), so a
+Mamba mixer matched to S3's N takes six layers (209,024; N 275,390). The table has M d_e entries
+(3 M d_e with the genotype code: 60,393,600 at d_e = 16) and the identity vectors (431 + 22) d_e;
+on the table axis at S3, d_e = 4 gives 5,032,800 table entries and N = 261,990, and d_e = 64 gives
+80,524,800 and N = 295,710 (the block MLP and the readout grow with d_e).
+
+**Training.** Everything is trained by AdamW on the loss of section 5, from dosages, from
+scratch, in two parameter groups (section 6): the table at its own learning rate
+
+    lr_table = κ τ √B / √M
+
+(`--table_kappa` κ = 0.1 and `--table_var` τ = 1 by default; B the effective batch size, M the
+number of SNPs; the rule of the linear PRS path without its class-weight factor, since each table
+entry's gradient is its dosage times the gradient of its block's token, of order 1/√M), with no
+weight decay but an L2 penalty in the loss,
+
+    penalty = Σ_s ‖T_s‖² / (2 N τ)
+
+(N the run's training participants; logged as `train/table_penalty`), which makes τ the prior
+variance of a table entry as `--prs_var` is the PRS's (section 5.2); and everything else at `--lr`
+with weight decay `--l2`. Both groups follow the same schedule, a linear warm-up of
+`--warmup_steps` (200) optimiser steps and a cosine decay to zero over the run's budget
+(`--lr_schedule cosine`), the default of `main_multilabel.py` since 17 November 2026. τ is
+searched with the learning rate, weight decay and dropout (section 8). The run's log has
+`train/lr_table` and `train/grad_norm_table` beside the network's. Snapshots are written by the
+model (`WideDeepGP.snapshot`) with the table in bfloat16, which `load_model` reads back into
+float32.
+
+**Pretraining and the warm start (`--init_encoder <file>`).** The first layer can start from a
+file holding a manifest (its kind, the partition digest, the SNP code and the width, all checked
+against the model) and a state with the tables and, optionally, the identity vectors and the
+MLP's first layer; `--freeze_encoder` keeps the loaded parameters fixed (a frozen table then has
+no optimiser group and no penalty), and `config.json` records the file's sha256. Two writers
+exist. `pretrain_blocks.py` pretrains the first layer by masked-SNP prediction on the dataset's
+training rows only, with no labels and no mixer: each SNP of a participant is hidden with
+probability `--mask_rate` (0.15) and contributes nothing to its block's pooled vector; the
+genotype class of every hidden SNP (0, 1 or 2 copies, the raw dosage rounded) is predicted from
+the hidden layer of its block's token through a linear map to three class vectors, shared by all
+SNPs, and a dot product with a per-SNP output vector; the cross-entropy over the hidden SNPs is
+minimised by AdamW at `--lr` for `--epochs` (1) passes over the training rows; the table, the
+identity vectors and the MLP's first layer are written owner-only, with the training rows'
+digest, the loss at the start and at the end and the accuracy against the majority class in the
+manifest. The ridge warm start, written by DeepWideGP-Scripts
+`scripts/widedeepgp-blocks/make_warm_start.py`, is the rank-d_e factorisation of a rung's
+closed-form block ridge (design document, section 6; dosage code). Both are ablations; the
+default is the plain dosage table from scratch.
+
+**Hyper-parameter search, selection and evaluation** are those of sections 7 to 9, with
+`--table_var` added to the searched settings.
+
+**What the mode cannot do.** Interactions between distant loci are representable in the mixer but
+not identifiable at this training size; within-block interactions beyond the pooled vector's
+passage through the block MLP are not modelled; the ridge path, the offset and the annotation
+vectors are refused in blocks mode (`--wide off`, no `--annot`). The frozen cross-fitted first
+layer of the design document's ablations (fixed, cross-fitted block ridge scores as the tokens'
+input, against end-to-end training) is not implemented: `--init_encoder` with `--freeze_encoder`
+fixes a table fitted in-sample (the warm start) or without labels (pretraining), which is not the
+same ablation.
 
 ## 5. Training objective
 
@@ -556,8 +723,8 @@ and γ = 0 the loss is exactly that of published DeepGP.
 **Ridge penalty of the PRS weights** (section 4.10). The PRS weights carry a ridge penalty,
 added to the loss rather than applied as decoupled weight decay, so that the trained PRS
 approximates the posterior mode under a normal prior: θ_sj ~ N(0, τ), so that each SNP's effect
-on the logit scale has prior variance τ/M and the whole PRS prior variance τ (`--prs_var`;
-chosen per disease from a grid in every run, sections 4.10 and 8). For a loss averaged over the N training participants the
+on the logit scale has prior variance τ/M and the whole PRS prior variance τ (`--prs_var`; with
+`--wide on`, chosen per disease from a grid in the run's linear stage, sections 4.10 and 8). For a loss averaged over the N training participants the
 posterior mode carries the penalty Σ_s θ_sj² / (2Nτ). The class weights, however, make a
 disease's loss as curved as if it held more information than it does: at the base-rate
 solution, the weighted loss's curvature is π′(1 − π′), with π′ = π c(1)/Z the weighted share of
@@ -575,7 +742,9 @@ The sampling-rate correction does not change it (the expected loss is the cohort
 covariate weights and intercepts are not penalised. N is the run's own number of training
 participants, so the shrinkage grows as the training set shrinks. The test
 `test_the_penalty_correction_is_the_curvature_ratio` checks the curvature ratio numerically at
-three prevalences.
+three prevalences. The per-SNP table of blocks mode (section 4.11) carries the plain penalty
+Σ ‖T_s‖² / (2 N τ) without the curvature factor: its entries are shared by all diseases, so no
+disease's class weight applies to them.
 
 ### 5.3 Variants kept for comparison
 
@@ -585,8 +754,11 @@ Three switches exist so that the choices above can be tested rather than assumed
 
 ## 6. Optimisation
 
-- **Optimiser.** AdamW (Loshchilov and Hutter, 2019) with a constant learning rate by default,
-  as in published DeepGP; a linear warm-up and cosine decay are available.
+- **Optimiser.** AdamW (Loshchilov and Hutter, 2019). Until 17 November 2026 the default was a
+  constant learning rate, as in published DeepGP; since then `main_multilabel.py` defaults to a
+  linear warm-up of 200 optimiser steps and a cosine decay to zero over the run's budget
+  (section 4.11), and the SNP-mode recipes (the synthetic check and the classic comparator) pass
+  `--lr_schedule constant --warmup_steps 0` to keep the published constant rate.
 - **Batch size and accumulation.** The batch is bounded by GPU memory, which grows with batch
   size times number of SNPs. Gradients can be accumulated over several batches per update; the
   rotation order is reshuffled every rotation so that the same diseases do not always share an
@@ -603,10 +775,10 @@ Three switches exist so that the choices above can be tested rather than assumed
   within 0.2% at every logged step and the same mean tuning AUROC (0.6110 against 0.6108), in
   0.74 times the time per step (0.76 in the capacity trials, which had a GPU to themselves) and
   0.59 times the peak memory; a whole run has not been compared.
-- **Activation checkpointing.** Each chromosome's encoder can be run without storing its
-  intermediate activations, which are recomputed during the backward pass. Outputs and
-  gradients are unchanged; memory is then set by the longest chromosome instead of the genome,
-  at the cost of one extra forward pass.
+- **Activation checkpointing.** Each chromosome's encoder (SNP mode) or each mixer layer (blocks
+  mode) can be run without storing its intermediate activations, which are recomputed during the
+  backward pass. Outputs and gradients are unchanged; in SNP mode memory is then set by the
+  longest chromosome instead of the genome, at the cost of one extra forward pass.
 - **Seeds.** Every run uses one seed, 1: it sets the initial weights, dropout and the order
   of the batches, and the sampler of the hyper-parameter search. The pilot, its simulated-trait
   control and its hyper-parameter search ran with it (the pilot's arms also once with seed 2,
@@ -620,7 +792,10 @@ Three switches exist so that the choices above can be tested rather than assumed
   r_j; under this rule the noise depends on κ alone, and the weights settle in about 1/κ
   epoch-equivalents whatever the training size, the number of SNPs or the batch size (derived
   from Adam's per-weight step, and checked by simulation in the design review). κ = 0.1
-  (`--wide_kappa`; settled in about 10 epoch-equivalents on the simulated traits); the linear
+  (`--wide_kappa`; settled in about 10 epoch-equivalents on the simulated traits; the runs of 13
+  to 16 November 2026 used it. Since 17 November, when the path became an option,
+  `main_multilabel.py` no longer sets it and the parser's default of 0.03 stands, so a run with
+  the path on passes `--wide_kappa` explicitly); the linear
   stage of a run's search lets the rates fall on a cosine to zero over its budget, which removes
   most of the noise that remains at a constant rate. The PRS weights, the covariate
   weights with the intercepts, and the network form three parameter groups of one AdamW
@@ -658,22 +833,27 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
 - **Snapshots.** The weights are also saved at steps evenly spaced on a logarithmic axis (six
   per tenfold increase; eight in the pilot) and at every epoch-equivalent, at most 40 per trial
   (the regular ones are thinned first), with the number of updates, participants seen and
-  training time of each. After a run's search only the chosen trial and the first stage's
-  per-disease model keep their weights; every trial keeps its records. Every snapshot can be
-  scored afterwards, which gives performance as a function of training compute (as Kaplan et
+  training time of each. Since 17 November 2026 the model writes its snapshots itself
+  (`WideDeepGP.snapshot`: the weights, with the per-SNP table of blocks mode in bfloat16, the
+  hyper-parameters, the step and the participants seen), and `load_model` reads a snapshot or a
+  checkpoint alike. After a run's search only the chosen trial (and, with `--wide on`, the first
+  stage's per-disease model) keeps its weights; every trial keeps its records. Every snapshot can
+  be scored afterwards, which gives performance as a function of training compute (as Kaplan et
   al., 2020, report loss against compute), and allows the best snapshot to be read off for each
   disease separately as a secondary analysis. The tuning set is scored at every validation pass
   as training runs; the test set is never scored during training: once it is unlocked (section
   9), the snapshots are scored on it, which gives test performance against compute without the
   test set ever informing a choice. The compute of a snapshot in floating-point operations
-  follows from the model's size, the number of SNPs and the participants seen, which are all
-  recorded, so it is computed afterwards rather than logged.
+  follows from the model's size, the number of SNPs (in blocks mode also the number of tokens)
+  and the participants seen, which are all recorded, so it is computed afterwards rather than
+  logged.
 - **Fixed tables are not saved.** Position tables and annotation matrices are functions of the
   SNP list and are rebuilt from the dataset; a saved model holds its weights and its
   configuration, with a digest of its positions and of its annotation matrices, and refuses to
   load against tables that differ from those it was trained with (an annotated model saved
   before the annotation digest was added, such as the pilot's annotation and GWAS-annotation
-  runs, loads with a warning).
+  runs, loads with a warning). In blocks mode the partition is likewise rebuilt from its file and
+  checked by digest (section 4.11).
 - **Continuing a search.** Rerunning a run's command continues its search: finished trials
   are kept; a trial that a crash left running is queued again with the same settings and
   carries on from its last checkpoint in its own folder (one that had written none starts again
@@ -686,8 +866,8 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   directory the pilot's code copied and resumed); a copy of a run directory (made while nothing
   writes to it), or the same directory reached by another path, is resumed as if in place,
   keeping its best checkpoint and best score. It refuses a checkpoint trained on other
-  positions, annotations, diseases or training labels, or with other model, loss or optimiser
-  settings, and a run whose `config.json` records other batches, seed, schedule or input
+  positions, annotations, block partition, diseases or training labels, or with other model,
+  loss or optimiser settings, and a run whose `config.json` records other batches, seed, schedule or input
   scaling: the loss's constants and the optimiser's state are restored from the checkpoint and
   would silently override new values, and the resumed run's `config.json` replaces the first
   one. Only the planned length may change (the epoch-equivalent budget and the early-stopping
@@ -696,7 +876,8 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
   layer starts afresh when the source was trained for other diseases: a different number, or,
   when the source records its diseases (every WideDeepGP snapshot and checkpoint does), other
   names or another order. A single-disease model saved by `main_genome.py` records none, so a
-  one-disease run loads its output layer as it is.
+  one-disease run loads its output layer as it is. In blocks mode the source must have been
+  trained on the same partition.
 - **A resumed run's repeated validation pass.** A resumed run repeats the validation pass at
   which its checkpoint was written, and Lightning restores that pass part-way through, so only
   its last batches are scored (found on 15 November 2026: a resumed grid run took every
@@ -712,7 +893,21 @@ one pass over its genotypes (ten minutes) and cached with the dataset.
 
 Every run tunes itself (Robert's decision of 12 November 2026): the best settings change with
 the size of the training set, which the scaling study varies. A run, for one dataset and
-training set, is a search in two stages:
+training set, is by default one search of the network alone (stage `deep`; the default since 17
+November 2026, when the linear PRS path became an option): 12 trials proposed by Optuna's
+tree-structured Parzen estimator (Akiba et al., 2019), each an ordinary training run, over the
+network's learning rate (10⁻⁴ to 3 × 10⁻³), weight decay (10⁻⁶ to 10⁻²), embedding dropout (0 to
+0.4) and, in blocks mode, the table's prior variance τ (`--table_var`, 0.01 to 100; section
+4.11), all but the dropout log-uniform. Asynchronous successive halving (Jamieson and Talwalkar,
+2016; Li et al., 2020) stops the trials whose mean tuning AUROC trails at each rung, and the
+run's model is the trial with the best mean tuning AUROC. A cell of the scaling study runs its
+search once with seed 1 and retrains the chosen settings with seeds 2 and 3 (`--tune_trials 0`
+with the chosen `--lr`, `--l2`, `--dropout` and `--table_var`; the retrain reproduces the trial's
+model settings exactly but for the seed, `tests/test_ml_blocks.py`), and reports the mean of
+the three with the seed spread (Robert, 17 November 2026; the PGI arm stays at one seed).
+
+**With the linear PRS path on** (`--wide on`; the default from 13 to 16 November 2026, SNP mode
+only), the search has two stages:
 
 1. **The linear model alone** (`--wide only`), one training run over a grid of prior variances
    (section 4.10; by default τ = 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10 and 30, half-decade steps
@@ -734,27 +929,27 @@ training set, is a search in two stages:
    and embedding dropout. Asynchronous successive halving (Jamieson and Talwalkar, 2016; Li et
    al., 2020) stops the trials whose mean tuning AUROC trails at each rung.
 
-The run's model is always the second stage's best trial, the network on top of the linear
-model, whatever its mean tuning AUROC relative to the linear model alone (Robert's decision of 15
-November 2026). WideDeepGP is therefore always reported as the whole model, never as the
-ridge-regression PGI inside it, which would duplicate the PGI arm. The first stage's
+With the path on, the run's model is the second stage's best trial, the network on top of the
+linear model, whatever its mean tuning AUROC relative to the linear model alone (Robert's
+decision of 15 November 2026): WideDeepGP was reported as the whole model, never as the
+ridge-regression PGI inside it, which would duplicate the PGI arm, and the first stage's
 per-disease model is recorded beside it in the run's `results.json` as an ablation
-(`linear_only`: WideDeepGP without its network, with the difference between the two), so every
+(`linear_only`: WideDeepGP without its network, with the difference between the two), so such a
 run also shows what the network adds at its training size. (Until 15 November the linear model
-was the run's model when the network did not beat it; the simulated-trait check of section 8 ran
-under that rule.) With `--wide off` the search is the second stage alone, without the
-linear path; with `--wide only`, the first stage alone. Trials use the run's seed; each
-worker's sampler is seeded with the run's seed plus the worker's index. Trials run in parallel,
-one per GPU, on the free GPUs minus one (`--tune_gpus auto`), or one after another without a
-GPU. Each GPU's worker takes the next trial whenever it is free, counting and claiming under a
-lock so that exactly the stage's number of trials is started (since 16 November 2026: before,
-each worker had a fixed share, and on the first training size one slow trial kept a worker busy
-for about six hours while the other three GPUs stood idle). Model width, depth, the sequence block and the use of annotations are experimental factors
-and are never searched.
+was the run's model when the network did not beat it; the simulated-trait check below ran under
+that rule.) With `--wide only` the search is the first stage alone. In every case trials use the
+run's seed; each worker's sampler is seeded with the run's seed plus the worker's index. Trials
+run in parallel, one per GPU, on the free GPUs minus one (`--tune_gpus auto`), or one after
+another without a GPU. Each GPU's worker takes the next trial whenever it is free, counting and
+claiming under a lock so that exactly the stage's number of trials is started (since 16 November
+2026: before, each worker had a fixed share, and on the first training size one slow trial kept
+a worker busy for about six hours while the other three GPUs stood idle). Model width, depth,
+the mixer, the table's width and SNP code, the partition and the use of annotations are
+experimental factors and are never searched.
 
-**Checks on the pilot's proxy** (gates; methods in `DeepWideGP-Scripts/scripts/widedeepgp-gates/`;
-its results files and run folders were removed on 16 November 2026, the numbers below are the
-record). On five traits simulated on the proxy's real
+**Checks on the pilot's proxy** (gates, with the linear path on; methods in
+`DeepWideGP-Scripts/scripts/widedeepgp-gates/`; its results files and run folders were removed
+on 16 November 2026, the numbers below are the record). On five traits simulated on the proxy's real
 genotypes, the linear stage reached a mean tuning AUROC of 0.7187 against 0.7132 for GBLUP given
 each trait's true heritability, and the network on top added nothing (its best trial 0.7187,
 below the linear model alone in the fifth decimal; under the rule of that day the linear model
@@ -770,7 +965,9 @@ simple linear PGI, overlapping the PGI arm, the study's linear comparator: as fi
 reported the linear model whenever the network did not improve on it. He decided that the
 reported result is always the linear model with the network on top, whichever does better; the
 linear model alone is kept only as a labelled ablation (above). **Superseded on 16 November
-2026:** the path is off by default and the model is redesigned (status note at the top).
+2026, implemented on 17 November:** the path is off by default and the model is the LD-block
+network of section 4.11 (status note at the top); the rule above applies only to runs with
+`--wide on`.
 
 The search inside every run replaces the plan's search on a proxy followed by a comparison at
 full size. In the pilot, on the network alone, a search on the real labels of the proxy was
@@ -814,7 +1011,9 @@ original plan (E11, I25, I48, M17, K80) are dropped. At each size:
   and an unweighted cross-entropy loss; with the twelve covariates of every other model.
 - **Run under the study's protocol**: seed 1; the same per-run search as WideDeepGP's network
   (12 Optuna trials over learning rate, weight decay and dropout, the published settings being
-  the first), early stopping on the tuning set, the tuning set scored as a whole; the test set
+  the first), in SNP mode with the published constant learning rate (`--input_mode snps
+  --lr_schedule constant --warmup_steps 0`, passed explicitly since the defaults changed on 17
+  November 2026), early stopping on the tuning set, the tuning set scored as a whole; the test set
   only at the joint unlock. The published script itself is not used as it stands: it fixes the
   seed (33) and the data folder, scores the test set at the end of every run and writes
   per-person predictions into the repository. Its network and training are reproduced by the
@@ -829,32 +1028,39 @@ other 29. The runs follow each WideDeepGP size in the ladder's chain.
 
 **Model size** (Robert, 15 November 2026). Each ladder varies one factor and holds the others
 fixed. The training-size ladder above keeps the model at width 32 and one layer; model size is
-varied later, several times, at the largest training size only.
+varied later, several times, at the largest training size only. **Superseded on 16 and 17
+November 2026** by the Kaplan-style design of the design document (sections 2 and 4): five mixer
+sizes at every training size, the table's width as a second size axis at the middle size, and
+the block count as a one-factor side study; the classic comparator keeps width 32 and one
+layer.
 
 ## 10. What changed from single-phenotype DeepGP
 
 | Component | Single phenotype (published) | Multi-phenotype (this model) |
 |---|---|---|
 | SNPs | Chosen per disease: GWAS p-value filter, then clumping | One fixed set for all diseases: 1,258,200 HapMap3+ SNPs |
-| SNP effects | Learned by the network from the selected SNPs | A linear PRS path inside the model (one weight per SNP and disease, ridge penalty) with the network on top; always reported as the whole model, the linear part alone recorded as an ablation (section 8) |
-| SNP annotations | None | Optional per-SNP annotation vectors as a gain and offset (96 functional annotations; not adopted after the pilot, see section 4.9) |
+| SNP effects | Learned by the network from the selected SNPs | A learned vector of d_e = 16 numbers per SNP as the network's first layer, pooled by LD block and read out linearly beside the head (section 4.11; the default since 17 November 2026). From 13 to 16 November 2026 a linear PRS path beside the network (one weight per SNP and disease, ridge penalty; section 4.10), reported as the whole model with the linear part alone as an ablation; now an option, off by default, in SNP mode only |
+| SNP annotations | None | Optional per-SNP annotation vectors as a gain and offset (96 functional annotations; not adopted after the pilot, see section 4.9; SNP mode only) |
 | Labels | One per participant | One per disease per participant |
 | Covariates | Eight | Year of birth, sex, ten principal components |
-| Sequence block | Bidirectional Mamba | The same (Mamba-3 in a bidirectional wrapper was evaluated and not adopted) |
+| Sequence block | Bidirectional Mamba | The same, over SNP tokens (SNP mode) or over LD-block tokens, or a transformer encoder layer over the block tokens (blocks mode, section 4.11); Mamba-3 in a bidirectional wrapper was evaluated and not adopted |
 | Output | One sigmoid probability | 30 logits from the same hidden layer |
 | Batches | Shuffled | Rotation of disease-balanced batches |
 | Loss | Binary cross-entropy | Cross-entropy corrected for sampling rate, weighted by class, averaged per disease and then across diseases |
 | Validation metric | Mean of per-batch AUROCs | AUROC of each disease over the whole tuning set; their mean for stopping |
 | Validation schedule | Every 300 batches | Four times per epoch-equivalent, but at most once per 20,000 participants and at least once per epoch-equivalent |
 | Saved models | The best | The best, the last, and snapshots along training |
-| Hyper-parameters | Set by hand | Chosen inside every run: the linear model's prior variance per disease from a grid, then the network on top with Optuna |
-| Precision and memory | 32-bit; all chromosomes' activations held | bf16 encoders with 32-bit pooling, head and loss (adopted for full-size runs after the pilot); optional per-chromosome checkpointing |
+| Hyper-parameters | Set by hand | Chosen inside every run by Optuna: the network's learning rate, weight decay and dropout and, in blocks mode, the table's prior variance (12 trials; section 8). With the linear path on: first the linear model's prior variance per disease from a grid, then the network on top |
+| Precision and memory | 32-bit; all chromosomes' activations held | bf16 encoders with 32-bit pooling, head and loss (adopted for full-size runs after the pilot); optional checkpointing per chromosome (SNP mode) or per mixer layer (blocks mode) |
 
-**Unchanged:** the dosage input and its standardisation, the convolutional and positional
-embedding, the per-chromosome encoders and their block, mean pooling, the covariate encoder, the
-attention layer across chromosomes, the shared hidden layer, and the AdamW optimiser. With one
-disease, the same weights give the same output as the published network to within 10⁻⁶, and
-the same random seed gives identical initial weights.
+**Unchanged in SNP mode:** the dosage input and its standardisation, the convolutional and
+positional embedding, the per-chromosome encoders and their block, mean pooling, the covariate
+encoder, the attention layer across chromosomes, the shared hidden layer, and the AdamW
+optimiser. With one disease, the same weights give the same output as the published network to
+within 10⁻⁶, and the same random seed gives identical initial weights. Blocks mode (section 4.11)
+replaces the embedding, the per-chromosome encoders and the attention layer by the per-SNP
+table, the block MLP and one mixer over the blocks, and keeps the dosage input, the covariate
+encoder, the form of the head, the loss, the sampler and the optimiser.
 
 ## 11. Departures from the published implementation, and known quirks
 
@@ -939,6 +1145,41 @@ on the CPU, a resumed run scores only what it lacks: the pass it repeats once, a
 step once more, with a grid as its validation passes did, and results.json matches metrics.csv
 in each case.
 
+Added on 17 November 2026 for blocks mode (section 4.11). `tests/test_ml_blocks.py`, on the CPU
+with the transformer mixer: a `uniform:<k>` partition is contiguous blocks numbered across the
+chromosomes; a partition file is checked against the store (variant counts, variant digest,
+contiguity, each in turn refused), a dataset region keeps its blocks renumbered from zero, and
+blocks mode without `--partition` is refused; the pooling equals numpy segment sums of the
+dosage-scaled vectors at d_e = 1, 16 and 64; the genotype code's hat weights, that three
+collinear vectors (0, v, 2v) reproduce the dosage code and that it reads raw dosages; with the
+head's last layer at zero the logits are the ridge PRS of section 4.11 (one PRS with a scale per
+disease at d_e = 1, each disease's own combination of 16 scores at d_e = 16); the output shape,
+the state-dict names and the parameter counts by module (the sum equals the model's); the
+transformer block keeps the block interface; the refusals (`--wide on`, annotations, another
+pooling, another or no partition, an unknown SNP code); `--resume` and `--init_from` refuse
+another partition; the table's learning rate follows its rule and forms the second optimiser
+group without weight decay, its penalty has the stated value and a frozen table has neither
+group nor penalty; an `--init_encoder` file is checked (manifest, shapes, tables present),
+loaded and may be frozen; a run trains, writes `config.json`'s `blocks` section (whose embedding
+and non-embedding counts sum to the model's parameters) with the cosine recipe, snapshots the
+table in bfloat16 and loads it back in float32, is scored with `--save_scores`, resumes on the
+same data and refuses a resume with another `--embed_dim`; a one-trial search runs the `deep`
+stage alone, records the new scalars in `search.json`, searches `table_var`, and a retrain of
+the chosen settings with seed 2 reproduces the trial's model settings (only the seed, the run's
+name and the GPU list differ); masked pretraining lowers its loss on the synthetic store, writes
+the file owner-only with the expected entries, a run starts from it with `--freeze_encoder` and
+the file is refused for another partition; `main_multilabel.py`'s defaults are blocks mode,
+`--wide off`, the warm-up and cosine recipe and `--final_pool mean` (`atten` in SNP mode). Its
+learning check trains the blocks model for three passes on a synthetic six-trait dataset of
+3,000 participants: every heritable trait, the two with causal SNPs of their own included, must
+pass an AUROC of 0.6 and the null trait stay within 0.35 to 0.65 (without the readout the two
+solo traits stayed at chance). `tests/test_ml_blocks_gpu.py`, on a GPU: both mixers train a step
+in bf16 with finite, non-zero table gradients and float32 master weights; activation
+checkpointing leaves the loss and the gradients of the table and the mixer unchanged (to 10⁻³);
+the largest planned model (d = 256, 8 transformer layers, or 14 Mamba layers) over 2,001 tokens
+at a batch of 128 peaks below 40 GiB; and the mixer parameter counts of the planned sizes are
+printed, with the transformer's S3 within 5% of 12 L d².
+
 ## 13. Software and reproduction
 
 Python 3.10, PyTorch 2.10, PyTorch Lightning 2.0.8, `mamba_ssm` 1.1.1 from the Vision-Mamba
@@ -957,16 +1198,24 @@ themselves, and untracked files, are not saved) and the Python interpreter that 
     python scripts/build-ard30-dataset/build_dataset.py
     python scripts/build-ard30-dataset/describe_dataset.py     # cases by split, sampling rates
 
-    # train, score, tune (DeepWideGP)
+    # partitions (DeepWideGP-Scripts, scripts/widedeepgp-blocks: make_partition.R, check_partition.py,
+    # run_make_partition.sh; design document section 5) -> <data>/reference/partitions/{prive431,ldsplit2000,ldsplit5000}
+
+    # train, score, tune (DeepWideGP): the LD-block model (section 4.11), and the SNP-token mode
     python main_multilabel.py --data_dir <data>/datasets --label ard30 --rd_mode hm3plus --snp_stats train \
-        --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --precision bf16 --batch_size 16 \
-        --accumulate 4 --exp_name <run>
+        --partition <data>/reference/partitions/prive431 --mixer transformer --d_model 64 --e_layers 4 --n_heads 4 \
+        --embed_dim 16 --snp_code dosage --precision bf16 --batch_size 256 --exp_name <run>
+    python main_multilabel.py --data_dir <data>/datasets --label ard30 --rd_mode hm3plus --snp_stats train \
+        --input_mode snps --lr_schedule constant --warmup_steps 0 --final_pool atten --d_model 32 --e_layers 1 \
+        --n_heads 4 --precision bf16 --batch_size 16 --accumulate 4 --exp_name <run>
     python score_snapshots.py --run runs/<experiment>/<run> --split val
     python tune_optuna.py --study <name> --n_trials 20 -- <the training arguments>
+    CUDA_VISIBLE_DEVICES=<gpu> python pretrain_blocks.py --data_dir <data>/datasets --label ard30 --rd_mode hm3plus \
+        --partition <data>/reference/partitions/prive431 --embed_dim 16 --out <dataset>/blocks/pretrained_prive431.pt
 
     # tests
-    python -m pytest tests/test_ml_labels.py tests/test_ml_sampler.py tests/test_ml_loss.py -q
-    CUDA_VISIBLE_DEVICES=<gpu> python -m pytest tests/test_ml_model.py tests/test_ml_train.py -q
+    python -m pytest tests/test_ml_labels.py tests/test_ml_sampler.py tests/test_ml_loss.py tests/test_ml_blocks.py -q
+    CUDA_VISIBLE_DEVICES=<gpu> python -m pytest tests/test_ml_model.py tests/test_ml_train.py tests/test_ml_blocks_gpu.py -q
     CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 
 ## References

@@ -9,7 +9,7 @@ Start one worker per GPU; all workers of a study share one journal file and so o
 
 Everything after "--" is passed to the training code as for main_multilabel.py and fixes what
 is not searched. Each trial is an ordinary run, runs/<study>/trial_NNNN/. Searched: learning
-rate, weight decay, embedding dropout, accumulation and warm-up (--space full: also the
+rate, weight decay, dropout, in blocks mode the table's prior variance, accumulation and warm-up (--space full: also the
 class-weight exponent and cap, the sampler and the head's width). The value maximised is the
 trial's best mean validation AUROC; successive halving stops trailing trials (after
 --min_validations passes, keeping one in --reduction at each rung).

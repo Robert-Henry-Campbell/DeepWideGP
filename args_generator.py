@@ -109,7 +109,7 @@ def args_initial(argv=None):
     parser.add_argument('--init_wide_from', help='checkpoint whose linear PRS path (PRS, covariate weights, intercepts) starts this run')
     parser.add_argument('--prs_grid', help="with --wide only: comma-separated prior variances (as --prs_var) trained side by side in one pass; each disease keeps the value and validation pass with its best tuning AUROC ('none': no grid)")
     parser.add_argument('--tune_trials', type=int, default=0, help='hyper-parameter search of this many trials inside the run (0: train the given settings once)')
-    parser.add_argument('--tune_space', default='run', help="'run': the two-stage search of widedeepgp/tuning.py")
+    parser.add_argument('--tune_space', default='run', help="'run': the search inside a run (widedeepgp/tuning.py)")
     parser.add_argument('--tune_first_given', action='store_true', help='the first trial of a search (network stage) uses the given --lr, --l2 and --dropout, e.g. published settings')
     parser.add_argument('--tune_gpus', help="GPUs for the trials of a search: 'auto' (the free ones minus one), a list such as 1,2,3, or 'none' (one after another in this process)")
     parser.add_argument('--tune_worker', action='store_true', help=argparse.SUPPRESS)

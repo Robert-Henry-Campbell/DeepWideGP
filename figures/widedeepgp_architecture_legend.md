@@ -12,7 +12,8 @@ annotation step is optional and is off in the base model. Its gain and offset ar
 shared by all chromosomes, so that box is drawn once, outside the stack. Beside the network, the
 linear PRS path gives every SNP and disease a weight of its own, with a ridge penalty, and every
 covariate and disease a weight; its 30 logits are added to the head's, so the network only has
-to add what a genome-wide PRS and the covariates miss (`--wide on`, the default; `off` is the
-network alone, `only` the path alone). With a model width of 32 and one encoder layer the
-network has 465,662 trainable parameters and the path 37,746,390 (table:
-`widedeepgp_architecture_data.csv`).
+to add what a genome-wide PRS and the covariates miss (`--wide on`; `off`, the default since 16
+November 2026, is the network alone; `only` the path alone). With a model width of 32 and one
+encoder layer the network has 465,662 trainable parameters and the path 37,746,390 (table:
+`widedeepgp_architecture_data.csv`). The LD-block model that is the default since 17 November
+2026 (methods.md section 4.11) is not drawn here.

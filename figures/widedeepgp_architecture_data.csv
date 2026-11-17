@@ -8,7 +8,7 @@ Covariates,"year of birth, sex, 10 principal components","[B, 12]",0,changed: 12
 Covariate MLP,"[B, 12]","[B, d]",11584,same architecture
 Attention across vectors,"[B, 23, d]","[B, 23, d]",12704,same
 Output head,"[B, 23 d]","[B, 30] logits",196382,changed: 30 outputs instead of 1 (257 parameters per disease); logits instead of probabilities
-Linear PRS path,"[B, 1,258,200] standardised dosages and [B, 12] covariates","[B, 30] logits, added to the head's",37746390,"new: 1,258,200 x 30 SNP weights with a ridge penalty, 12 x 30 covariate weights and 30 intercepts (--wide on; off: the network alone; only: the path alone)"
+Linear PRS path,"[B, 1,258,200] standardised dosages and [B, 12] covariates","[B, 30] logits, added to the head's",37746390,"new: 1,258,200 x 30 SNP weights with a ridge penalty, 12 x 30 covariate weights and 30 intercepts (--wide on, an option; off, the default since 16 November 2026, is the network alone; only: the path alone)"
 Batches,training split,"B participants, a target disease",0,new: rotation of disease-balanced batches
 Loss,"[B, 30] logits, [B, 30] labels",scalar,0,"new: sampling-rate correction, class weights, per-disease normalisation"
 Total network (without annotations),,,465662,

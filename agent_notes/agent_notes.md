@@ -1138,7 +1138,10 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   vector) on a dataset's training rows, writing an `--init_encoder` file with a manifest.
 - Scripts: `multilabel_synthetic.sh` passes `--input_mode snps --lr_schedule constant --warmup_steps 0`
   explicitly; `check_synthetic_run.py` picks a run's seed-band arm from its config (plain, annotated,
-  blocks_transformer, blocks_bimamba1; the blocks arms' rows are being measured, runs/blocks_bands).
+  blocks_transformer, blocks_bimamba1). The blocks arms' five seeds each (uniform:5 blocks, d_model 16, embed_dim 8,
+  three epoch-equivalents; runs/blocks_bands) reach a mean heritable AUROC of 0.78 for both mixers against the
+  published SNP-token arm's 0.70 on the same store; the null trait sits at 0.48; bands (lowest seed minus the
+  larger of 0.04 and 2.5 SD): 0.74 on the mean, 0.68 to 0.78 per trait.
 - Tests: `tests/test_ml_blocks.py` (18, CPU: the partition and its checks, pooling equals numpy segment sums
   at embed_dim 1/16/64, the genotype code, the ridge special case, names and counts, refusals, the table's
   learning rate and penalty, init files, a run with bf16 snapshots, scoring and a resume, a one-trial search

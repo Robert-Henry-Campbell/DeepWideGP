@@ -11,7 +11,7 @@ trained at full size.*
 the default of `main_multilabel.py` (`--input_mode blocks`, `--wide off`): one network trained
 end to end from dosages, whose first layer is a learned table with a vector per SNP pooled by LD
 block, followed by a mixer (the published bidirectional Mamba block or a transformer encoder
-layer) over the block tokens, with a linear readout of the table beside the head. Section 4.11
+layer) over the block tokens. Section 4.11
 describes it; sections 4.10, 6, 7, 8, 10, 12 and 13 were brought up to the new default on the
 same day, with the earlier rules kept as dated notes. The decision followed the first training
 size of the ladder, where the network added nothing to the ridge PRS path (ridge alone 0.6634,
@@ -529,30 +529,28 @@ block of section 4.3 (`--mixer bimamba1`) or a pre-norm transformer encoder laye
 layer of width 4*d*, GELU and dropout `--dropout`), then a final layer normalisation (of the
 residual sum, for the Mamba block). `--d_model` and `--e_layers` set the mixer's size.
 
-**The head and the readout.** The mean over the tokens, concatenated with the covariate vector,
-feeds the head of section 4.7 (`combine`: a shared hidden layer of 256 units, then one logit per
-disease; `--final_pool mean` is the only pooling blocks mode accepts). To the head's logits is
-added a linear readout of the table pooled over *all* SNPs, the sum of the block vectors:
-
-    logit_j = head_j + Σ_e a_je Σ_s x_s T_se
-
-with *a* a 30 × d_e matrix without bias (`readout`). With the head's last layer at zero the model
-is therefore exactly a rank-d_e ridge PRS: every disease's logit is a linear combination of d_e
-genome-wide scores, and at d_e = 1 it is one PRS with a scale per disease
-(`tests/test_ml_blocks.py::test_the_model_contains_a_ridge_prs` pins both). The readout was added
-after a probe on 17 November 2026 on the synthetic six-trait dataset (4,000 participants, 132
-SNPs, six traits). Without it a zero-initialised table gets its gradient direction from a random,
-fast-moving downstream network and its Adam steps never accumulate: the model learned the three
-traits with shared causal SNPs only after a phase transition and never the two traits with causal
-SNPs of their own (AUROC 0.48 and 0.39 against ceilings of 0.78 and 0.97), and with one SNP per
-block it learned nothing at all. With the readout every trait is learned after one pass: a final
-mean AUROC of 0.83 over the heritable traits against a ceiling of 0.86, above the 0.75 of the
-SNP-token model on the same data. The model remains one network trained end to end from
-dosages; nothing is fitted outside it.
+**The head.** The mean over the tokens, concatenated with the covariate vector, feeds the head of
+section 4.7 (`combine`: a shared hidden layer, then one logit per disease; `--final_pool mean` is the
+only pooling blocks mode accepts). Every prediction passes through the block MLP, the mixer and the
+head; with d_e = 1 the pooled block values are a ridge PRS's per-block sums
+(`tests/test_ml_blocks.py::test_the_first_layer_contains_a_ridge_prs`), so the first layer contains a
+ridge, but the model has no linear path from the table to the logits. **A finding of 17 November
+2026 that the reader of the results must know.** During the implementation a linear readout of the
+table (the sum of the block vectors over all SNPs mapped to the 30 logits and added to the head's)
+was tried, because on the synthetic six-trait dataset (4,000 participants, 132 SNPs) the model as
+designed learned the three traits with shared causal SNPs only after a phase transition at the fourth
+pass and never the two traits with causal SNPs of their own (AUROC 0.48 and 0.39 against ceilings
+of 0.78 and 0.97, in every variant tried: a tenth of the table learning rate, two mixer layers,
+shuffled batches without class weights, a narrower head), and with one SNP per block it learned
+nothing at all. The cause is that a table starting at zero takes its gradient direction from a
+random, fast-moving downstream network, so its Adam steps do not accumulate; with the readout every
+trait was learned after one pass (mean AUROC 0.83 over the heritable traits against a ceiling of
+0.86). Robert had the readout removed the same day: the model was never expected to work at a few
+thousand participants, the question is whether it works at 200,000, and the E0 gate and the
+top-rung pre-test are to answer it with the architecture as designed.
 
 **Precision and memory.** Under `--precision bf16` the first layer, the covariate encoder and the
-mixer run in bf16; the mean over the tokens, the head, the readout (of the block vectors summed
-in 32-bit) and the loss run in 32-bit, as the pooling and head of section 6 do, and the table's
+mixer run in bf16; the mean over the tokens, the head and the loss run in 32-bit, as the pooling and head of section 6 do, and the table's
 master weights stay in float32. `--grad_ckpt` checkpoints each mixer layer (outputs and
 gradients unchanged; `tests/test_ml_blocks_gpu.py` checks it on the GPU, and requires the largest
 planned transformer, d = 256 with 8 layers, over 2,001 tokens to train a batch of 128 in under
@@ -575,25 +573,25 @@ The partition's name, digest and block count are in `config.json`.
 **Parameter counts.** `config.json` holds, under `blocks`, the parameters by module and their
 split into embedding parameters (the table and the identity vectors, which Kaplan et al.'s N
 excludes) and non-embedding parameters (the block MLP, the mixer with its final normalisation,
-the covariate encoder, and the head with the readout: N), beside the number of tokens. Counted
+the covariate encoder, and the head: N), beside the number of tokens. Counted
 from constructed networks with the 1,258,200 SNPs, the `prive431` partition, 30 outputs, 12
 covariates and the head width the chains use, `--head_hidden` 4 d (so that the head does not outweigh a
 small mixer; the parser's default, 256, would give S1 a head of 16,638):
 
-| Size (transformer, *d* × layers) | Table (d_e = 16) | Identity | Block MLP | Mixer | Covariate encoder | Head with readout | N (non-embedding) | Total |
+| Size (transformer, *d* × layers) | Table (d_e = 16) | Identity | Block MLP | Mixer | Covariate encoder | Head | N (non-embedding) | Total |
 |---|---|---|---|---|---|---|---|---|
-| S1, 16 × 1 | 20,131,200 | 7,248 | 2,128 | 3,312 | 7,472 | 4,542 | 17,454 | 20,155,902 |
-| S2, 32 × 2 | 20,131,200 | 7,248 | 3,168 | 25,472 | 11,616 | 12,670 | 52,926 | 20,191,374 |
-| S3, 64 × 4 | 20,131,200 | 7,248 | 5,248 | 200,064 | 19,904 | 41,214 | 266,430 | 20,404,878 |
-| S4, 128 × 6 | 20,131,200 | 7,248 | 9,408 | 1,189,888 | 36,480 | 147,454 | 1,383,230 | 21,521,678 |
-| S5, 256 × 8 | 20,131,200 | 7,248 | 17,728 | 6,318,592 | 69,632 | 556,542 | 6,962,494 | 27,100,942 |
+| S1, 16 × 1 | 20,131,200 | 7,248 | 2,128 | 3,312 | 7,472 | 4,062 | 16,974 | 20,155,422 |
+| S2, 32 × 2 | 20,131,200 | 7,248 | 3,168 | 25,472 | 11,616 | 12,190 | 52,446 | 20,190,894 |
+| S3, 64 × 4 | 20,131,200 | 7,248 | 5,248 | 200,064 | 19,904 | 40,734 | 265,950 | 20,404,398 |
+| S4, 128 × 6 | 20,131,200 | 7,248 | 9,408 | 1,189,888 | 36,480 | 146,974 | 1,382,750 | 21,521,198 |
+| S5, 256 × 8 | 20,131,200 | 7,248 | 17,728 | 6,318,592 | 69,632 | 556,062 | 6,962,014 | 27,100,462 |
 
 A transformer layer has 12 d² + 13 d parameters and the final normalisation 2 d. The Mamba block
 of section 4.3 has 11,008 parameters per layer at d = 32 and 34,816 at d = 64 (section 4.8), so a
-Mamba mixer matched to S3's N takes six layers (209,024; N 275,390). The table has M d_e entries
+Mamba mixer matched to S3's N takes six layers (209,024; N 274,910). The table has M d_e entries
 (3 M d_e with the genotype code: 60,393,600 at d_e = 16) and the identity vectors (431 + 22) d_e;
-on the table axis at S3, d_e = 4 gives 5,032,800 table entries and N = 261,990, and d_e = 64 gives
-80,524,800 and N = 295,710 (the block MLP and the readout grow with d_e).
+on the table axis at S3, d_e = 4 gives 5,032,800 table entries and N = 261,870, and d_e = 64 gives
+80,524,800 and N = 293,790 (the block MLP grows with d_e).
 
 **Training.** Everything is trained by AdamW on the loss of section 5, from dosages, from
 scratch, in two parameter groups (section 6): the table at its own learning rate
@@ -1171,9 +1169,9 @@ the file owner-only with the expected entries, a run starts from it with `--free
 the file is refused for another partition; `main_multilabel.py`'s defaults are blocks mode,
 `--wide off`, the warm-up and cosine recipe and `--final_pool mean` (`atten` in SNP mode). Its
 learning check trains the blocks model for three passes on a synthetic six-trait dataset of
-3,000 participants: every heritable trait, the two with causal SNPs of their own included, must
-pass an AUROC of 0.6 and the null trait stay within 0.35 to 0.65 (without the readout the two
-solo traits stayed at chance). `tests/test_ml_blocks_gpu.py`, on a GPU: both mixers train a step
+3,000 participants and asks only for mechanics: three recorded passes, a training loss that does
+not rise and the null trait within 0.3 to 0.7 (whether the first layer learns per-SNP effects is
+the E0 gate's question, section 4.11). `tests/test_ml_blocks_gpu.py`, on a GPU: both mixers train a step
 in bf16 with finite, non-zero table gradients and float32 master weights; activation
 checkpointing leaves the loss and the gradients of the table and the mixer unchanged (to 10⁻³);
 the largest planned model (d = 256, 8 transformer layers, or 14 Mamba layers) over 2,001 tokens

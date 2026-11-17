@@ -128,31 +128,21 @@ def test_the_genotype_code_interpolates_three_vectors_and_contains_the_dosage_co
         BlockEncoder(dm.partition, 4, 8, "haplotype")
 
 
-def test_the_model_contains_a_ridge_prs(data_dir):
-    """With the head's last layer at zero the logits are the linear readout of the table summed over all
-    SNPs: a rank-embed_dim ridge PRS. At embed_dim 1, disease j's logit is a_j times x @ w."""
-    _, dm, model = _build(data_dir, embed_dim=1, e_layers=2)
+def test_the_first_layer_contains_a_ridge_prs(data_dir):
+    """At embed_dim 1 the pooled block values are the per-block sums of a ridge PRS, x @ w split by block, so
+    the first layer contains a ridge; what the model predicts from them goes through the mixer and head."""
+    from widedeepgp.blockencoder import BlockEncoder
+    _, dm, _ = _build(data_dir, embed_dim=1)
+    enc = BlockEncoder(dm.partition, 1, 8)
     w = np.random.default_rng(0).standard_normal(SNPS).astype(np.float32)
     with torch.no_grad():
-        for i, t in enumerate(model.encoder.tables):
+        for i, t in enumerate(enc.tables):
             t.copy_(torch.from_numpy(w[6 * i:6 * i + 6])[:, None])
-        model.combine.layers[-1].weight.zero_(); model.combine.layers[-1].bias.zero_()
-    a = model.readout.weight.detach().numpy()[:, 0]
-    model.eval()
     x_all, _ = _val_batch(dm)
     x = np.concatenate([v[:, :, 0].numpy() for v in x_all[:-1]], axis=1)
-    with torch.no_grad():
-        np.testing.assert_allclose(model(x_all).numpy(), np.outer(x @ w, a), rtol=1e-4, atol=1e-5)
-    # at embed_dim 16 the readout gives every disease its own combination of 16 per-SNP directions
-    _, dm, model = _build(data_dir, embed_dim=16)
-    with torch.no_grad():
-        for t in model.encoder.tables:
-            t.normal_()
-        model.combine.layers[-1].weight.zero_(); model.combine.layers[-1].bias.zero_()
-    T = np.concatenate([t.detach().numpy() for t in model.encoder.tables])
-    with torch.no_grad():
-        np.testing.assert_allclose(model(x_all).numpy(), (x @ T) @ model.readout.weight.detach().numpy().T,
-                                   rtol=1e-4, atol=1e-4)
+    pooled = enc.pool(x_all[:-1]).detach().numpy()[:, :, 0]
+    np.testing.assert_allclose(pooled.sum(1), x @ w, rtol=1e-4, atol=1e-5)        # the blocks' sums are the PRS
+    assert pooled.shape == (24, 3 * CHROMS)
 
 
 def test_shapes_parameter_names_and_counts(data_dir):
@@ -160,8 +150,7 @@ def test_shapes_parameter_names_and_counts(data_dir):
     x_all, _ = _val_batch(dm)
     assert model(x_all).shape == (24, 6)
     names = {k.split(".")[0] for k in model.state_dict()}
-    assert names == {"encoder", "layers", "norm_f", "covariate_encoder", "cov_norm", "combine", "readout", "loss_fn"}
-    assert tuple(model.readout.weight.shape) == (6, 4)
+    assert names == {"encoder", "layers", "norm_f", "covariate_encoder", "cov_norm", "combine", "loss_fn"}
     assert {k for k in model.state_dict() if k.startswith("encoder.") and not k.startswith("encoder.tables.")} == \
         {"encoder.block_emb.weight", "encoder.chrom_emb.weight", "encoder.mlp.0.weight", "encoder.mlp.0.bias",
          "encoder.mlp.2.weight", "encoder.mlp.2.bias"}
@@ -324,17 +313,23 @@ def test_a_search_records_the_new_scalars_and_a_retrain_reproduces_the_chosen_co
     assert changed == {"seed", "exp_name", "tune_gpus"}                 # a trial's own tune_trials is 0 already
 
 
-def test_the_blocks_model_learns_the_synthetic_traits(tmp_path):
-    """Three passes over 2,100 training participants: every heritable trait well above chance (the two solo
-    traits included: they have two causal SNPs of their own) and the null trait at chance. Without the linear
-    readout of the table the solo traits stayed at chance (probe of 17 Nov 2026)."""
+def test_training_lowers_the_loss_on_the_synthetic_traits(tmp_path):
+    """Mechanics only: three passes over 2,100 participants do not raise the training loss and the run records
+    its passes. Whether the first layer learns per-SNP effects at biobank size is the E0 gate's question (design
+    document, section 12): on 4,000 synthetic participants it did not, and Robert chose to keep the plain
+    architecture and test it at scale (17 November 2026)."""
+    import csv
     import main_multilabel
-    data_dir, truth = synthetic_dataset(tmp_path, n=3000)
+    data_dir, _ = synthetic_dataset(tmp_path, n=3000)
     out = main_multilabel.main(_run_args(tmp_path, "learn", data_dir=data_dir, max_epoch_equiv=3, val_per_epoch=1,
                                          dropout=0.1, embed_dim=8, d_model=16, n_heads=2, lr=1e-3))
-    auroc = {name: m["auroc"] for name, m in out["val"].items()}
-    assert all(auroc[t] > 0.6 for t in ("shared_a", "shared_b", "shared_c", "solo_d", "solo_e")), auroc
-    assert 0.35 <= auroc["null_f"] <= 0.65, auroc
+    losses = {}
+    with open(os.path.join(out["run_dir"], "metrics.csv")) as f:
+        for r in csv.DictReader(f):
+            if r["label"] == "MEAN" and r["metric"] == "bce":
+                losses[int(r["validation"])] = float(r["value"])
+    assert len(out["history"]) == 3 and 0.3 <= out["val"]["null_f"]["auroc"] <= 0.7
+    assert min(losses.values()) <= losses[1]
 
 
 def test_masked_pretraining_writes_a_file_a_run_starts_from(data_dir, tmp_path, capsys):

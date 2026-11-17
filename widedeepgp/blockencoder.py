@@ -1,9 +1,9 @@
 """The first layer of blocks mode (DeepWideGP-Scripts scripts/widedeepgp-blocks/methods.md, section 2):
 a learned vector per SNP, scaled by the participant's dosage and summed over the SNPs of each LD block
 (``pool``), plus a learned identity vector per block and per chromosome, through one small MLP shared
-by all blocks (``tokens``): one token per block for the mixer. The model also reads the pooled vectors
-summed over all blocks through a linear readout (model.WideDeepGP), so a rank-embed_dim ridge PRS is
-an exact special case and the table has a stable gradient direction from the first step."""
+by all blocks (``tokens``): one token per block for the mixer. With embed_dim 1 the pooled values are the
+per-block sums of a ridge PRS, so the first layer contains a ridge; everything the model predicts from them
+goes through the mixer and the head."""
 import numpy as np
 import torch
 import torch.nn as nn

@@ -1158,3 +1158,24 @@ tests are unchanged; the ladder's frozen copies are unaffected.
 - Not implemented (recorded in the plan): the frozen cross-fitted first-layer deep ablation (a third input
   mode); E5 scoring on the held-out groups (another store; needs a scoring step that reuses the run's
   standardisation). Documentation of this change: README and methods.md (section 4.11), updated the same day.
+
+## 2026-11-17 (15:00 UTC) — The linear readout removed at Robert's instruction; the first chain stopped and wiped
+
+- Robert, after reading the explanation of the readout (the table summed over all SNPs mapped linearly to
+  the 30 logits and added to the head's): "I never expected it to work on 4000 people. I only hope it will
+  work on 200,000 people." The readout is removed from `widedeepgp/model.py` (no `readout` parameter; the
+  logits are the head's alone; `parameter_counts()["head"]` is the head), the docstring of
+  `widedeepgp/blockencoder.py` and the tests (`test_the_first_layer_contains_a_ridge_prs` pins the
+  ridge at the pooled level; the learning check became a mechanics check: three recorded passes, a loss
+  that does not rise, the null trait near 0.5, because without the readout the solo synthetic traits stay
+  at chance at 3,000 participants). README, methods.md (section 4.11: "The head", the finding of 17 Nov kept
+  as a dated note; the parameter table without the readout's 480 entries at d_e 16), the design document
+  (section 12, item 1) and the plan record the decision and the probe that motivated the readout.
+- The chain started at 04:25 UTC (runs/blocks, code export 84d49a9) was stopped at the 12th of 18 E0
+  searches by killing its process session, and runs/blocks, runs/blocks_bands (the blocks arms' synthetic
+  seed bands, measured with the readout; their rows are removed from scripts/multilabel_synthetic_seeds.csv)
+  and the probes' scratch data were deleted. Kept, as inputs independent of the model: the simulated E0
+  dataset hm3plus_n13199_sim and its linear comparators (blocks/), the bottom rung's linear comparators,
+  the partitions. The masked-pretraining file under the simulated dataset was deleted (encoder-specific).
+- Not relaunched: without the readout the E0 gate at 13,199 participants is expected to fail (the probe),
+  so where the gate sits is Robert's decision before the chain runs again.

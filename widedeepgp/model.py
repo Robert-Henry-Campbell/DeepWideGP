@@ -150,9 +150,6 @@ class WideDeepGP(pl.LightningModule):
                 self.cov_norm = nn.LayerNorm(d)
             self.combine = FCN((1 + self.use_cov) * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
                                hidden_layers=int(hp["n_fcn"]))
-            # the linear readout of the table summed over all SNPs: logit_j += sum_e a_je sum_s x_s T_se (a rank-embed_dim
-            # ridge PRS), beside the mixer's reading of the blocks
-            self.readout = nn.Linear(int(hp["embed_dim"]), self.n_labels, bias=False)
             self.lr_table = float(hp["lr_table"])
             self.table_lambda = 1.0 / (2.0 * float(hp["label_counts"]["n"]) * float(hp["table_var"]))
 
@@ -282,10 +279,9 @@ class WideDeepGP(pl.LightningModule):
 
     def _block_logits(self, x_all):
         """Blocks mode: the block tokens and the covariate token through the mixer, their mean beside the
-        covariate vector into the head, plus the linear readout of the pooled table."""
+        covariate vector into the head."""
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and x_all[0].is_cuda):
-            pooled = self.encoder.pool(x_all[:-1] if self.use_cov else x_all)
-            h = self.encoder.tokens(pooled)
+            h = self.encoder(x_all[:-1] if self.use_cov else x_all)
             if self.use_cov:
                 cov = self.cov_norm(self.covariate_encoder(x_all[-1]))
                 h = torch.cat([h, cov[:, None]], dim=1)
@@ -297,8 +293,7 @@ class WideDeepGP(pl.LightningModule):
                     h, residual = layer(h, residual)
             h = self.norm_f(h if residual is None else h + residual)
         mean = h.float().mean(dim=1)
-        deep = self.combine(torch.cat([mean, cov.float()], dim=1) if self.use_cov else mean)
-        return deep + self.readout(pooled.float().sum(dim=1))
+        return self.combine(torch.cat([mean, cov.float()], dim=1) if self.use_cov else mean)
 
     def forward(self, x_all):
         """x_all: the input sequences, then the covariates. Returns logits [B, n_out]."""
@@ -323,7 +318,7 @@ class WideDeepGP(pl.LightningModule):
         return {"table": count(e.tables), "identity": count(e.block_emb, e.chrom_emb), "block_mlp": count(e.mlp),
                 "mixer": count(self.layers, self.norm_f),
                 "covariates": count(self.covariate_encoder, self.cov_norm) if self.use_cov else 0,
-                "head": count(self.combine, self.readout)}
+                "head": count(self.combine)}
 
     def snapshot(self, step):
         """A weights-only snapshot that load_model reads; the table in bfloat16 (it is most of the weights)."""

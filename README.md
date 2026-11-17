@@ -146,9 +146,8 @@ three vectors instead, for 0, 1 and 2 copies, interpolated for fractional dosage
 identity vector per block and per chromosome is added and a small MLP shared by all blocks makes
 one token per block. One mixer, the published bidirectional Mamba block (`--mixer bimamba1`) or a
 transformer encoder layer (`--mixer transformer`), runs over the block tokens and the covariate
-token; the mean over the tokens, beside the covariate vector, feeds the head, and a linear
-readout of the table summed over all SNPs is added to the logits, so a ridge PRS is an exact
-special case of the model. The blocks come from a partition file (`--partition`, required:
+token; the mean over the tokens, beside the covariate vector, feeds the head.
+The blocks come from a partition file (`--partition`, required:
 `data/reference/partitions/prive431`, `ldsplit2000` or `ldsplit5000`, checked against the
 dataset's store and recorded by digest in every checkpoint). The table has its own learning rate
 and an L2 penalty in the loss (`--table_var`, `--table_kappa`); everything else trains by AdamW
@@ -213,7 +212,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--no_sampling_correction` | do not divide each person's loss by their sampling rate | off |
 | `--annot` | SNP mode: per-SNP annotation vectors as a gain and offset on the token embedding | off |
 | `--final_pool` | pooling of the mixer's tokens: blocks mode `mean` (the only setting it accepts); SNP mode `atten` (the published attention across the 23 vectors), `mean` or `last` | `mean` in blocks mode, `atten` in SNP mode |
-| `--precision bf16`, `--grad_ckpt`, `--accumulate N` | mixed precision (the first layer, covariate encoder and mixer in bf16; the mean over tokens, the head, the readout and the loss in float32), activation checkpointing (per mixer layer in blocks mode, per chromosome in SNP mode), gradient accumulation | off, off, 1 |
+| `--precision bf16`, `--grad_ckpt`, `--accumulate N` | mixed precision (the first layer, covariate encoder and mixer in bf16; the mean over tokens, the head and the loss in float32), activation checkpointing (per mixer layer in blocks mode, per chromosome in SNP mode), gradient accumulation | off, off, 1 |
 | `--warmup_steps`, `--lr_schedule` | linear learning-rate warm-up (optimiser steps); `constant` or `cosine` decay after it; the table's and the network's rates follow the same schedule | 200, `cosine` (the SNP-mode recipes pass 0, `constant`, the published constant rate) |
 | `--val_per_epoch`, `--stop_patience`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, budget | 4, 8, 30 |
 | `--eval_batch_size` | batch size for validation and scoring | the training batch size |
@@ -237,7 +236,7 @@ setting, plus the code directory, its git commit (none for a copy outside git), 
 flag for uncommitted changes to tracked .py files, and the Python interpreter; in blocks mode
 also a `blocks` section: the partition and its digest, the numbers of blocks and tokens, the
 table's width and code, the parameters by module (table, identity vectors, block MLP, mixer,
-covariate encoder, head with the readout) with their split into embedding and non-embedding
+covariate encoder, head) with their split into embedding and non-embedding
 parameters, and the sha256 of the `--init_encoder` file), TensorBoard files, `metrics.csv`,
 weight snapshots with `snapshots.csv` (what each cost; the table is stored in bfloat16),
 `checkpoints/best.ckpt` and `last.ckpt`, and `results.json`.

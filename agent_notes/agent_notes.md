@@ -1259,3 +1259,21 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   The chain was relaunched from the new export; the no-initialisation ablation search that had run 1.5 hours
   under the old objective was stopped and its run folder removed so that it reruns under the new one; the
   linear-comparator builds were restarted and resumed from their finished chromosome groups.
+
+## 2026-11-18 (night, UTC) — Chain: the warm start before the linear twins; the classic DeepGP with 30 outputs
+
+- Scripts `widedeepgp-blocks/chains/run_chain.py`: the comparators of each rung in a GPU phase (folds, block ridge,
+  warm start; a reserved GPU, released when the phase ends) and a CPU phase (ridge check, linear twins) beside the
+  training; T0 and the grid wait for the warm-start file only; every step skipped by its product;
+  `fit_block_linear.py` resumes per disease. Reason: GPUs 2 and 4 sat reserved and idle while the top rung's
+  CPU-only twin ran (T0 would have started about 08:00Z instead of right after the relaunch). Tests:
+  `test_chain.py` (phases, products, failure paths), `test_block_ridge.py::test_fit_block_linear_resumes_per_disease`.
+  The chain was relaunched; the running twin fits restarted and the no-initialisation search resumed. No DeepWideGP
+  code changed (design document section 12, item 13).
+- Scripts `classic-deepgp-comparator/build_datasets.py` takes `--diseases`, `--rungs` and `--name`: the SNPs with
+  p <= 0.05 in any of the diseases' GWAS, clumped once on the smallest p over them (one disease: the classic
+  selection, unchanged; `test_build_datasets.py`). Robert's 30-disease classic comparator at the top rung
+  (179,566 SNPs; the union of the per-disease classic sets would be 454,876) builds `classic30_n215872` and trains
+  the published network with 30 outputs once, matched to the I10 quick run
+  (`runs/classic_deepgp/run_classic30_n215872.sh`, GPU 3 after that run ends). Methods: the comparator's
+  methods.md, new last section.

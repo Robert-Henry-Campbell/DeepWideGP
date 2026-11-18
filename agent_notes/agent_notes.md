@@ -1313,3 +1313,19 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   init-file fold count; a fold-routed run trains, snapshots [K, L, d_e] in bfloat16, scores and resumes). Scripts:
   `make_warm_start.py` writes fold copies by default (`--in_sample` for the record), the chain passes `--folds`.
   Design document item 15. Quick test running: `runs/blocks_diag/diag_S3_folds_{frozen,warm}` from code_11c24e3.
+
+## 2026-11-18 (afternoon, UTC) — Haploblock pre-test on chromosome 22 (Scripts only; no model code changed)
+
+- Robert asked whether haploblock haplotype vectors should replace the per-SNP table, and for a one-chromosome
+  pre-test before any build: phase chr22, count common haplotypes per block, compare closed-form haplotype, SNP and
+  combined ridges cross-fitted on the top rung. Design and the pre-stated decision rule in Scripts
+  `scripts/widedeepgp-haploblocks/methods.md` (`widening` 32f9040, afac0e7); design document section 12, item 16.
+- Tooling: conda env `/mnt/sdg/robert/envs/phasing` (SHAPEIT5 5.1.1, bcftools 1.25; bioconda reachable, the GitHub
+  release API is not). Hard calls of the training and tuning rows (235,872; threshold 0.1; 0.65% missing) from the
+  store to PLINK/BCF (A1 = ALT, checked against the store's frequencies), SHAPEIT5 phase_common with the PGI arm's
+  OMNI map, then haploblocks by a coverage rule nested in the Prive blocks and the three ridges with a paired
+  participant bootstrap. Two detached chains (`run_phase_chr22.sh`, `run_analysis_chr22.sh`), products under
+  `data/datasets/ard30/hm3plus/haplo/` (owner-only); the test split is never read. 17 tests, including an
+  end-to-end run on the synthetic store that reproduces the stored SNP ridge weights (it caught a penalty constant).
+- Facts: chr22 has 18,173 HM3+ SNPs in 15 Prive blocks (327 to 2,953 SNPs); "17,055" was the held-out groups'
+  participant count. Fold-routed diagnostics (`runs/blocks_diag/diag_S3_folds_*`) still running; chain still paused.

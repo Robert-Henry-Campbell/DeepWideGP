@@ -645,7 +645,19 @@ section 12, item 14):** the table must be scaled so that the block tokens it for
 order as the identity embeddings they are added to (`make_warm_start.py` scales them to unit RMS
 over training participants; the raw ridge weights give tokens of RMS 10⁻⁴ against embeddings of
 order 1), and the table's optimiser must not erase it (a warm-started single run uses κ = 10⁻³
-and no decay; the search ranges above). Under this recipe the table's epsilon was re-measured (batch 64, masking): a null
+and no decay; the search ranges above). **A third, found the same day once the tokens were
+readable: a ridge fitted on the training rows hands the network those rows' labels** (its PRS has
+in-sample AUROC 0.96 against 0.57 out of sample at the top rung), and a network trained on the same
+rows learns to read them off, a shortcut worth nothing on the tuning set (the rescaled runs reached
+I10 0.704 at their first validation and fell from there). **The first layer is therefore fold-routed
+(`--folds <blocks/folds.npz>`):** the table has one copy per fold of the block ridge, a training
+participant is pooled with the copy fitted without them and every other participant with the copy
+of their pseudo-fold (a seeded hash of the IID, the comparators' rule), so no participant's tokens
+were fitted on their own label; the copies share the full ridge's right-singular basis so that the
+network reads them in one coordinate system. Frozen (`--freeze_encoder`), this first layer is the
+stacking model of the design document's item 5; trained, each copy learns end to end from its own
+fifth of the rows on top of a ridge from the other four fifths. `BlockEncoder(n_folds)` pools by
+copy, the init file's fold count is checked, and `n_folds` is recorded with the run. Under this recipe the table's epsilon was re-measured (batch 64, masking): a null
 entry's gradient has a root mean square of 3.3 × 10⁻⁸, so the default `--table_eps` is 2.5 × 10⁻⁷.
 What the search tunes under this recipe is the table's pace and decay only (`--tune_space table`;
 section 8). The objective under this recipe is the plain cross-entropy at natural prevalence of

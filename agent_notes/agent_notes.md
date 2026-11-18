@@ -1298,3 +1298,18 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   single-run defaults κ 1e-3, decay 0. The grid was paused at Robert's word; two S3 diagnostics (frozen rescaled table;
   trained at κ 1e-3 without decay) run from `runs/blocks_diag/run_diag_s3.sh` before the relaunch. The old warm starts
   are kept as `init_ridge_d16_unscaled.pt`.
+
+## 2026-11-18 (midday, UTC) — The warm start leaks the training labels; fold-routed first layer
+
+- Once readable (item 14's rescaling), the in-sample ridge warm start showed its leak: the S3 diagnostics read it at the
+  first validation (mean 0.660, I10 0.704) and then fell to 0.62 (frozen and trained alike); the full-training ridge PRS
+  has in-sample AUROC 0.957 against 0.568 on the tuning set. Robert's decision: a fold-routed first layer.
+- Code: `--folds <blocks/folds.npz>` (args_generator); the data module reads each participant's fold (training rows
+  from the file, every other split by the comparators' pseudo-fold hash; the training split must be listed) and appends
+  it to the batch; `BlockEncoder(n_folds)` holds one table copy per fold ([K, L, d_e]) and pools each participant with
+  their copy; the model pops the fold in blocks mode; `load_init` checks the init file's `n_folds`; `block_hparams`
+  records `n_folds` and the folds path (a resume with another fold count is refused by the settings check). Tests in
+  `tests/test_ml_blocks.py` (pooling by copy equals per-participant segment sums; routing by file and pseudo-fold;
+  init-file fold count; a fold-routed run trains, snapshots [K, L, d_e] in bfloat16, scores and resumes). Scripts:
+  `make_warm_start.py` writes fold copies by default (`--in_sample` for the record), the chain passes `--folds`.
+  Design document item 15. Quick test running: `runs/blocks_diag/diag_S3_folds_{frozen,warm}` from code_11c24e3.

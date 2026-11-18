@@ -159,7 +159,9 @@ stopping after 16 passes once 2,000 steps are done (`--stop_burnin`). Training d
 batches and uses plain cross-entropy at natural prevalence (`--sampler shuffled --gamma 0`, methods.md
 section 5; the rotation of disease-balanced batches with a square-root class weight is kept as a
 comparison variant). The scaling study starts every run from the ridge warm start (`--init_encoder`, scaled to unit-RMS
-block tokens by `make_warm_start.py`). A run tunes itself: Optuna over `--table_kappa` and `--table_decay`
+block tokens by `make_warm_start.py`), fold-routed: `--folds <blocks/folds.npz>` gives the table one copy per fold of the
+block ridge, a training participant pooled with the copy fitted without them and every other participant with the copy
+of their pseudo-fold, so the warm start carries no participant's own label (methods.md 4.11). A run tunes itself: Optuna over `--table_kappa` and `--table_decay`
 (`--tune_space table`; a loaded table gets a slower, undecayed range than one that starts at zero), or also the learning
 rate, weight decay and dropout (`run`).
 `pretrain_blocks.py` pretrains the

@@ -1353,3 +1353,11 @@ tests are unchanged; the ladder's frozen copies are unaffected.
 - The covariate floor (0.6627 mean, I10 0.6990) is an unpenalised logistic fit of the 12 covariates on the training
   split, scored on the tuning set; stated now in the comparator results.md and the blocks methods.md (Scripts 26f05e4)
   after Robert asked whether it was a network's covariate-only output.
+- Result (21:52Z): `classic_i10_n215872_balanced` trained on GPU 2 from 20:43Z, best tuning AUROC 0.6990 at 2.50
+  epoch-equivalents (stopped at 4.50 after eight validations without gain; 50.6 min of training), against 0.6990 for the
+  covariates alone from the same scoring path and 0.6987 for the uniform-batch quick run; average precision 0.4881
+  against 0.4878 (rank statistics both, so comparable); cross-entropy 0.6262 on the balanced scale (not comparable).
+  Balanced batches leave the published network at the covariate floor, the pre-stated expectation's second branch.
+  Written to the comparator results.md with both trajectories per epoch-equivalent; the methods item on comparability
+  corrected (average precision compares on the same tuning set; only cross-entropy and calibration do not) in Scripts
+  `widening` d9d9752. No model code changed.

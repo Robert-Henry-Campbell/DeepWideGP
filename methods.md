@@ -1059,8 +1059,10 @@ are written only on request and only beside the dataset. These are WideDeepGP's 
 **The comparison with the PGI arm** follows the protocol written for both arms
 (`PGI/methods.md` sections 6 and 8): every model's final prediction for a disease is a logistic
 regression, fitted on the tuning set, of disease status on the model's score (for WideDeepGP its
-logit for that disease) plus a covariate basis (a natural cubic spline of year of birth with
-four degrees of freedom, separately by sex, and the ten principal components); the
+logit for that disease) plus the covariate basis: since 18 November 2026 the 12 covariates
+entered linearly (year of birth, sex and the ten principal components; before, a natural cubic
+spline of year of birth with four degrees of freedom by sex plus the ten principal components,
+kept only as a robustness check of the final comparison; `PGI/methods.md` 6.1 and 13); the
 covariates-only reference is the same regression without a score. The test set is opened once,
 for both arms together, after every choice at every training size is recorded; the metrics,
 intervals and learning curves are those of that document.

@@ -1277,3 +1277,10 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   the published network with 30 outputs once, matched to the I10 quick run
   (`runs/classic_deepgp/run_classic30_n215872.sh`, GPU 3 after that run ends). Methods: the comparator's
   methods.md, new last section.
+- Covariate basis (PGI session's message, Robert's decision of 18 Nov 2026, PGI/methods.md 6.1 and 13): the shared
+  protocol's basis is the 12 covariates entered linearly; the spline of year of birth by sex is only a robustness
+  check. Followed here: `widedeepgp-scaling/fit_curves.py` no longer keeps spline rows only (it takes the table's one
+  basis and refuses a table with two; test added), its methods.md, `widedeepgp-blocks/results.md` (the 0.6671
+  context figures labelled as the spline basis then in force, 0.6653 linear), `DeepWideGP/methods.md` section on the
+  comparison protocol, and `widedeepgp-ladder/methods.md`. Not edited (other sessions' files): `synthetic-data/`
+  (methods l. 785, `synthgp/build.py` l. 365) and the preregistration draft PDF.

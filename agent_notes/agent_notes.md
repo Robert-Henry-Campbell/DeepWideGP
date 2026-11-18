@@ -1329,3 +1329,24 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   end-to-end run on the synthetic store that reproduces the stored SNP ridge weights (it caught a penalty constant).
 - Facts: chr22 has 18,173 HM3+ SNPs in 15 Prive blocks (327 to 2,953 SNPs); "17,055" was the held-out groups'
   participant count. Fold-routed diagnostics (`runs/blocks_diag/diag_S3_folds_*`) still running; chain still paused.
+
+## 2026-11-18 (evening, UTC) — A 1:1 case-control classic run (Scripts only; no model code changed)
+
+- Robert asked whether the classic DeepGP comparator used the paper's 1:1 case-control sets (it does not: natural
+  prevalence on the whole rung, by design), then for one 1:1 run of the classic I10 network at the top rung with
+  controls drawn at random, and whether its AUROC can be compared with the natural-prevalence runs. Scripts
+  `classic-deepgp-comparator/make_balanced_split.py` (a 1:1 training table in a dataset directory of its own that links
+  the source's store, tuning and test tables; 68,309 cases + 68,309 random controls, seed 1; N_eff 136,618 against
+  186,775), `balanced_eval.py` (whole-split AUROC against 200 random 1:1 tuning subsets, N_eff), `test_balanced_split.py`
+  (6 tests); methods.md, "A 1:1 case-control run": AUROC is invariant in expectation to random undersampling of the
+  evaluation set's controls, so the whole-tuning-set AUROCs compare directly, recipe against recipe (the balanced
+  recipe discards 27% of the information), not balance at fixed information; BCE, AP and calibration do not compare;
+  expectation stated before the result (at the floor). Scripts `widening` effeb18.
+- Launched detached 16:58Z: `runs/classic_deepgp/run_cc_i10_n215872.sh` waits for two free GPUs (the three
+  fold-routed diagnostics hold GPUs 2 to 4 until about 19:00Z), trains `classic_i10_n215872_cc11` from code_0094e74
+  with the quick run's flags, then scores it and the quick run on the tuning set (`score_snapshots.py --save_scores`;
+  the covariates-only floors from the same code path) and runs `balanced_eval.py` on both. Results go to the
+  comparator's results.md when the log's exit line is written.
+- The covariate floor (0.6627 mean, I10 0.6990) is an unpenalised logistic fit of the 12 covariates on the training
+  split, scored on the tuning set; stated now in the comparator results.md and the blocks methods.md (Scripts 26f05e4)
+  after Robert asked whether it was a network's covariate-only output.

@@ -1363,5 +1363,5 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   `test_a_run_trains_with_each_readout`. Parser help updated.
 - Finding behind it: the trained fold-routed tables moved by 1% of their scale even at κ 1e-2 (table_eps 2.5e-7 throttles
   a table at scale 0.35), so "trained = frozen" was not a test of training; the new trained run uses `--table_eps 1e-8`.
-  Design document item 16. Three single runs (no search) launched from the new export: frozen atten, frozen flat, trained
+  Design document item 17 (16 is the haploblock pre-test of another session). Three single runs (no search) launched from the new export: frozen atten, frozen flat, trained
   mean κ 1e-2 eps 1e-8 (`runs/blocks_diag/run_diag_readouts.sh`).

@@ -145,7 +145,7 @@ class WideDeepGP(pl.LightningModule):
 
         if self.blocks:
             # one sequence: the block tokens and the covariate token, then the mixer, a plain norm and the mean
-            self.encoder = BlockEncoder(blocks, hp["embed_dim"], d, hp["snp_code"], float(hp["dropout"]))
+            self.encoder = BlockEncoder(blocks, hp["embed_dim"], d, hp["snp_code"], float(hp["dropout"]), int(hp.get("n_folds", 1)))
             self.layers = nn.ModuleList([make_block(d, mixer, **block_kw) for _ in range(int(hp["e_layers"]))])
             self.norm_f = nn.LayerNorm(d)
             if self.use_cov:
@@ -282,13 +282,16 @@ class WideDeepGP(pl.LightningModule):
     def _block_logits(self, x_all):
         """Blocks mode: the block tokens and the covariate token through the mixer, their mean beside the
         covariate vector into the head."""
+        fold = None
+        if self.encoder.k > 1:                            # fold-routed tables: the data module appends each participant's fold
+            fold, x_all = x_all[-1].long(), x_all[:-1]
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and x_all[0].is_cuda):
             snps = x_all[:-1] if self.use_cov else x_all
             if self.training and self.input_mask > 0:    # input masking: a share of SNPs missing, the rest rescaled
                 masks = [torch.rand(x.shape[:2], device=x.device) < self.input_mask for x in snps]
-                pooled = self.encoder.pool(snps, masks) / (1.0 - self.input_mask)
+                pooled = self.encoder.pool(snps, masks, fold) / (1.0 - self.input_mask)
             else:
-                pooled = self.encoder.pool(snps)
+                pooled = self.encoder.pool(snps, fold=fold)
             h = self.encoder.tokens(pooled)
             if self.use_cov:
                 cov = self.cov_norm(self.covariate_encoder(x_all[-1]))

@@ -305,9 +305,9 @@ def test_an_init_encoder_file_is_checked_loaded_and_may_be_frozen(data_dir, tmp_
     assert all(p.requires_grad for p in enc.parameters())
     enc.load_init(str(tmp_path / "init.pt"), dm.partition["digest"], "dosage", freeze=True)
     assert not enc.tables[0].requires_grad and not enc.mlp[0].weight.requires_grad and enc.mlp[0].bias.requires_grad
-    for bad_manifest, message in ((dict(manifest, snp_code="genotype"), "another partition, SNP code or width"),
-                                  (dict(manifest, embed_dim=16), "another partition, SNP code or width"),
-                                  (dict(manifest, partition_digest="x"), "another partition, SNP code or width")):
+    for bad_manifest, message in ((dict(manifest, snp_code="genotype"), "another partition, SNP code, width or fold count"),
+                                  (dict(manifest, embed_dim=16), "another partition, SNP code, width or fold count"),
+                                  (dict(manifest, partition_digest="x"), "another partition, SNP code, width or fold count")):
         torch.save({"manifest": bad_manifest, "state": state}, tmp_path / "bad.pt")
         with pytest.raises(ValueError, match=message):
             enc.load_init(str(tmp_path / "bad.pt"), dm.partition["digest"], "dosage")
@@ -442,3 +442,109 @@ def test_parse_args_defaults_to_blocks_mode_with_the_warm_up_and_cosine_recipe()
     assert (snps.final_pool, snps.input_mask) == ("atten", 0.0)                   # masking is a blocks-mode default
     assert main_multilabel.parse_args(["--label", "x", "--input_mode", "snps", "--input_mask", "0.2"]).input_mask == 0.2
     assert main_multilabel.parse_args(["--label", "x", "--final_pool", "atten"]).final_pool == "atten"
+
+
+# ---- fold-routed tables -------------------------------------------------------------------------
+def _folds_file(data_dir, path, k=3, seed=1):
+    """A folds.npz as make_folds.py writes it, listing the training split only (the others take pseudo-folds)."""
+    import pandas as pd
+    iid = pd.read_csv(os.path.join(data_dir, "multi", "store", "samples_train.tsv"), sep="\t", dtype={"IID": str})["IID"].to_numpy(str)
+    np.savez(path, seed=np.array(seed), k=np.array(k), iid_train=iid, fold_train=(np.arange(len(iid)) % k).astype(np.int8))
+    return str(path)
+
+
+def _pseudo_fold(iids, seed, k):
+    return np.array([int.from_bytes(hashlib.sha256(f"{s}\t{seed}".encode()).digest()[:8], "big") % k for s in iids])
+
+
+def test_fold_routed_pooling_uses_each_participants_own_table(data_dir):
+    from widedeepgp.blockencoder import BlockEncoder
+    _, dm, _ = _build(data_dir)
+    enc = BlockEncoder(dm.partition, 4, 8, n_folds=3)
+    g = torch.Generator().manual_seed(3)
+    for t in enc.tables:
+        assert t.shape[0] == 3
+        t.data = torch.randn(t.shape, generator=g)
+    x_all, _ = _val_batch(dm)
+    fold = torch.arange(24) % 3
+    pooled = enc.pool(x_all[:-1], fold=fold).detach().numpy()
+    assert pooled.shape == (24, 3 * CHROMS, 4)
+    for b in range(24):
+        k = 0
+        for i, ids in enumerate(dm.partition["ids"]):
+            x, w = x_all[i][b, :, 0].numpy(), enc.tables[i][int(fold[b])].detach().numpy()
+            for blk in np.unique(ids):
+                s = ids == blk
+                np.testing.assert_allclose(pooled[b, k], (x[s] @ w[s]) / np.sqrt(s.sum()), rtol=1e-5, atol=1e-6)
+                k += 1
+    masks = [torch.zeros(x.shape[:2], dtype=torch.bool) for x in x_all[:-1]]
+    np.testing.assert_allclose(enc.pool(x_all[:-1], masks, fold).detach().numpy(), pooled, rtol=1e-6)
+    with pytest.raises(ValueError, match="fold"):
+        enc.pool(x_all[:-1])
+    assert BlockEncoder(dm.partition, 4, 8).tables[0].dim() == 2                 # one copy: the shape as before
+
+
+def test_the_data_module_routes_training_rows_by_file_and_the_rest_by_pseudo_fold(data_dir, tmp_path):
+    import pandas as pd
+    path = _folds_file(data_dir, tmp_path / "folds.npz", k=3, seed=7)
+    cfg, dm, model = _build(data_dir, folds=path)
+    assert dm.n_folds == 3 and model.encoder.k == 3 and model.hp["n_folds"] == 3 and model.hp["folds"] == path
+    tr, va = dm.splits["train"], dm.splits["val"]
+    assert np.array_equal(tr["fold"], np.arange(len(tr["rows"])) % 3)              # from the file, in table order
+    iid_val = pd.read_csv(os.path.join(data_dir, "multi", "store", "samples_val.tsv"), sep="\t", dtype={"IID": str})["IID"].to_numpy(str)
+    assert np.array_equal(va["fold"], _pseudo_fold(iid_val, 7, 3))                  # not listed: the comparators' pseudo-fold
+    x_all, y = _val_batch(dm)
+    assert len(x_all) == CHROMS + 2 and x_all[-1].dtype == torch.int64 and torch.equal(x_all[-1], torch.as_tensor(va["fold"][:24]))
+    logits = model(x_all)
+    assert logits.shape == (24, 6) and torch.isfinite(logits).all()
+    # a file without the training split, or one missing training participants, is refused
+    np.savez(tmp_path / "noval.npz", seed=np.array(1), k=np.array(3), iid_val=iid_val, fold_val=np.zeros(len(iid_val), np.int8))
+    with pytest.raises(ValueError, match="training split"):
+        _build(data_dir, folds=str(tmp_path / "noval.npz"))
+    z = dict(np.load(path))
+    z["iid_train"], z["fold_train"] = z["iid_train"][:-1], z["fold_train"][:-1]
+    np.savez(tmp_path / "short.npz", **z)
+    with pytest.raises(KeyError, match="1 of"):
+        _build(data_dir, folds=str(tmp_path / "short.npz"))
+
+
+def test_a_fold_routed_init_file_must_match_the_fold_count(data_dir, tmp_path):
+    path = _folds_file(data_dir, tmp_path / "folds.npz", k=3)
+    _, dm, model = _build(data_dir, folds=path)
+    enc = model.encoder
+    state = {f"tables.{i}": torch.randn(3, 6, 4) for i in range(CHROMS)}
+    manifest = {"kind": "ridge", "partition_digest": dm.partition["digest"], "snp_code": "dosage", "embed_dim": 4, "n_folds": 3}
+    torch.save({"manifest": manifest, "state": state}, tmp_path / "init3.pt")
+    assert enc.load_init(str(tmp_path / "init3.pt"), dm.partition["digest"], "dosage", freeze=True) == sorted(state)
+    assert torch.equal(enc.tables[5], state["tables.5"]) and not enc.tables[0].requires_grad
+    one = {k: v[0] for k, v in state.items()}
+    torch.save({"manifest": dict(manifest, n_folds=1), "state": one}, tmp_path / "init1.pt")
+    with pytest.raises(ValueError, match="fold count"):
+        enc.load_init(str(tmp_path / "init1.pt"), dm.partition["digest"], "dosage")
+    _, _, plain = _build(data_dir)
+    with pytest.raises(ValueError, match="fold count"):                              # and the other way round
+        plain.encoder.load_init(str(tmp_path / "init3.pt"), dm.partition["digest"], "dosage")
+    torch.save({"manifest": {k: v for k, v in manifest.items() if k != "n_folds"}, "state": one}, tmp_path / "old.pt")
+    assert plain.encoder.load_init(str(tmp_path / "old.pt"), dm.partition["digest"], "dosage") == sorted(one)   # no key: one copy
+
+
+def test_a_fold_routed_run_trains_snapshots_scores_and_resumes(data_dir, tmp_path):
+    import main_multilabel
+    import score_snapshots
+    from widedeepgp.train import load_model
+    path = _folds_file(data_dir, tmp_path / "folds.npz", k=2)
+    out = main_multilabel.main(_run_args(tmp_path, "rf", data_dir=data_dir, folds=path))
+    run = out["run_dir"]
+    config = json.load(open(os.path.join(run, "config.json")))
+    assert config["blocks"]["n_folds"] == 2 and config["model"]["n_folds"] == 2 and config["args"]["folds"] == path
+    snaps = sorted(os.listdir(os.path.join(run, "snapshots")))
+    ck = torch.load(os.path.join(run, "snapshots", snaps[-1]), map_location="cpu", weights_only=False)
+    assert ck["state_dict"]["encoder.tables.0"].shape == (2, 6, 4) and ck["state_dict"]["encoder.tables.0"].dtype == torch.bfloat16
+    model, _ = load_model(os.path.join(run, "snapshots", snaps[-1]), out["datamodule"])
+    assert model.encoder.k == 2
+    rows = score_snapshots.main(["--run", run, "--split", "val", "--snapshots", "best", "--device", "cpu"])
+    assert {r["metric"] for r in rows} == {"auroc", "ap", "bce"}
+    out2 = main_multilabel.main(_run_args(tmp_path, "rf", data_dir=data_dir, folds=path, max_epoch_equiv=2) + ["--resume"])
+    assert out2["samples_seen"] > out["samples_seen"]
+    with pytest.raises(ValueError, match="other settings"):
+        main_multilabel.main(_run_args(tmp_path, "rf", data_dir=data_dir) + ["--resume"])      # one copy now: refused

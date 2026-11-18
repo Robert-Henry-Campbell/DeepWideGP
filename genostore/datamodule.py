@@ -112,10 +112,11 @@ def load_partition(spec, store, regions):
 class StoreBatchDataset(Dataset):
     """Indexing with a *list of sample indices* returns that whole batch, still encoded."""
 
-    def __init__(self, store_dir, regions, rows, cov, y):
+    def __init__(self, store_dir, regions, rows, cov, y, fold=None):
         self.store_dir, self.regions = store_dir, regions
         self.rows = np.asarray(rows, dtype=np.int64)
         self.cov = None if cov is None else np.ascontiguousarray(cov, dtype=np.float32)
+        self.fold = None if fold is None else np.asarray(fold, dtype=np.int64)
         y = np.asarray(y, dtype=np.float32)
         self.y = y[:, None] if y.ndim < 2 else y
         self._gs = None
@@ -141,6 +142,8 @@ class StoreBatchDataset(Dataset):
         out = {"geno": geno, "y": torch.from_numpy(self.y[bi])}
         if self.cov is not None:
             out["cov"] = torch.from_numpy(self.cov[bi])
+        if self.fold is not None:
+            out["fold"] = torch.from_numpy(self.fold[bi])
         if target is not None:
             out["target"] = torch.tensor(int(target))
         return out
@@ -210,6 +213,14 @@ class SNPStoreDataModule(pl.LightningDataModule):
             if not getattr(configs, "partition", None):
                 raise ValueError("--input_mode blocks needs --partition (a partition.npz, its folder, or uniform:<k>)")
             self.partition = load_partition(configs.partition, self.store, self.regions)
+        self.folds = None                         # --folds: the block ridge's folds.npz, for a fold-routed first layer
+        if getattr(configs, "folds", None):
+            z = np.load(configs.folds)
+            listed = {name[5:] for name in z.files if name.startswith("fold_")}
+            self.folds = {"k": int(z["k"]), "seed": int(z["seed"]),
+                          **{s: dict(zip(z[f"iid_{s}"].astype(str), z[f"fold_{s}"].astype(np.int64))) for s in listed}}
+            if "train" not in self.folds:
+                raise ValueError(f"--folds {configs.folds}: no folds for the training split")
 
         self._row_of = {s: i for i, s in enumerate(self.store.samples)}
         tr = self._read_table("train", self._row_of)
@@ -244,9 +255,10 @@ class SNPStoreDataModule(pl.LightningDataModule):
         if missing:                 # a count only: participant IDs never go into messages or logs
             raise KeyError(f"samples_{split}.tsv: {len(missing)} of {len(df)} IDs are not in the store")
         rows = np.array([row_of[s] for s in df["IID"]], dtype=np.int64)
+        fold = {} if self.folds is None else {"fold": self._fold_of(split, df["IID"].to_numpy(str))}
         if not self.multilabel:
             covs = [c for c in df.columns if c not in ("IID", "label")]
-            return {"rows": rows, "y": df["label"].to_numpy(), "cov": _numbers(df, covs, np.float64, split)}
+            return {"rows": rows, "y": df["label"].to_numpy(), "cov": _numbers(df, covs, np.float64, split), **fold}
         absent = [c for c in self.label_names + self.cov_names if c not in df.columns]
         if absent:
             raise KeyError(f"samples_{split}.tsv lacks the columns {absent} named in store.json")
@@ -258,7 +270,25 @@ class SNPStoreDataModule(pl.LightningDataModule):
         cov = _numbers(df, self.cov_names, np.float64, split)
         if np.isnan(cov).any():
             raise ValueError(f"samples_{split}.tsv: covariates {self.cov_names} contain missing values")
-        return {"rows": rows, "y": y, "cov": cov}
+        return {"rows": rows, "y": y, "cov": cov, **fold}
+
+    def _fold_of(self, split, iids):
+        """Each participant's table copy: the fold of --folds for a split it lists (every training participant must be
+        listed: their copy is the one fitted without them), otherwise a seeded hash of the IID modulo k, the
+        pseudo-fold of the comparators (DeepWideGP-Scripts ridge_common.pseudo_fold)."""
+        k, seed = self.folds["k"], self.folds["seed"]
+        if split in self.folds:
+            known = self.folds[split]
+            missing = sum(1 for s in iids if s not in known)
+            if missing:                     # a count only: participant IDs never go into messages or logs
+                raise KeyError(f"--folds: {missing} of {len(iids)} participants of samples_{split}.tsv have no fold")
+            return np.array([known[s] for s in iids], dtype=np.int64)
+        return np.array([int.from_bytes(hashlib.sha256(f"{s}\t{seed}".encode()).digest()[:8], "big") % k for s in iids],
+                        dtype=np.int64)
+
+    @property
+    def n_folds(self):
+        return self.folds["k"] if self.folds else 1
 
     def _check_01(self, name, y):
         """A single binary label column must hold 0/1 (named label columns are checked as they are read)."""
@@ -355,6 +385,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
                  for k, q in enumerate(self.decode_q(batch["geno"]))]
         if self.data_mode == "snps_covs":
             x_all.append(batch["cov"])
+        if "fold" in batch:                       # last: the model's blocks mode pops it (fold-routed tables)
+            x_all.append(batch["fold"])
         if "target" in batch:
             return x_all, y, batch["target"]
         return x_all, y
@@ -384,7 +416,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
 
     def _dataset(self, sp):
         cov = sp["cov"] if self.data_mode == "snps_covs" else None
-        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"])
+        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"], sp.get("fold"))
 
     def _loader(self, ds, shuffle):
         size = self.batch_size if shuffle else self.eval_batch_size      # evaluation holds no gradients: it can be larger

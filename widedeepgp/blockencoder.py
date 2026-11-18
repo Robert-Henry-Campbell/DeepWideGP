@@ -3,7 +3,10 @@ a learned vector per SNP, scaled by the participant's dosage and summed over the
 (``pool``), plus a learned identity vector per block and per chromosome, through one small MLP shared
 by all blocks (``tokens``): one token per block for the mixer. With embed_dim 1 the pooled values are the
 per-block sums of a ridge PRS, so the first layer contains a ridge; everything the model predicts from them
-goes through the mixer and the head."""
+goes through the mixer and the head. With ``n_folds`` > 1 the table has one copy per fold and each participant
+is pooled with the copy their fold names: a training participant with the copy fitted without them, every other
+participant with the copy of their pseudo-fold (the cross-fitting of the comparators; a warm start fitted on the
+training rows would otherwise hand the network their labels)."""
 import numpy as np
 import torch
 import torch.nn as nn
@@ -30,18 +33,22 @@ class BlockEncoder(nn.Module):
     SNP (1 for the dosage code, 3 for the genotype code, SNP-major), so block k of sequence i is rows
     [codes * start_k, codes * stop_k) of tables[i]."""
 
-    def __init__(self, partition, embed_dim, d_model, snp_code="dosage", dropout=0.0):
+    def __init__(self, partition, embed_dim, d_model, snp_code="dosage", dropout=0.0, n_folds=1):
         super().__init__()
         if snp_code not in SNP_CODES:
             raise ValueError(f"snp_code must be one of {SNP_CODES}")
         self.codes = 3 if snp_code == "genotype" else 1
+        self.k = int(n_folds)
+        if self.k < 1:
+            raise ValueError("n_folds must be at least 1")
         de = int(embed_dim)
         self.lengths, chrom = [], []                      # table rows per block, and each block's sequence
         for i, ids in enumerate(partition["ids"]):
             counts = np.unique(ids, return_counts=True)[1]
             self.lengths.append([int(c) * self.codes for c in counts])
             chrom += [i] * len(counts)
-        self.tables = nn.ParameterList([nn.Parameter(torch.zeros(sum(rows), de)) for rows in self.lengths])
+        shape = (sum(rows) for rows in self.lengths)
+        self.tables = nn.ParameterList([nn.Parameter(torch.zeros(n, de) if self.k == 1 else torch.zeros(self.k, n, de)) for n in shape])
         # each block's sum is divided by the square root of its SNP count, so blocks of 119 and 15,194 SNPs start on one scale
         snps = [rows // self.codes for seq in self.lengths for rows in seq]
         self.register_buffer("block_scale", torch.tensor(snps, dtype=torch.float32).rsqrt()[None, :, None], persistent=False)
@@ -51,13 +58,9 @@ class BlockEncoder(nn.Module):
         self.mlp = nn.Sequential(nn.Linear(de, 4 * de), nn.GELU(), nn.Linear(4 * de, int(d_model)))
         self.drop = nn.Dropout(float(dropout))
 
-    def pool(self, x_all, masks=None):
-        """Dosages, one [B, L_i, 1] per sequence (standardised for the dosage code, raw for the genotype
-        code) -> the pooled vector of every block, [B, n_blocks, embed_dim]: the sum of the block's dosage-scaled
-        vectors over the square root of its SNP count. ``masks``: optional bool [B, L_i] per sequence; a masked
-        SNP contributes nothing (pretraining)."""
+    def _pool(self, x_all, masks, tables):
         out = []
-        for i, (x, table, rows) in enumerate(zip(x_all, self.tables, self.lengths)):
+        for i, (x, table, rows) in enumerate(zip(x_all, tables, self.lengths)):
             w = x[:, :, 0]
             if masks is not None:
                 w = w.masked_fill(masks[i], 0.0)
@@ -67,7 +70,25 @@ class BlockEncoder(nn.Module):
                 dt = torch.get_autocast_dtype("cuda")
                 w, table = w.to(dt), table.to(dt)
             out += [a @ t for a, t in zip(w.split(rows, 1), table.split(rows, 0))]
-        return torch.stack(out, 1) * self.block_scale
+        return torch.stack(out, 1)
+
+    def pool(self, x_all, masks=None, fold=None):
+        """Dosages, one [B, L_i, 1] per sequence (standardised for the dosage code, raw for the genotype
+        code) -> the pooled vector of every block, [B, n_blocks, embed_dim]: the sum of the block's dosage-scaled
+        vectors over the square root of its SNP count. ``masks``: optional bool [B, L_i] per sequence; a masked
+        SNP contributes nothing (pretraining). ``fold``: long [B], each participant's table copy (n_folds > 1)."""
+        if self.k == 1:
+            return self._pool(x_all, masks, self.tables) * self.block_scale
+        if fold is None:
+            raise ValueError("fold-routed tables need each participant's fold")
+        out = None
+        for k in fold.unique().tolist():
+            sel = fold == k
+            part = self._pool([x[sel] for x in x_all], None if masks is None else [m[sel] for m in masks], [t[k] for t in self.tables])
+            if out is None:
+                out = part.new_zeros((fold.shape[0],) + tuple(part.shape[1:]))
+            out[sel] = part
+        return out * self.block_scale
 
     def hidden(self, pooled):
         """The MLP's hidden layer [B, n_blocks, 4 embed_dim] of pooled vectors with the identities added."""
@@ -85,9 +106,11 @@ class BlockEncoder(nn.Module):
         been made for this partition, SNP code and width. Returns the names loaded."""
         f = torch.load(path, map_location="cpu", weights_only=False)
         m, own = f["manifest"], self.state_dict()
-        want = {"partition_digest": digest, "snp_code": snp_code, "embed_dim": int(self.tables[0].shape[1])}
-        if {k: m.get(k) for k in want} != want:
-            raise ValueError(f"--init_encoder {path}: made for another partition, SNP code or width than this model's")
+        want = {"partition_digest": digest, "snp_code": snp_code, "embed_dim": int(self.tables[0].shape[-1]), "n_folds": self.k}
+        have = {k: m.get(k) for k in want}
+        have["n_folds"] = int(m.get("n_folds", 1))
+        if have != want:
+            raise ValueError(f"--init_encoder {path}: made for another partition, SNP code, width or fold count than this model's")
         state = f["state"]
         bad = [k for k, v in state.items() if k not in own or tuple(v.shape) != tuple(own[k].shape)]
         if bad or not any(k.startswith("tables.") for k in state):

@@ -114,7 +114,8 @@ def block_hparams(cfg, dm):
             "n_blocks": int(dm.partition["n_blocks"]), "snp_code": cfg.snp_code, "embed_dim": int(cfg.embed_dim),
             "table_kappa": float(cfg.table_kappa), "table_decay": float(cfg.table_decay), "table_eps": float(cfg.table_eps),
             "lr_table": table_learning_rate(cfg.table_kappa, batch_eff, int(sum(dm.seq_len))),
-            "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False))}
+            "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False)),
+            "n_folds": int(getattr(dm, "n_folds", 1)), "folds": getattr(cfg, "folds", None) or None}
 
 
 def parse_grid(spec):
@@ -408,7 +409,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         counts = model.parameter_counts()
         blocks = {"partition": model.hp["partition"], "partition_digest": model.hp["partition_digest"],
                   "n_blocks": model.hp["n_blocks"], "n_tokens": model.hp["n_blocks"] + int(model.use_cov),
-                  "embed_dim": model.hp["embed_dim"], "snp_code": model.hp["snp_code"],
+                  "embed_dim": model.hp["embed_dim"], "snp_code": model.hp["snp_code"], "n_folds": model.hp.get("n_folds", 1),
                   "n_parameters_by_module": counts, "n_embedding_parameters": counts["table"] + counts["identity"],
                   "n_non_embedding_parameters": counts["block_mlp"] + counts["mixer"] + counts["covariates"] + counts["head"],
                   "init_encoder_sha256": file_digest(cfg.init_encoder) if model.hp.get("init_encoder") else None}

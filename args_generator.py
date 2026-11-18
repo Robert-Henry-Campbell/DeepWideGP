@@ -77,6 +77,7 @@ def args_initial(argv=None):
     parser.add_argument('--table_eps', type=float, default=2.5e-7, help="blocks mode: Adam epsilon of the table, about eight times the per-entry gradient of a null SNP under the default recipe (batch 64, 40% input masking: measured 3.3e-8 at the top rung), so such entries barely move")
     parser.add_argument('--init_encoder', help='blocks mode: file whose tables start the first layer (masked pretraining by pretrain_blocks.py, or a ridge warm start)')
     parser.add_argument('--freeze_encoder', action='store_true', help='blocks mode: keep the parameters loaded by --init_encoder fixed')
+    parser.add_argument('--folds', help="blocks mode: the block ridge's folds.npz; the table then has one copy per fold, a training participant pooled with the copy fitted without them and every other participant with the copy of their pseudo-fold")
     parser.add_argument('--input_mask', type=float, default=0.0, help='blocks mode: share of SNPs set to missing at random on every training step, the rest rescaled (Sigurdsson et al. 2023 used 0.4)')
     parser.add_argument('--sampler', default='rotation', help="'rotation' (each batch balanced on one disease) or 'shuffled'")
     parser.add_argument('--loss_outputs', default='all', help="'all': every output learns from every batch; 'target': only the disease the batch was balanced on")

@@ -22,7 +22,7 @@ def args_initial(argv=None):
     parser.add_argument('--activation', type=str, default='gelu', help='activation')
     parser.add_argument('--output_attention', action='store_true', default=False, help='whether to output attention in encoder')
     parser.add_argument('--snp_embed', type=str, default='cov', help='embedding method: cov or vocab')
-    parser.add_argument('--final_pool', type=str, default='concat', help='output head type: last, concat, atten')
+    parser.add_argument('--final_pool', type=str, default='concat', help="output head: SNP mode 'last' or 'atten' ('concat' is not implemented); blocks mode 'mean' (the tokens' mean into the head), 'atten' (one attention query per disease over the block tokens, each disease's logit from its own pooled vector) or 'flat' (the flattened tokens into a per-disease linear readout)")
     parser.add_argument('--use_pcs', action='store_false',default=True, help='whether to use population structure')
     parser.add_argument('--bi_direct', action='store_true', default=False, help='whether to bi-directional Mamba')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout to avoid overfitting')

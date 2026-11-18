@@ -253,7 +253,7 @@ def test_refusals(data_dir):
     from widedeepgp.train import check_resume_tables, run_training
     _, dm, model = _build(data_dir)
     for change, message in ((dict(wide="on"), "no linear PRS path"), (dict(annot_dim=2), "no linear PRS path"),
-                            (dict(final_pool="atten"), "pools the mixer's tokens by their mean"),
+                            (dict(final_pool="last"), "mean, by one attention query"),
                             (dict(partition_digest="0" * 16), "does not match")):
         with pytest.raises(ValueError, match=message):
             WideDeepGP(dict(model.hp, **change), dm.pos_chr, blocks=dm.partition)
@@ -548,3 +548,62 @@ def test_a_fold_routed_run_trains_snapshots_scores_and_resumes(data_dir, tmp_pat
     assert out2["samples_seen"] > out["samples_seen"]
     with pytest.raises(ValueError, match="other settings"):
         main_multilabel.main(_run_args(tmp_path, "rf", data_dir=data_dir) + ["--resume"])      # one copy now: refused
+
+
+# ---- readouts -----------------------------------------------------------------------------------
+def _hooked(model, x_all):
+    """The model's logits with the mixer's normalised tokens and the covariate vector caught on the way."""
+    caught = {}
+    h1 = model.norm_f.register_forward_hook(lambda m, i, o: caught.__setitem__("h", o.detach().float()))
+    h2 = model.cov_norm.register_forward_hook(lambda m, i, o: caught.__setitem__("cov", o.detach().float()))
+    try:
+        with torch.no_grad():
+            out = model(x_all)
+    finally:
+        h1.remove()
+        h2.remove()
+    return out, caught["h"], caught["cov"]
+
+
+def test_the_attention_readout_pools_each_disease_with_its_own_query(data_dir):
+    _, dm, model = _build(data_dir, final_pool="atten")
+    model.eval()
+    x_all, _ = _val_batch(dm)
+    assert model.pool_query.shape == (6, 8) and model.n_blocks == 66
+    out, h, cov = _hooked(model, x_all)
+    assert out.shape == (24, 6) and h.shape == (24, 67, 8)
+    tokens = h[:, :66]                                                            # the covariate token is the 67th
+    att = torch.softmax(torch.einsum("bkd,ld->blk", tokens, model.pool_query) / 8 ** 0.5, -1)
+    pooled = torch.einsum("blk,bkd->bld", att, tokens)
+    z = torch.cat([pooled, cov[:, None].expand(-1, 6, -1)], -1)
+    with torch.no_grad():
+        want = torch.stack([model.combine(z[:, l])[:, l] for l in range(6)], 1)   # disease l's output from its own vector
+    assert torch.allclose(out, want, atol=1e-5)
+    with torch.no_grad():                                                        # zero queries: uniform attention, the mean
+        model.pool_query.zero_()
+        out0, h0, cov0 = _hooked(model, x_all)
+        z0 = torch.cat([h0[:, :66].mean(1, keepdim=True).expand(-1, 6, -1), cov0[:, None].expand(-1, 6, -1)], -1)
+        assert torch.allclose(out0, model.combine(z0).diagonal(dim1=1, dim2=2), atol=1e-5)
+    assert model.parameter_counts()["head"] == sum(p.numel() for p in model.combine.parameters()) + 48
+
+
+def test_the_flat_readout_is_one_linear_map_from_every_token(data_dir):
+    _, dm, model = _build(data_dir, final_pool="flat")
+    model.eval()
+    x_all, _ = _val_batch(dm)
+    assert not hasattr(model, "combine") and model.readout.weight.shape == (6, 67 * 8)
+    out, h, _ = _hooked(model, x_all)
+    with torch.no_grad():
+        assert torch.allclose(out, model.readout(h.reshape(24, -1)), atol=1e-6)
+    assert model.parameter_counts()["head"] == 67 * 8 * 6 + 6
+    with pytest.raises(ValueError, match="mean, by one attention"):
+        _build(data_dir, final_pool="last")
+
+
+@pytest.mark.parametrize("pool", ["atten", "flat"])
+def test_a_run_trains_with_each_readout(data_dir, tmp_path, pool):
+    import main_multilabel
+    out = main_multilabel.main(_run_args(tmp_path, f"r_{pool}", data_dir=data_dir, final_pool=pool))
+    config = json.load(open(os.path.join(out["run_dir"], "config.json")))
+    assert config["model"]["final_pool"] == pool and out["best_val_auroc_mean"] > 0 and len(out["history"]) >= 1
+    assert config["blocks"]["n_parameters_by_module"]["head"] == (67 * 8 * 6 + 6 if pool == "flat" else config["blocks"]["n_parameters_by_module"]["head"])

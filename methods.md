@@ -530,10 +530,18 @@ block of section 4.3 (`--mixer bimamba1`) or a pre-norm transformer encoder laye
 layer of width 4*d*, GELU and dropout `--dropout`), then a final layer normalisation (of the
 residual sum, for the Mamba block). `--d_model` and `--e_layers` set the mixer's size.
 
-**The head.** The mean over the tokens, concatenated with the covariate vector, feeds the head of
-section 4.7 (`combine`: a shared hidden layer, then one logit per disease; `--final_pool mean` is the
-only pooling blocks mode accepts). Every prediction passes through the block MLP, the mixer and the
-head; with d_e = 1 the pooled block values are a ridge PRS's per-block sums
+**The head.** Three readouts (`--final_pool`). `mean`, the default: the mean over the tokens,
+concatenated with the covariate vector, feeds the head of section 4.7 (`combine`: a shared hidden
+layer, then one logit per disease). Every block then counts the same, since the final layer
+normalisation fixes each token's length and every disease reads one *d*-number mean. `atten`
+(18 November 2026): one learned query per disease attends over the 431 block tokens (uniform at the
+start, so it begins as the mean), and each disease's logit is the shared head applied to its own
+pooled vector beside the covariate vector; a disease can thereby concentrate on a few blocks, as
+the published model's attention over its 22 chromosome vectors could. `flat` (the readout of
+PRSformer, Dibaeinia et al. 2025): the tokens are flattened and one linear map gives the 30 logits,
+every block, channel and disease its own weight (829,000 at S3, under the network's weight decay),
+with no hidden layer. Every prediction passes through the block MLP, the mixer and the
+readout; with d_e = 1 the pooled block values are a ridge PRS's per-block sums
 (`tests/test_ml_blocks.py::test_the_first_layer_contains_a_ridge_prs`), so the first layer contains a
 ridge, but the model has no linear path from the table to the logits. **A finding of 17 November
 2026 that the reader of the results must know.** During the implementation a linear readout of the

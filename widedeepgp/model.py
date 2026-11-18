@@ -24,7 +24,7 @@ from .blockencoder import BlockEncoder
 from .blocks import make_block
 from .losses import WideLoss
 
-POOLS = ("atten", "mean", "last")
+POOLS = ("atten", "mean", "last", "flat")
 WIDE_MODES = ("off", "on", "only")
 WIDE_KEYS = ("prs.", "cov_linear", "intercept")        # state_dict keys of the linear PRS path
 
@@ -110,8 +110,9 @@ class WideDeepGP(pl.LightningModule):
         if self.blocks:
             if self.wide != "off" or int(hp.get("annot_dim", 0)):
                 raise ValueError("blocks mode has no linear PRS path and no annotation vectors (--wide off, no --annot)")
-            if self.final_pool != "mean":
-                raise ValueError("blocks mode pools the mixer's tokens by their mean (--final_pool mean)")
+            if self.final_pool not in ("mean", "atten", "flat"):
+                raise ValueError("blocks mode reads the mixer's tokens by their mean, by one attention query per disease "
+                                 "(atten) or flattened into a per-disease linear readout (flat); --final_pool")
             if blocks is None or hp["partition_digest"] != blocks["digest"]:
                 raise ValueError("the block partition given does not match the one this model was configured for")
         self.input_mask = float(hp.get("input_mask", 0.0) or 0.0)
@@ -151,8 +152,14 @@ class WideDeepGP(pl.LightningModule):
             if self.use_cov:
                 self.covariate_encoder = FCN(int(hp["n_cov"]), d)
                 self.cov_norm = nn.LayerNorm(d)
-            self.combine = FCN((1 + self.use_cov) * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
-                               hidden_layers=int(hp["n_fcn"]))
+            self.n_blocks = int(blocks["n_blocks"])
+            if self.final_pool == "flat":               # every block, channel and disease its own weight (PRSformer's readout)
+                self.readout = nn.Linear((self.n_blocks + self.use_cov) * d, self.n_labels)
+            else:
+                self.combine = FCN((1 + self.use_cov) * d, self.n_labels, hidden_dim=int(hp.get("head_hidden", 256)),
+                                   hidden_layers=int(hp["n_fcn"]))
+                if self.final_pool == "atten":          # one learned query per disease over the block tokens; uniform at the start
+                    self.pool_query = nn.Parameter(torch.randn(self.n_labels, d) / d ** 0.5)
             self.lr_table, self.table_decay, self.table_eps = (float(hp[k]) for k in ("lr_table", "table_decay", "table_eps"))
 
         # built in the published class's order, so one seed gives the same initial weights
@@ -303,7 +310,17 @@ class WideDeepGP(pl.LightningModule):
                 else:
                     h, residual = layer(h, residual)
             h = self.norm_f(h if residual is None else h + residual)
-        mean = h.float().mean(dim=1)
+        h = h.float()                                     # the readout in float32, finer than bf16 resolves
+        if self.final_pool == "flat":
+            return self.readout(h.reshape(h.shape[0], -1))
+        if self.final_pool == "atten":
+            tokens = h[:, :self.n_blocks]                 # the block tokens; the covariate token joins through cov
+            att = torch.softmax(torch.einsum("bkd,ld->blk", tokens, self.pool_query) / tokens.shape[-1] ** 0.5, dim=-1)
+            pooled = torch.einsum("blk,bkd->bld", att, tokens)                     # [B, diseases, d]
+            if self.use_cov:
+                pooled = torch.cat([pooled, cov.float()[:, None].expand(-1, pooled.shape[1], -1)], dim=-1)
+            return self.combine(pooled).diagonal(dim1=1, dim2=2)                   # disease l's logit from its own pooled vector
+        mean = h.mean(dim=1)
         return self.combine(torch.cat([mean, cov.float()], dim=1) if self.use_cov else mean)
 
     def forward(self, x_all):
@@ -329,7 +346,8 @@ class WideDeepGP(pl.LightningModule):
         return {"table": count(e.tables), "identity": count(e.block_emb, e.chrom_emb), "block_mlp": count(e.mlp),
                 "mixer": count(self.layers, self.norm_f),
                 "covariates": count(self.covariate_encoder, self.cov_norm) if self.use_cov else 0,
-                "head": count(self.combine)}
+                "head": count(self.readout) if self.final_pool == "flat" else
+                count(self.combine) + (self.pool_query.numel() if self.final_pool == "atten" else 0)}
 
     def snapshot(self, step):
         """A weights-only snapshot that load_model reads; the table in bfloat16 (it is most of the weights)."""

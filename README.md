@@ -146,7 +146,8 @@ three vectors instead, for 0, 1 and 2 copies, interpolated for fractional dosage
 identity vector per block and per chromosome is added and a small MLP shared by all blocks makes
 one token per block. One mixer, the published bidirectional Mamba block (`--mixer bimamba1`) or a
 transformer encoder layer (`--mixer transformer`), runs over the block tokens and the covariate
-token; the mean over the tokens, beside the covariate vector, feeds the head.
+token; the mean over the tokens, beside the covariate vector, feeds the head (`--final_pool mean`; `atten` gives each
+disease its own attention query over the block tokens, `flat` a per-disease linear readout of all tokens).
 The blocks come from a partition file (`--partition`, required:
 `data/reference/partitions/prive431`, `ldsplit2000` or `ldsplit5000`, checked against the
 dataset's store and recorded by digest in every checkpoint). Each block's sum is divided by the
@@ -224,7 +225,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | `--gamma`, `--w_max` | class-weight exponent (0 none: plain cross-entropy at natural prevalence; 0.5 square root; 1 parity) and cap | 0 in `main_multilabel.py` (parser: 0.5), 20 |
 | `--no_sampling_correction` | do not divide each person's loss by their sampling rate | off |
 | `--annot` | SNP mode: per-SNP annotation vectors as a gain and offset on the token embedding | off |
-| `--final_pool` | pooling of the mixer's tokens: blocks mode `mean` (the only setting it accepts); SNP mode `atten` (the published attention across the 23 vectors), `mean` or `last` | `mean` in blocks mode, `atten` in SNP mode |
+| `--final_pool` | readout of the mixer's tokens: blocks mode `mean` (their mean into the head), `atten` (one attention query per disease over the block tokens, each disease's logit from its own pooled vector) or `flat` (the flattened tokens into a per-disease linear map); SNP mode `atten` (the published attention across the 23 vectors), `mean` or `last` | `mean` in blocks mode, `atten` in SNP mode |
 | `--precision bf16`, `--grad_ckpt`, `--accumulate N` | mixed precision (the first layer, covariate encoder and mixer in bf16; the mean over tokens, the head and the loss in float32), activation checkpointing (per mixer layer in blocks mode, per chromosome in SNP mode), gradient accumulation | off, off, 1 |
 | `--warmup_steps`, `--lr_schedule` | linear learning-rate warm-up (optimiser steps); `constant`, `cosine` (to zero over the budget) or `plateau` (x0.2 after 10 passes without improvement); the table's and the network's rates follow the same schedule | 0, `plateau` (the SNP-mode recipes pass `constant`) |
 | `--val_per_epoch`, `--stop_patience`, `--stop_burnin`, `--max_epoch_equiv` | validations per epoch-equivalent, patience, optimiser steps before early stopping may act, budget | 4, 16, 2000, 30 |

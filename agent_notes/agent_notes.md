@@ -1350,3 +1350,18 @@ tests are unchanged; the ladder's frozen copies are unaffected.
 - The covariate floor (0.6627 mean, I10 0.6990) is an unpenalised logistic fit of the 12 covariates on the training
   split, scored on the tuning set; stated now in the comparator results.md and the blocks methods.md (Scripts 26f05e4)
   after Robert asked whether it was a network's covariate-only output.
+
+## 2026-11-18 (afternoon, UTC) — Readouts with block weights: --final_pool atten and flat in blocks mode
+
+- Robert asked whether the 431 blocks had weights of their own at the readout; they did not (LayerNorm then a mean).
+  `widedeepgp/model.py`: blocks mode accepts `--final_pool mean | atten | flat`. `atten`: one learned query per disease
+  (`pool_query` [n_labels, d], N(0, 1/d): uniform attention at the start) over the block tokens, each disease's logit the
+  shared FCN head applied to its own pooled vector plus the covariate vector (the diagonal of the head's outputs).
+  `flat`: `readout = Linear((n_blocks + 1) d, n_labels)` on the flattened tokens, PRSformer's readout, no FCN head.
+  `parameter_counts()["head"]` follows. Tests: `test_the_attention_readout_pools_each_disease_with_its_own_query`
+  (hooked tokens, manual attention, zero queries = the mean), `test_the_flat_readout_is_one_linear_map_from_every_token`,
+  `test_a_run_trains_with_each_readout`. Parser help updated.
+- Finding behind it: the trained fold-routed tables moved by 1% of their scale even at κ 1e-2 (table_eps 2.5e-7 throttles
+  a table at scale 0.35), so "trained = frozen" was not a test of training; the new trained run uses `--table_eps 1e-8`.
+  Design document item 16. Three single runs (no search) launched from the new export: frozen atten, frozen flat, trained
+  mean κ 1e-2 eps 1e-8 (`runs/blocks_diag/run_diag_readouts.sh`).

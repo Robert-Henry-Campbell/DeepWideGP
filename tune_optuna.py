@@ -38,8 +38,12 @@ def suggest(trial, cfg, space):
         cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
         cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
     if getattr(cfg, "input_mode", "snps") == "blocks":
-        cfg.table_kappa = trial.suggest_float("table_kappa", 0.01, 0.03, log=True)
-        cfg.table_decay = trial.suggest_float("table_decay", 0.3, 3.0, log=True)
+        if getattr(cfg, "init_encoder", None):       # a loaded table: steps small against its entries, next to no decay
+            cfg.table_kappa = trial.suggest_float("table_kappa", 3e-4, 1e-2, log=True)
+            cfg.table_decay = trial.suggest_float("table_decay", 1e-3, 3e-2, log=True)
+        else:                                        # from zero: the pace and decay measured for a table that starts empty
+            cfg.table_kappa = trial.suggest_float("table_kappa", 0.01, 0.03, log=True)
+            cfg.table_decay = trial.suggest_float("table_decay", 0.3, 3.0, log=True)
     if space not in ("deep", "table"):
         cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
         cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])

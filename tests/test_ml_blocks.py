@@ -229,6 +229,11 @@ def test_the_table_only_search_space():
     assert 0.01 <= cfg.table_kappa <= 0.03 and 0.3 <= cfg.table_decay <= 3.0
     tune_optuna.suggest(study.ask(), cfg, "deep")
     assert cfg.lr != 1e-4 or cfg.l2 != 1e-3 or cfg.dropout != 0.5
+    warm = SimpleNamespace(input_mode="blocks", init_encoder="init_ridge_d16.pt", lr=1e-4, l2=1e-3, dropout=0.5)
+    for _ in range(20):                                                          # a loaded table: a slower, undecayed range
+        tune_optuna.suggest(study.ask(), warm, "table")
+        assert 3e-4 <= warm.table_kappa <= 1e-2 and 1e-3 <= warm.table_decay <= 3e-2
+    assert (warm.lr, warm.l2, warm.dropout) == (1e-4, 1e-3, 0.5)
 
 
 def test_a_transformer_block_keeps_the_block_interface():

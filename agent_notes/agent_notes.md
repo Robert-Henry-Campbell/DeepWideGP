@@ -1284,3 +1284,17 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   context figures labelled as the spline basis then in force, 0.6653 linear), `DeepWideGP/methods.md` section on the
   comparison protocol, and `widedeepgp-ladder/methods.md`. Not edited (other sessions' files): `synthetic-data/`
   (methods l. 785, `synthgp/build.py` l. 365) and the preregistration draft PDF.
+
+## 2026-11-18 (morning, UTC) — T0 at the floor: the warm start was unreadable and erased; fix and diagnostics
+
+- T0 (top rung, ridge warm start, S5/S3/S1): 0.6629/0.6633/0.6631 mean tuning AUROC against the floor 0.6627; the
+  linear twins 0.6732 (logistic ridge on channels) and 0.6777 (ridge PRS + covariates). S3's final table has cosine
+  −0.0007 with its warm start. Causes: the raw ridge table's tokens have RMS 1e-4 against identity embeddings of order 1
+  (unreadable), and the table optimiser (lr 2.1e-4 ≈ 6 × the entry RMS, AdamW decay 1.0: e-fold in 1.4 epoch-equivalents)
+  erases the init. Design document (Scripts) section 12, item 14.
+- Fix: Scripts `make_warm_start.py` scales the table to unit-RMS block tokens (`--token_rms`, manifest records the
+  factor; 9,924 at the top rung; test on the synthetic store); `widedeepgp/tune_optuna.py` gives a warm-started table
+  its own range (κ 3e-4..1e-2, decay 1e-3..3e-2; `tests/test_ml_blocks.py::test_the_table_only_search_space`); the chain's
+  single-run defaults κ 1e-3, decay 0. The grid was paused at Robert's word; two S3 diagnostics (frozen rescaled table;
+  trained at κ 1e-3 without decay) run from `runs/blocks_diag/run_diag_s3.sh` before the relaunch. The old warm starts
+  are kept as `init_ridge_d16_unscaled.pt`.

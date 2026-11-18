@@ -600,10 +600,13 @@ its own, decided on 17 November 2026 after the first top-rung runs (below): a le
 
     lr_table = κ √B / √M
 
-(`--table_kappa` κ = 0.03 by default, searched over 0.01 to 0.03; B the effective batch size, M the
-number of SNPs; the rule of the linear PRS path without its prior-variance and class-weight
-factors, since each table entry's gradient is its dosage times the gradient of its block's token,
-of order 1/√M); a per-step weight decay `--table_decay` (1 by default, searched over 0.3 to 3),
+(`--table_kappa` κ = 0.03 by default, searched over 0.01 to 0.03 for a table that starts at zero and
+over 3 × 10⁻⁴ to 10⁻² for one loaded with `--init_encoder`, whose entries must not be overwritten
+in a few steps; B the effective batch size, M the number of SNPs; the rule of the linear PRS path
+without its prior-variance and class-weight factors, since each table entry's gradient is its
+dosage times the gradient of its block's token, of order 1/√M); a per-step weight decay
+`--table_decay` (1 by default, searched over 0.3 to 3 from zero and over 10⁻³ to 3 × 10⁻² from a
+loaded table, which decay 1 would shrink by e every 1/lr_table steps),
 AdamW's decoupled decay, so that every entry shrinks by lr_table × decay of itself at each step
 unless the data keep pushing it; and a large Adam epsilon `--table_eps` (10⁻⁷ by default). The
 epsilon is the point: Adam divides each entry's step by the root mean square of its gradient, which
@@ -636,7 +639,13 @@ scaling study**: the table starts from the rank-d_e decomposition of the rung's 
 ridge (section 4.11 above; `make_warm_start.py` in DeepWideGP-Scripts), so the tokens carry
 disease signal from the first step and the network learns to read them, and training then
 proceeds end to end. Nothing linear remains in the architecture; the warm start chooses where
-training begins. Under this recipe the table's epsilon was re-measured (batch 64, masking): a null
+training begins. **Two conditions, found on 18 November 2026 after the first warm-started runs
+ended at the covariate floor with their tables orthogonal to the warm start (design document
+section 12, item 14):** the table must be scaled so that the block tokens it forms are of the same
+order as the identity embeddings they are added to (`make_warm_start.py` scales them to unit RMS
+over training participants; the raw ridge weights give tokens of RMS 10⁻⁴ against embeddings of
+order 1), and the table's optimiser must not erase it (a warm-started single run uses κ = 10⁻³
+and no decay; the search ranges above). Under this recipe the table's epsilon was re-measured (batch 64, masking): a null
 entry's gradient has a root mean square of 3.3 × 10⁻⁸, so the default `--table_eps` is 2.5 × 10⁻⁷.
 What the search tunes under this recipe is the table's pace and decay only (`--tune_space table`;
 section 8). The objective under this recipe is the plain cross-entropy at natural prevalence of
@@ -966,8 +975,9 @@ training set, is by default one search of the network alone (stage `deep`; the d
 November 2026, when the linear PRS path became an option): 12 trials proposed by Optuna's
 tree-structured Parzen estimator (Akiba et al., 2019), each an ordinary training run, over the
 network's learning rate (10⁻⁴ to 3 × 10⁻³), weight decay (10⁻⁶ to 10⁻²), embedding dropout (0 to
-0.4) and, in blocks mode, the table's pace κ (`--table_kappa`, 0.01 to 0.03) and weight decay
-(`--table_decay`, 0.3 to 3; section 4.11), all but the dropout log-uniform; with `--tune_space table`
+0.4) and, in blocks mode, the table's pace κ (`--table_kappa`, 0.01 to 0.03 from zero, 3 × 10⁻⁴ to
+10⁻² from a loaded table) and weight decay (`--table_decay`, 0.3 to 3 from zero, 10⁻³ to 3 × 10⁻²
+from a loaded table; section 4.11), all but the dropout log-uniform; with `--tune_space table`
 the table's two settings alone, the rest held at the recipe of section 4.11, which is what the
 scaling study's chain does (six trials per cell). Asynchronous
 successive halving (Jamieson and Talwalkar, 2016; Li et al., 2020) stops the trials whose mean

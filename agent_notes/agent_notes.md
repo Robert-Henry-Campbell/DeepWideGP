@@ -1330,38 +1330,26 @@ tests are unchanged; the ladder's frozen copies are unaffected.
 - Facts: chr22 has 18,173 HM3+ SNPs in 15 Prive blocks (327 to 2,953 SNPs); "17,055" was the held-out groups'
   participant count. Fold-routed diagnostics (`runs/blocks_diag/diag_S3_folds_*`) still running; chain still paused.
 
-## 2026-11-18 (evening, UTC) — A 1:1 case-control classic run (Scripts only; no model code changed)
+## 2026-11-18 (evening, UTC) — The classic comparator with balanced batches (Scripts only; no model code changed)
 
 - Robert asked whether the classic DeepGP comparator used the paper's 1:1 case-control sets (it does not: natural
-  prevalence on the whole rung, by design), then for one 1:1 run of the classic I10 network at the top rung with
-  controls drawn at random, and whether its AUROC can be compared with the natural-prevalence runs. Scripts
-  `classic-deepgp-comparator/make_balanced_split.py` (a 1:1 training table in a dataset directory of its own that links
-  the source's store, tuning and test tables; 68,309 cases + 68,309 random controls, seed 1; N_eff 136,618 against
-  186,775), `balanced_eval.py` (whole-split AUROC against 200 random 1:1 tuning subsets, N_eff), `test_balanced_split.py`
-  (6 tests); methods.md, "A 1:1 case-control run": AUROC is invariant in expectation to random undersampling of the
-  evaluation set's controls, so the whole-tuning-set AUROCs compare directly, recipe against recipe (the balanced
-  recipe discards 27% of the information), not balance at fixed information; BCE, AP and calibration do not compare;
-  expectation stated before the result (at the floor). Scripts `widening` effeb18.
-- Launched detached 16:58Z: `runs/classic_deepgp/run_cc_i10_n215872.sh` waits for two free GPUs (the three
-  fold-routed diagnostics hold GPUs 2 to 4 until about 19:00Z), trains `classic_i10_n215872_cc11` from code_0094e74
-  with the quick run's flags, then scores it and the quick run on the tuning set (`score_snapshots.py --save_scores`;
-  the covariates-only floors from the same code path) and runs `balanced_eval.py` on both. Results go to the
-  comparator's results.md when the log's exit line is written.
+  prevalence on the whole rung with uniform batches, by design), then for a run of the classic I10 network at the top
+  rung with 1:1 batches whose controls are sampled from the whole control population, so that a pass shows every
+  control once and every case several times: the cases upweighted, no control dropped. The code already does this:
+  the rotation sampler with the one label (`--sampler rotation --labels I10`: 32 cases and 32 non-cases per batch,
+  non-cases in shuffled passes without replacement, cases cycling 2.16 times per pass) with `--no_sampling_correction
+  --gamma 0`, so the loss is the plain mean cross-entropy of the batch as drawn (the correction would weight the cases
+  back to the population). Launched detached 17:43Z: `runs/classic_deepgp/run_balanced_i10_n215872.sh` waits for two
+  free GPUs (the fold-routed diagnostics hold GPUs 2 to 4 until about 19:00Z), trains `classic_i10_n215872_balanced`
+  from code_0094e74 with the quick run's flags otherwise, then scores it and the quick run on the tuning set
+  (`score_snapshots.py`; the covariates-only floor from the same code path). Comparability: the same participants and
+  the same tuning set, so the AUROCs compare directly; cross-entropy, average precision and calibration do not (the
+  balanced model's logits sit about 0.77 too high at natural prevalence). Methods: the comparator's methods.md,
+  "Balanced batches by oversampling cases" (Scripts `widening` 7474de1); results.md when the log's exit line is written.
+- First read wrongly as undersampling the controls to the case count: a 136,618-participant 1:1 dataset, the scripts
+  `make_balanced_split.py` and `balanced_eval.py` with six tests and a methods section were built and committed
+  (Scripts effeb18) and the run queued; withdrawn before any training once Robert clarified. The dataset directory,
+  the launcher and its log were deleted and the scripts removed from the branch (7474de1).
 - The covariate floor (0.6627 mean, I10 0.6990) is an unpenalised logistic fit of the 12 covariates on the training
   split, scored on the tuning set; stated now in the comparator results.md and the blocks methods.md (Scripts 26f05e4)
   after Robert asked whether it was a network's covariate-only output.
-
-## 2026-11-18 (afternoon, UTC) — Readouts with block weights: --final_pool atten and flat in blocks mode
-
-- Robert asked whether the 431 blocks had weights of their own at the readout; they did not (LayerNorm then a mean).
-  `widedeepgp/model.py`: blocks mode accepts `--final_pool mean | atten | flat`. `atten`: one learned query per disease
-  (`pool_query` [n_labels, d], N(0, 1/d): uniform attention at the start) over the block tokens, each disease's logit the
-  shared FCN head applied to its own pooled vector plus the covariate vector (the diagonal of the head's outputs).
-  `flat`: `readout = Linear((n_blocks + 1) d, n_labels)` on the flattened tokens, PRSformer's readout, no FCN head.
-  `parameter_counts()["head"]` follows. Tests: `test_the_attention_readout_pools_each_disease_with_its_own_query`
-  (hooked tokens, manual attention, zero queries = the mean), `test_the_flat_readout_is_one_linear_map_from_every_token`,
-  `test_a_run_trains_with_each_readout`. Parser help updated.
-- Finding behind it: the trained fold-routed tables moved by 1% of their scale even at κ 1e-2 (table_eps 2.5e-7 throttles
-  a table at scale 0.35), so "trained = frozen" was not a test of training; the new trained run uses `--table_eps 1e-8`.
-  Design document item 17 (16 is the haploblock pre-test of another session). Three single runs (no search) launched from the new export: frozen atten, frozen flat, trained
-  mean κ 1e-2 eps 1e-8 (`runs/blocks_diag/run_diag_readouts.sh`).

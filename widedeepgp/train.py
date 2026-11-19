@@ -183,6 +183,21 @@ def predict_split(model, dm, split, device=None):
     return torch.cat(logits).numpy(), torch.cat(ys).numpy()
 
 
+@torch.no_grad()
+def cache_first_layer(model, dm, device):
+    """A frozen table without input masking gives each participant the same pooled vectors at every step: compute
+    them once, for the training and tuning splits, and the run's batches carry them instead of genotypes (methods.md
+    4.11). The test split is never cached. The random state is restored, so the run draws what a streamed run would."""
+    with torch.random.fork_rng(devices=[]):
+        model.to(device).eval()
+        for split in ("train", "val"):
+            sp = dm.splits[split]
+            sp["pooled"] = torch.cat([model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])[0]
+                                      .float().cpu() for b in dm._loader(dm._dataset(sp), False)])
+    model.train()
+    model.cached = True
+
+
 def file_digest(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -402,6 +417,16 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         print(f"resuming from {resume}", flush=True)
         check_resume_tables(resume, model.hp, model.loss_fn)
         check_resume_args(os.path.join(run_dir, "config.json"), cfg)
+    cache_seconds = None
+    if model.blocks and cfg.freeze_encoder and model.hp.get("init_encoder") and model.input_mask == 0:
+        if resume:                                       # the cache is built from this table, so the run must have had it
+            saved = torch.load(resume, map_location="cpu", weights_only=False)["state_dict"]
+            if any(not torch.equal(saved[f"encoder.tables.{i}"], t.detach().cpu()) for i, t in enumerate(model.encoder.tables)):
+                raise ValueError(f"cannot resume from {resume}: its fixed table differs from {cfg.init_encoder}")
+        t1 = time.time()
+        cache_first_layer(model, dm, "cuda" if torch.cuda.is_available() else "cpu")
+        cache_seconds = round(time.time() - t1, 1)
+        print(f"fixed first layer computed once for the training and tuning splits ({cache_seconds:.0f} s)", flush=True)
     n_snps = int(sum(dm.seq_len))
     n_params = sum(p.numel() for p in model.parameters())
     if model.blocks:                                     # the size axes: embedding parameters and Kaplan's N
@@ -419,7 +444,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
               "n_encoder_parameters": int(sum(p.numel() for p in (model.layers if model.blocks else model.encoders).parameters())),
               **({"blocks": blocks} if model.blocks else {}),
               "dataset_dir": os.path.abspath(dm.dir), "store_dir": os.path.abspath(dm.store_dir),
-              "covariates": dm.cov_names, "resumed": bool(resume),
+              "covariates": dm.cov_names, "resumed": bool(resume), "first_layer_cache_seconds": cache_seconds,
               "covariate_scaling": ({"mean": [float(v) for v in dm.cov_cm[0]], "sd": [float(v) for v in dm.cov_cs[0]]}
                                     if getattr(dm, "cov_cm", None) is not None else None),
               "snp_scaling": dm.snp_stats if dm.snp_mean is not None else "none",
@@ -488,5 +513,10 @@ def run_training(cfg, trial=None, extra_callbacks=()):
     logger.log_hyperparams(flat, {"hp/best_val_auroc_mean": out["best_val_auroc_mean"],
                                   "hp/best_val_bce_mean": out["val_mean"]["bce"]})
     logger.finalize("success")
+    if model.cached:                                     # what the run returns reads genotypes again
+        model.cached = False
+        for sp in dm.splits.values():
+            sp.pop("pooled", None)
+        dm.setup("fit")
     out["model"], out["datamodule"] = model, dm
     return out

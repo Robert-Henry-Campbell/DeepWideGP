@@ -573,8 +573,89 @@ def test_a_genotype_only_run_has_no_covariate_token(data_dir, tmp_path):
     assert not [k for k in ck if k.startswith(("covariate_encoder", "cov_norm"))]
     assert torch.equal(ck["encoder.tables.3"], state["tables.3"])                 # frozen copies, both folds
     assert out["best_val_auroc_mean"] > 0
+    assert config["first_layer_cache_seconds"] is None                   # masked (the recipe's 0.4): streamed
     rows = score_snapshots.main(["--run", out["run_dir"], "--split", "val", "--snapshots", "best", "--device", "cpu"])
     assert {r["snapshot"] for r in rows} == {"best", "covariates_only"}     # the floor is still reported beside it
+
+
+# ---- the cached first layer ---------------------------------------------------------------------
+def _frozen_init(dm, path, k=2, seed=5):
+    g = torch.Generator().manual_seed(seed)
+    state = {f"tables.{i}": torch.randn((k, 6, 4), generator=g) for i in range(CHROMS)}
+    manifest = {"kind": "ridge", "partition_digest": dm.partition["digest"], "snp_code": "dosage", "embed_dim": 4, "n_folds": k}
+    torch.save({"manifest": manifest, "state": state}, path)
+    return state
+
+
+def test_the_cache_holds_each_participants_first_layer_and_never_the_test_split(data_dir, tmp_path):
+    from widedeepgp.train import cache_first_layer
+    folds = _folds_file(data_dir, tmp_path / "folds.npz", k=2)
+    _, dm, model = _build(data_dir, folds=folds, eval_batch_size=50)
+    _frozen_init(dm, tmp_path / "init.pt")
+    model.encoder.load_init(str(tmp_path / "init.pt"), dm.partition["digest"], "dosage", freeze=True)
+    model.eval()
+    x_all, _ = _val_batch(dm)                                            # streamed: the first 24 tuning participants
+    with torch.no_grad():
+        want, logits = model.first_layer(x_all)[0], model(x_all)
+    rng = torch.get_rng_state()
+    cache_first_layer(model, dm, "cpu")
+    assert torch.equal(torch.get_rng_state(), rng)                       # a cached run draws what a streamed one would
+    assert model.cached and model.training and "pooled" not in dm.splits["test"]
+    for split in ("train", "val"):
+        assert dm.splits[split]["pooled"].shape == (len(dm.splits[split]["y"]), model.n_blocks, 4)
+    torch.testing.assert_close(dm.splits["val"]["pooled"][:24], want, rtol=1e-5, atol=1e-6)
+    ds = dm._dataset({k: v[:24] for k, v in dm.splits["val"].items()})
+    batch = ds[list(range(24))]
+    assert set(batch) == {"pooled", "y", "cov"}                          # no genotypes, no folds (already applied)
+    dm.num_workers = 3
+    assert dm._workers(ds) == 0 and dm._workers(dm._dataset(dm.splits["test"])) == 3
+    cached_x, _ = dm.on_after_batch_transfer(batch, 0)
+    assert len(cached_x) == 2                                            # the pooled vectors, the covariates
+    model.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(model(cached_x), logits, rtol=1e-5, atol=1e-5)
+    assert dm._dataset(dm.splits["test"]).pooled is None
+
+
+def test_a_frozen_unmasked_run_is_cached_trains_as_streamed_and_resumes_only_on_its_table(data_dir, tmp_path, monkeypatch):
+    """A frozen fold-routed table without input masking (the best top-rung configuration) is computed once per run;
+    the run's validations equal those of the same run streamed, and a streamed re-score of its best snapshot gives
+    back its record."""
+    import main_multilabel
+    import score_snapshots
+    from widedeepgp import train
+    folds = _folds_file(data_dir, tmp_path / "folds.npz", k=2)
+    _, dm, _ = _build(data_dir, folds=folds)
+    state = _frozen_init(dm, tmp_path / "init.pt")
+
+    def args(name, **over):
+        return _run_args(tmp_path, name, data_dir=data_dir, folds=folds, init_encoder=str(tmp_path / "init.pt"),
+                         input_mask=0, dropout=0.2, **over) + ["--freeze_encoder"]
+
+    out = main_multilabel.main(args("c"))
+    config = json.load(open(os.path.join(out["run_dir"], "config.json")))
+    assert config["first_layer_cache_seconds"] is not None and config["model"]["input_mask"] == 0
+    assert not out["model"].cached and all("pooled" not in sp for sp in out["datamodule"].splits.values())
+    assert out["datamodule"].snp_train.pooled is None                    # what the run returns streams again
+    ck = torch.load(out["best_checkpoint"], map_location="cpu", weights_only=False)["state_dict"]
+    assert torch.equal(ck["encoder.tables.3"], state["tables.3"])
+    rows = score_snapshots.main(["--run", out["run_dir"], "--split", "val", "--snapshots", "best", "--device", "cpu"])
+    rescored = {r["label"]: r["value"] for r in rows if r["snapshot"] == "best" and r["metric"] == "auroc" and r["label"] != "MEAN"}
+    assert rescored == pytest.approx({k: v["auroc"] for k, v in out["val"].items()}, abs=1e-6)
+
+    with monkeypatch.context() as m:                                     # the same run, streamed
+        m.setattr(train, "cache_first_layer", lambda model, dm, device: None)
+        streamed = main_multilabel.main(args("s"))
+    assert len(out["history"]) == len(streamed["history"]) >= 2
+    assert [h["val_auroc_mean"] for h in out["history"]] == pytest.approx(
+        [h["val_auroc_mean"] for h in streamed["history"]], abs=1e-6)
+
+    out2 = main_multilabel.main(args("c", max_epoch_equiv=2) + ["--resume"])
+    assert out2["samples_seen"] > out["samples_seen"]
+    assert json.load(open(os.path.join(out["run_dir"], "config.json")))["first_layer_cache_seconds"] is not None
+    _frozen_init(dm, tmp_path / "init.pt", seed=6)                       # the init file rewritten since
+    with pytest.raises(ValueError, match="fixed table differs"):
+        main_multilabel.main(args("c", max_epoch_equiv=3) + ["--resume"])
 
 
 # ---- readouts -----------------------------------------------------------------------------------

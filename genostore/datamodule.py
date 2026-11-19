@@ -112,11 +112,12 @@ def load_partition(spec, store, regions):
 class StoreBatchDataset(Dataset):
     """Indexing with a *list of sample indices* returns that whole batch, still encoded."""
 
-    def __init__(self, store_dir, regions, rows, cov, y, fold=None):
+    def __init__(self, store_dir, regions, rows, cov, y, fold=None, pooled=None):
         self.store_dir, self.regions = store_dir, regions
         self.rows = np.asarray(rows, dtype=np.int64)
         self.cov = None if cov is None else np.ascontiguousarray(cov, dtype=np.float32)
         self.fold = None if fold is None else np.asarray(fold, dtype=np.int64)
+        self.pooled = pooled                       # a frozen first layer's output [N, n_blocks, d_e], sent instead of genotypes
         y = np.asarray(y, dtype=np.float32)
         self.y = y[:, None] if y.ndim < 2 else y
         self._gs = None
@@ -125,21 +126,25 @@ class StoreBatchDataset(Dataset):
         return len(self.rows)
 
     def __getitem__(self, batch_idx):
-        if self._gs is None:                       # one reader per (worker) process
-            self._gs = GenoStore(self.store_dir)
         target = None
         if isinstance(batch_idx, tuple):           # a sampler that balances on one label says which
             target, batch_idx = batch_idx
         bi = np.asarray(batch_idx, dtype=np.int64).reshape(-1)
-        rows = self.rows[bi]
-        geno = []
-        for seq in self.regions:
-            segs = []
-            for c, v0, v1 in seq:
-                r = self._gs.read_raw(c, rows, v0, v1)
-                segs.append([_as_tensor(a) for a in (r.full, r.full_ovr, r.tail, r.tail_ovr)])
-            geno.append(segs)
-        out = {"geno": geno, "y": torch.from_numpy(self.y[bi])}
+        if self.pooled is not None:
+            out = {"pooled": self.pooled[torch.from_numpy(bi)]}
+        else:
+            if self._gs is None:                   # one reader per (worker) process
+                self._gs = GenoStore(self.store_dir)
+            rows = self.rows[bi]
+            geno = []
+            for seq in self.regions:
+                segs = []
+                for c, v0, v1 in seq:
+                    r = self._gs.read_raw(c, rows, v0, v1)
+                    segs.append([_as_tensor(a) for a in (r.full, r.full_ovr, r.tail, r.tail_ovr)])
+                geno.append(segs)
+            out = {"geno": geno}
+        out["y"] = torch.from_numpy(self.y[bi])
         if self.cov is not None:
             out["cov"] = torch.from_numpy(self.cov[bi])
         if self.fold is not None:
@@ -376,13 +381,16 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def decode_batch(self, batch):
         """Encoded batch (already on the target device) -> (x_all, y) exactly as the model expects."""
         y = batch["y"]
-        dev = y.device
-        if self.snp_mean is not None and dev not in self._dev:
-            self._dev[dev] = ([torch.from_numpy(m).to(dev) for m in self.snp_mean],
-                              [torch.from_numpy(s).to(dev) for s in self.snp_inv_std])
-        mean, inv = self._dev.get(dev, (None, None))
-        x_all = [td.to_model_input(q, None if mean is None else mean[k], None if inv is None else inv[k])
-                 for k, q in enumerate(self.decode_q(batch["geno"]))]
+        if "pooled" in batch:                      # a cached first layer's output: nothing to decode
+            x_all = [batch["pooled"]]
+        else:
+            dev = y.device
+            if self.snp_mean is not None and dev not in self._dev:
+                self._dev[dev] = ([torch.from_numpy(m).to(dev) for m in self.snp_mean],
+                                  [torch.from_numpy(s).to(dev) for s in self.snp_inv_std])
+            mean, inv = self._dev.get(dev, (None, None))
+            x_all = [td.to_model_input(q, None if mean is None else mean[k], None if inv is None else inv[k])
+                     for k, q in enumerate(self.decode_q(batch["geno"]))]
         if self.data_mode == "snps_covs":
             x_all.append(batch["cov"])
         if "fold" in batch:                       # last: the model's blocks mode pops it (fold-routed tables)
@@ -392,7 +400,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         return x_all, y
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
-        return self.decode_batch(batch) if isinstance(batch, dict) and "geno" in batch else batch
+        return self.decode_batch(batch) if isinstance(batch, dict) and ("geno" in batch or "pooled" in batch) else batch
 
     def annotations(self):
         """Per-SNP annotation vectors named by store.json, one float32 array [L_i, A] per input
@@ -416,12 +424,17 @@ class SNPStoreDataModule(pl.LightningDataModule):
 
     def _dataset(self, sp):
         cov = sp["cov"] if self.data_mode == "snps_covs" else None
-        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"], sp.get("fold"))
+        pooled = sp.get("pooled")                  # set by train.cache_first_layer: the folds are already applied
+        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"],
+                                 None if pooled is not None else sp.get("fold"), pooled)
+
+    def _workers(self, ds):
+        return 0 if ds.pooled is not None else self.num_workers        # indexing a tensor in memory needs no workers
 
     def _loader(self, ds, shuffle):
         size = self.batch_size if shuffle else self.eval_batch_size      # evaluation holds no gradients: it can be larger
         sampler = BatchSampler(RandomSampler(ds) if shuffle else SequentialSampler(ds), size, drop_last=False)
-        return DataLoader(ds, sampler=sampler, batch_size=None, num_workers=self.num_workers)
+        return DataLoader(ds, sampler=sampler, batch_size=None, num_workers=self._workers(ds))
 
     def setup(self, stage: str):
         if stage == "fit":
@@ -434,7 +447,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         if self.train_sampler is not None:        # yields whole batches (optionally with a target label)
             return DataLoader(self.snp_train, sampler=self.train_sampler, batch_size=None,
-                              num_workers=self.num_workers)
+                              num_workers=self._workers(self.snp_train))
         return self._loader(self.snp_train, True)
 
     def val_dataloader(self):

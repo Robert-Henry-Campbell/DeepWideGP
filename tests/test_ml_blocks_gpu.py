@@ -49,6 +49,23 @@ def test_both_mixers_train_a_step_in_bf16(data_dir, mixer):
 
 
 @gpu
+def test_a_cached_first_layer_gives_the_streamed_logits_in_bf16(data_dir):
+    """A frozen table without masking is computed once per run (train.cache_first_layer), in bf16 as streaming does."""
+    from widedeepgp.train import cache_first_layer, predict_split
+    _, dm, model = _build(data_dir, mixer="transformer", precision="bf16", input_mask=0.0, eval_batch_size=64)
+    with torch.no_grad():
+        for t in model.encoder.tables:
+            t.normal_()
+            t.requires_grad_(False)
+    model.cuda()
+    streamed, y = predict_split(model, dm, "val", "cuda")
+    cache_first_layer(model, dm, "cuda")
+    cached, y2 = predict_split(model, dm, "val", "cuda")
+    assert model.cached and dm.splits["val"]["pooled"].dtype == torch.float32 and np.array_equal(y, y2, equal_nan=True)
+    np.testing.assert_allclose(cached, streamed, rtol=1e-3, atol=1e-3)
+
+
+@gpu
 @pytest.mark.parametrize("mixer", MIXERS)
 def test_activation_checkpointing_changes_nothing(data_dir, mixer):
     grads = []

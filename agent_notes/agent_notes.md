@@ -1405,3 +1405,30 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   c0eee06, `widedeepgp-blocks/methods.md` item 20 and `classic-deepgp-comparator/methods.md` "Without covariates";
   launcher `chains/run_nocov.sh` → `runs/nocov/` (copy, log, frozen code `code_<commit>`), runs
   `classic_i10_n215872_nocov` and `blocks_S3_folds_frozen_nomask_nocov`.
+
+## 2026-11-19 (late evening, UTC) — A fixed first layer computed once per run (Robert: "caching for frozen table runs")
+
+- Why: the best top-rung configuration (frozen fold-routed ridge table, no input mask) read and multiplied 1.26 M dosages
+  per participant at every step and every validation, about 3 h for 10 epoch-equivalents. Measured on an idle GPU with
+  random inputs at the real sizes: the fold-routed pool is 66 of the 97 ms of a bare batch-64 step; the real training
+  loop without the first layer runs 0.047 s a step (synthetic store) against 0.26 s in `diag_S3_folds_frozen_nomask`.
+- Code: `widedeepgp/train.py` `cache_first_layer(model, dm, device)`: one streamed pass over the training and tuning
+  splits through the model's own first layer (no_grad, float32 in host memory, test split never), with the random state
+  restored (`torch.random.fork_rng`) so the run draws what a streamed run would. `run_training` calls it when blocks
+  mode, `--init_encoder`, `--freeze_encoder` and `--input_mask 0`; refuses a resume whose checkpoint table differs from
+  the model's (an init file rewritten in between); records `first_layer_cache_seconds` in `config.json` (null when
+  streamed); at the end drops the cache and sets the data module up again, so the returned model and data module stream.
+  `widedeepgp/model.py`: `first_layer(x_all)` (fold pop, masking, pooling, split out of `_block_logits`) returns the
+  pooled vectors and the inputs left; `cached` flag. `genostore/datamodule.py`: `StoreBatchDataset(pooled=...)` sends
+  `{"pooled", "y", "cov"}` (no genotypes, no folds); `decode_batch` passes them through; `_workers` (0 for a cached set).
+- Tests: `test_ml_blocks.py::test_the_cache_holds_each_participants_first_layer_and_never_the_test_split`,
+  `::test_a_frozen_unmasked_run_is_cached_trains_as_streamed_and_resumes_only_on_its_table` (the same run streamed gives
+  the same validations to 1e-6; the streamed re-score of the best snapshot gives back the record to 1e-6; a resume on the
+  same table runs, one on a rewritten init file is refused); the genotype-only test now asserts that its masked run is not
+  cached; `test_ml_blocks_gpu.py::test_a_cached_first_layer_gives_the_streamed_logits_in_bf16`. Mutation check in a
+  scratch copy: reversing the cache's rows, or dropping the random-state restore, fails both CPU tests. Full CPU suite
+  with CUDA hidden: 243 passed, 2 failed, both needing a GPU (`test_ml_train.py::test_a_genotype_only_model_trains_without_covariate_parameters`,
+  SNP mode's Mamba; `test_synthetic_1causal_10case.py`, the legacy script asks for a GPU), both passing when rerun on
+  GPU 4 (869 s; the legacy test's outputs were then removed and its tracked `preds.pkl` restored); GPU file: 8 passed.
+- Methods 4.11 ("A fixed first layer is computed once per run") and section 12; README flag row; plan
+  `~/.claude/plans/first-layer-cache.md`. Real-data check from a frozen copy: `runs/cache_check/run_check.sh`.

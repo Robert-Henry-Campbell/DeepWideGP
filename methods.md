@@ -567,6 +567,25 @@ gradients unchanged; `tests/test_ml_blocks_gpu.py` checks it on the GPU, and req
 planned transformer, d = 256 with 8 layers, over 2,001 tokens to train a batch of 128 in under
 40 GiB).
 
+**A fixed first layer is computed once per run (19 November 2026).** With the table frozen
+(`--init_encoder` with `--freeze_encoder`) and no SNPs masked (`--input_mask 0`), a participant's
+pooled block vectors are the same at every step, yet a streamed run reads and multiplies their
+1.26 million dosages at every step and every validation. Such a run therefore computes the vectors
+once, before training, for the training and tuning splits, in one streamed pass through the
+model's own first-layer code (the same fold copies, bf16 products and block scaling, kept in
+32-bit), and its batches then carry the vectors instead of genotypes (`train.cache_first_layer`;
+`config.json` records `first_layer_cache_seconds`, null for a streamed run). Batch order, labels,
+covariates, dropout, validation and snapshots are unchanged, and the random state is restored
+after the pass, so a cached run draws what the streamed run would. The test split is never cached.
+The vectors are held in memory (4 × 431 × 16 bytes a participant: 6.0 GB for the 215,872 training
+and 0.55 GB for the 20,000 tuning participants at the top rung) and dropped when the run ends;
+nothing is written to disk. `score_snapshots.py` still streams, so its scoring of a cached run's
+snapshots is an independent check of every cached run. A resume is refused when the checkpoint's
+table differs from the one the cache was built from (an init file rewritten in between). Masked
+and trained-table runs stream as before. Measured on the S3 model at a batch of 64: about 0.05 s
+a training step instead of 0.26 s (wall), a validation in seconds instead of about 30 s, plus one
+pass of 5 to 10 minutes to build the cache.
+
 **The partition and its digest.** `--partition` names a `partition.npz`, or its folder, under
 `data/reference/partitions/` (the layout of the design document, section 5: the store's
 chromosome names and variant counts, a sha256 of its variant IDs, and the global block id of
@@ -1277,7 +1296,11 @@ stage alone, records the new scalars in `search.json`, searches the table's pace
 the chosen settings with seed 2 reproduces the trial's model settings (only the seed, the run's
 name and the GPU list differ); masked pretraining lowers its loss on the synthetic store, writes
 the file owner-only with the expected entries, a run starts from it with `--freeze_encoder` and
-the file is refused for another partition; `main_multilabel.py`'s defaults are blocks mode,
+the file is refused for another partition; a frozen table without input masking is computed once
+(the cache equals the first layer's output, holds no test participant and leaves the random state
+as it was; a cached run's validations equal those of the same run streamed, the streamed re-score
+of its best snapshot gives back its record, its returned model and data module stream again, a
+masked run is not cached, and a resume whose table has changed is refused); `main_multilabel.py`'s defaults are blocks mode,
 `--wide off`, the warm-up and cosine recipe and `--final_pool mean` (`atten` in SNP mode). Its
 learning check trains the blocks model for three passes on a synthetic six-trait dataset of
 3,000 participants and asks only for mechanics: three recorded passes, a training loss that does
@@ -1286,8 +1309,9 @@ the E0 gate's question, section 4.11). `tests/test_ml_blocks_gpu.py`, on a GPU: 
 in bf16 with finite, non-zero table gradients and float32 master weights; activation
 checkpointing leaves the loss and the gradients of the table and the mixer unchanged (to 10⁻³);
 the largest planned model (d = 256, 8 transformer layers, or 14 Mamba layers) over 2,001 tokens
-at a batch of 128 peaks below 40 GiB; and the mixer parameter counts of the planned sizes are
-printed, with the transformer's S3 within 5% of 12 L d².
+at a batch of 128 peaks below 40 GiB; the mixer parameter counts of the planned sizes are
+printed, with the transformer's S3 within 5% of 12 L d²; and a cached first layer gives the
+streamed logits in bf16 (to 10⁻³).
 
 ## 13. Software and reproduction
 

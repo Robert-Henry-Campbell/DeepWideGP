@@ -1361,3 +1361,17 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   Written to the comparator results.md with both trajectories per epoch-equivalent; the methods item on comparability
   corrected (average precision compares on the same tuning set; only cross-entropy and calibration do not) in Scripts
   `widening` d9d9752. No model code changed.
+
+## 2026-11-19 (night, UTC) — Haploblock pre-test result: not built (Scripts only; no model code changed)
+
+- Chromosome 22 phased in 6.8 h on ten threads (68 CPU-hours; the first iteration had suggested twice that);
+  nine haploblock cells cut; the primary cell (f = 1%, c = 95%) gives 1,038 haploblocks with a median of
+  12 common haplotypes (not the assumed 3 to 10) and 0.74 features per SNP, so the table was affordable.
+- The haplotype ridge carries 23% less additive signal than the SNP ridge on the same Privé blocks, folds
+  and residualised labels (pooled r −0.0015 [−0.0021, −0.0008] on the 215,872 out-of-fold training rows,
+  22 of 30 diseases below zero, none above; ΔAUROC −0.00008 [−0.00014, −0.00002]); the ridge on both
+  feature sets adds at most 1.4% of the SNP ridge's correlation. Under the pre-stated rule the haploblock
+  first layer is not built. Robert stopped the two ridge sensitivity cells and asked for the same
+  comparison under clumping and thresholding (every haplotype column a pseudo-SNP, the PGI arm's r² and
+  threshold grid, candidate chosen on the out-of-fold training AUROC): `compare_ct.py`, methods section 9,
+  running at 01:06Z. Scripts `widening` 5136631; results and figure in `widedeepgp-haploblocks/results.md`.

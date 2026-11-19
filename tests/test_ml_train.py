@@ -59,19 +59,25 @@ def test_the_multi_disease_entry_points_scale_snps_on_the_training_split():
     assert args_initial(["--label", "x"]).snp_stats == "store"         # main_genome.py keeps the parser's default
 
 
-def test_a_genotype_only_model_is_refused(tmp_path):
-    """WideDeepGP always uses the covariates (methods.md, section 11)."""
+def test_a_genotype_only_model_trains_without_covariate_parameters(tmp_path):
+    """--dm snps, or --use_cov (which switches them off): no covariate encoder or vector (methods.md, section 11)."""
     from widedeepgp.train import run_training
     data_dir, _ = synthetic_dataset(tmp_path, n=600, snps=66)
-    for over in ({"dm": "snps"}, {"use_cov": False}):
-        with pytest.raises(ValueError, match="genotype-only model"):
-            run_training(_tiny(tmp_path, data_dir, "x", **over))
+    for name, over in (("a", {"dm": "snps"}), ("b", {"use_cov": False})):
+        out = run_training(_tiny(tmp_path, data_dir, name, **over))
+        config = json.load(open(os.path.join(out["run_dir"], "config.json")))
+        assert config["model"]["use_cov"] is False and config["args"]["dm"] == "snps"
+        state = torch.load(out["best_checkpoint"], map_location="cpu", weights_only=False)["state_dict"]
+        assert not [k for k in state if k.startswith(("covariate_encoder", "cov_norm"))]
+        assert state["combine.layers.0.weight"].shape[1] == 22 * 16         # the head reads the 22 chromosome vectors alone
+        assert out["best_val_auroc_mean"] > 0
     spec_path = os.path.join(data_dir, "multi", "store", "store.json")
     spec = json.load(open(spec_path))
-    json.dump(dict(spec, covariates=[]), open(spec_path, "w"))
+    json.dump(dict(spec, covariates=[]), open(spec_path, "w"))             # a dataset without covariates
     with pytest.raises(ValueError, match="names no covariates"):
-        run_training(_tiny(tmp_path, data_dir, "x"))
-    assert not os.path.exists(tmp_path / "runs")                        # refused before anything was written
+        run_training(_tiny(tmp_path, data_dir, "c"))
+    assert not os.path.exists(tmp_path / "runs" / "t" / "c")                # refused before anything was written
+    assert run_training(_tiny(tmp_path, data_dir, "d", dm="snps"))["best_val_auroc_mean"] > 0
 
 
 def test_best_is_the_checkpoint_results_json_names(tmp_path):

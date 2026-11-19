@@ -366,14 +366,13 @@ def write_per_disease(model, dm, run_dir, config, step, device):
 def run_training(cfg, trial=None, extra_callbacks=()):
     """Train one model. Returns a dict with the run directory, the best mean validation AUROC,
     per-label validation metrics of the best checkpoint and the validation history."""
-    if cfg.dm != "snps_covs" or not cfg.use_cov:
-        raise ValueError("WideDeepGP always uses the covariates: a genotype-only model (--dm snps, or --use_cov, "
-                         "which switches the covariates off) is not offered")
+    if not cfg.use_cov:                                  # one switch: the data module then sends no covariates
+        cfg.dm = "snps"
     t0 = time.time()
     pl.seed_everything(int(cfg.seed), workers=True)
     dm = build_data(cfg)
-    if dm.n_cov == 0:
-        raise ValueError(f"{dm.dir}/store.json names no covariates; WideDeepGP always uses them")
+    if dm.n_cov == 0 and cfg.dm == "snps_covs":
+        raise ValueError(f"{dm.dir}/store.json names no covariates; pass --dm snps for a genotype-only model")
     y_train = train_labels(dm)
     n_train = len(y_train)
     sched = schedule(cfg, n_train)

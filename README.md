@@ -211,6 +211,7 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 | Flag | Meaning | Default |
 |---|---|---|
 | `--input_mode` | `blocks`: a per-SNP table pooled by LD block, then one mixer over the block tokens and the covariate token; `snps`: the published per-chromosome SNP encoders | `blocks` |
+| `--dm` | `snps_covs`: genotypes and the covariates (the covariate token and vector); `snps`: the genotype-only model, with no covariate parameters | `snps_covs` |
 | `--partition` | blocks mode: a `partition.npz` or its folder (`data/reference/partitions/prive431`, `ldsplit2000`, `ldsplit5000`), checked against the store's chromosomes, variant counts and variant IDs; `uniform:<k>` (k SNPs per block) for tests | none (required in blocks mode) |
 | `--mixer` | `bimamba1` (the published block), `transformer` (a pre-norm `nn.TransformerEncoderLayer`, feed-forward width 4d, GELU) or `mamba3` (needs `scripts/setup_mamba3_env.sh`) | `bimamba1` |
 | `--snp_code` | blocks mode: `dosage` (one vector per SNP times its standardised dosage) or `genotype` (three vectors per SNP, for 0, 1 and 2 copies, interpolated; reads raw dosages) | `dosage` |

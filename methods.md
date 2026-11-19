@@ -528,7 +528,9 @@ Privé partition) runs through `--e_layers` layers of the mixer: the published b
 block of section 4.3 (`--mixer bimamba1`) or a pre-norm transformer encoder layer
 (`--mixer transformer`: `torch.nn.TransformerEncoderLayer` with `--n_heads` heads, a feed-forward
 layer of width 4*d*, GELU and dropout `--dropout`), then a final layer normalisation (of the
-residual sum, for the Mamba block). `--d_model` and `--e_layers` set the mixer's size.
+residual sum, for the Mamba block). `--d_model` and `--e_layers` set the mixer's size. With
+`--dm snps` (the genotype-only model) there is no covariate token or vector: the sequence is the
+block tokens alone and the head reads their mean alone.
 
 **The head.** Three readouts (`--final_pool`). `mean`, the default: the mean over the tokens,
 concatenated with the covariate vector, feeds the head of section 4.7 (`combine`: a shared hidden
@@ -1196,9 +1198,11 @@ pass, so no run has used this option.
 Two published options do not run: the parser's default pooling (`--final_pool concat`) and the
 SNP-only mode (`--dm snps`), which names a class that is not in the repository. WideDeepGP does
 not offer them either: its entry points replace `concat` with `atten`, the pooling of the
-published configuration (`mean` and `last` are also supported), and training stops with an
-error when a model without covariates is asked for (`--dm snps`, or `--use_cov`, which switches
-the covariates off) or the dataset names no covariates.
+published configuration (`mean` and `last` are also supported), and `--dm snps` (or `--use_cov`,
+which switches the covariates off) trains the genotype-only model in place of the missing class:
+no covariate encoder, token or vector, the head reading the genotype path alone (allowed since
+19 November 2026, for the no-covariate comparison at the top rung; before that the run was refused).
+A dataset that names no covariates is refused unless `--dm snps` is passed.
 
 ## 12. Tests
 

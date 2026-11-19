@@ -550,6 +550,33 @@ def test_a_fold_routed_run_trains_snapshots_scores_and_resumes(data_dir, tmp_pat
         main_multilabel.main(_run_args(tmp_path, "rf", data_dir=data_dir) + ["--resume"])      # one copy now: refused
 
 
+def test_a_genotype_only_run_has_no_covariate_token(data_dir, tmp_path):
+    """--dm snps (the no-covariate comparison of 19 November 2026): the block tokens alone through the mixer, the head
+    on their mean, no covariate parameters; here with a frozen fold-routed first layer, as that comparison runs."""
+    import main_multilabel
+    import score_snapshots
+    folds = _folds_file(data_dir, tmp_path / "folds.npz", k=2)
+    _, dm, _ = _build(data_dir, dm="snps", folds=folds)
+    x_all, _ = _val_batch(dm)
+    assert len(x_all) == CHROMS + 1                              # the sequences and the fold index; no covariate matrix
+    state = {f"tables.{i}": torch.randn(2, 6, 4) for i in range(CHROMS)}
+    manifest = {"kind": "ridge", "partition_digest": dm.partition["digest"], "snp_code": "dosage", "embed_dim": 4, "n_folds": 2}
+    torch.save({"manifest": manifest, "state": state}, tmp_path / "init.pt")
+    out = main_multilabel.main(_run_args(tmp_path, "g", data_dir=data_dir, dm="snps", folds=folds,
+                                         init_encoder=str(tmp_path / "init.pt")) + ["--freeze_encoder"])
+    config = json.load(open(os.path.join(out["run_dir"], "config.json")))
+    b = config["blocks"]
+    assert config["model"]["use_cov"] is False and config["args"]["dm"] == "snps" and config["model"]["freeze_encoder"]
+    assert b["n_tokens"] == b["n_blocks"] == 66 and b["n_parameters_by_module"]["covariates"] == 0
+    assert b["n_parameters_by_module"]["head"] == 8 * 256 + 256 + 256 * 6 + 6     # FCN(d, 6): the mean alone goes in
+    ck = torch.load(out["best_checkpoint"], map_location="cpu", weights_only=False)["state_dict"]
+    assert not [k for k in ck if k.startswith(("covariate_encoder", "cov_norm"))]
+    assert torch.equal(ck["encoder.tables.3"], state["tables.3"])                 # frozen copies, both folds
+    assert out["best_val_auroc_mean"] > 0
+    rows = score_snapshots.main(["--run", out["run_dir"], "--split", "val", "--snapshots", "best", "--device", "cpu"])
+    assert {r["snapshot"] for r in rows} == {"best", "covariates_only"}     # the floor is still reported beside it
+
+
 # ---- readouts -----------------------------------------------------------------------------------
 def _hooked(model, x_all):
     """The model's logits with the mixer's normalised tokens and the covariate vector caught on the way."""

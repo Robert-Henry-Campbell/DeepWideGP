@@ -1379,3 +1379,25 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   the SNP score (pooled r −0.0010 [−0.0017, −0.0003] on the out-of-fold rows, 21 of 30 below zero), the union
   adds at most 3.4%; clumping at r² 0.1 removes 83% of SNP columns but only 52% of haplotype columns. Two
   estimators, one answer: not built. Scripts `widening`, results.md section 5.
+
+## 2026-11-19 (early morning, UTC) — The genotype-only model allowed (`--dm snps`), for the no-covariate comparison
+
+- Robert asked for a top-rung comparison with no covariates: the classic DeepGP for I10 and WideDeepGP as its best run so
+  far (`runs/blocks_diag/diag_S3_folds_frozen_nomask`: S3 transformer, fold-routed ridge warm start of the table frozen,
+  mean readout, no input mask, dropout 0.2, 30 diseases). `run_training` refused a genotype-only model (`--dm snps`, or
+  `--use_cov`, which switches the covariates off) although the model already had the branches: in blocks mode the sequence
+  becomes the block tokens alone and the head reads their mean alone; in SNP mode the 22 chromosome vectors alone go
+  through the attention pooling. `widedeepgp/train.py`: the guard is gone; `--use_cov` now sets `--dm snps` (one switch,
+  so the data module sends no covariate matrix: with `--dm snps_covs` and `use_cov` off, blocks mode would have read the
+  covariate matrix as a SNP sequence); a dataset that names no covariates is refused unless `--dm snps` is passed.
+  `config.json` records `dm: snps`, `model.use_cov: false`, `blocks.n_tokens == n_blocks` and zero covariate parameters.
+- Tests: `test_ml_train.py::test_a_genotype_only_model_trains_without_covariate_parameters` (both switches, SNP mode:
+  no `covariate_encoder`/`cov_norm` weights, the head's input is 22 × d; the no-covariate dataset refused with covariates
+  on and trained with `--dm snps`) replaces the refusal test; `test_ml_blocks.py::test_a_genotype_only_run_has_no_covariate_token`
+  (blocks mode with a frozen fold-routed init file, as launched: 66 tokens, head FCN(d, 6), batches without a covariate
+  matrix, frozen copies unchanged, `score_snapshots.py` still reports the covariates-only model beside it). Both pass
+  (403 s on the CPU at machine load 76); the rest of the two files was running when this was written.
+- Methods 4.11 (mixer paragraph) and section 11, README flag table (`--dm`). Design and yardsticks: Scripts `widening`
+  c0eee06, `widedeepgp-blocks/methods.md` item 20 and `classic-deepgp-comparator/methods.md` "Without covariates";
+  launcher `chains/run_nocov.sh` → `runs/nocov/` (copy, log, frozen code `code_<commit>`), runs
+  `classic_i10_n215872_nocov` and `blocks_S3_folds_frozen_nomask_nocov`.

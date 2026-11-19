@@ -1375,3 +1375,7 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   comparison under clumping and thresholding (every haplotype column a pseudo-SNP, the PGI arm's r² and
   threshold grid, candidate chosen on the out-of-fold training AUROC): `compare_ct.py`, methods section 9,
   running at 01:06Z. Scripts `widening` 5136631; results and figure in `widedeepgp-haploblocks/results.md`.
+- Clumping-and-thresholding comparison done (02:11Z, 65 min): the haplotype score carries 13% less signal than
+  the SNP score (pooled r −0.0010 [−0.0017, −0.0003] on the out-of-fold rows, 21 of 30 below zero), the union
+  adds at most 3.4%; clumping at r² 0.1 removes 83% of SNP columns but only 52% of haplotype columns. Two
+  estimators, one answer: not built. Scripts `widening`, results.md section 5.

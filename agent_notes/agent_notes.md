@@ -1432,3 +1432,14 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   GPU 4 (869 s; the legacy test's outputs were then removed and its tracked `preds.pkl` restored); GPU file: 8 passed.
 - Methods 4.11 ("A fixed first layer is computed once per run") and section 12; README flag row; plan
   `~/.claude/plans/first-layer-cache.md`. Real-data check from a frozen copy: `runs/cache_check/run_check.sh`.
+
+## 2026-11-19 (23:40 UTC) — The first-layer cache checked on the top rung (d05e545; Scripts and runs only otherwise)
+
+- `runs/cache_check/run_check.sh` from `code_d05e545` on GPU 4, summary `runs/cache_check/check_summary.md`: the best
+  snapshot of `blocks_diag/diag_S3_folds_frozen_nomask` re-scored from the cache gives its recorded tuning AUROC exactly
+  (0.67351, largest per-disease difference 0); the same configuration trained 1 epoch-equivalent with the cache
+  (`S3_folds_frozen_nomask_cached_1ee`) follows the original's four validations within 0.0002 (0.6527/0.6587/0.6619/0.6664
+  against 0.6526/0.6587/0.6621/0.6665); its streamed re-score (`score_snapshots.py`) gives back its record exactly.
+  Speed: 0.030 s wall a step against 0.26 s, a validation 0.7 s against ~30 s, the cache 116 s to build (6.06 GiB), 257 s
+  for the whole 1 epoch-equivalent run; GPU peaks 0.75 GiB training and 1.17 GiB validation (streamed 1.05 and 6.8).
+  The check run's weights were deleted afterwards (5 GB; records kept). Methods 4.11 updated with these numbers.

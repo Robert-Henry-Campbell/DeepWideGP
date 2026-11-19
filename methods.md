@@ -582,9 +582,14 @@ and 0.55 GB for the 20,000 tuning participants at the top rung) and dropped when
 nothing is written to disk. `score_snapshots.py` still streams, so its scoring of a cached run's
 snapshots is an independent check of every cached run. A resume is refused when the checkpoint's
 table differs from the one the cache was built from (an init file rewritten in between). Masked
-and trained-table runs stream as before. Measured on the S3 model at a batch of 64: about 0.05 s
-a training step instead of 0.26 s (wall), a validation in seconds instead of about 30 s, plus one
-pass of 5 to 10 minutes to build the cache.
+and trained-table runs stream as before. Checked on the top rung (`runs/cache_check`, 19 November
+2026, the frozen no-mask S3 configuration): re-scored from the cache, the best snapshot of the
+streamed run gives back its tuning AUROC exactly (0.67351, every disease identical); the same
+configuration trained for one epoch-equivalent with the cache follows the streamed run's four
+validations within 0.0002 (the seed spread is 0.0003); and the streamed re-score of its best
+snapshot gives back its record exactly. A training step takes 0.030 s of wall time instead of
+0.26 s, a validation 0.7 s instead of about 30 s, and building the cache about 2 minutes (6.1 GiB);
+a 10 epoch-equivalent run takes about 20 minutes instead of 3 hours.
 
 **The partition and its digest.** `--partition` names a `partition.npz`, or its folder, under
 `data/reference/partitions/` (the layout of the design document, section 5: the store's

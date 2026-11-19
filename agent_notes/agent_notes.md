@@ -1396,7 +1396,11 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   on and trained with `--dm snps`) replaces the refusal test; `test_ml_blocks.py::test_a_genotype_only_run_has_no_covariate_token`
   (blocks mode with a frozen fold-routed init file, as launched: 66 tokens, head FCN(d, 6), batches without a covariate
   matrix, frozen copies unchanged, `score_snapshots.py` still reports the covariates-only model beside it). Both pass
-  (403 s on the CPU at machine load 76); the rest of the two files was running when this was written.
+  (403 s on the CPU at machine load 76), and the two files pass in full (55 passed, 3 slow deselected, 636 s). Slip: that
+  detached pytest run set no CUDA_VISIBLE_DEVICES, so its GPU-marked tests ran on GPU 0, another user's; set it before any pytest run.
+- Launched 03:25Z from `runs/nocov/code_24eac29`: the classic run took GPU 4 at 03:34Z (config.json: `dm snps`, `use_cov false`,
+  438,433 parameters against 458,209 with the covariates); the blocks run waits for a second free GPU among 2 to 4 (GPU 2
+  holds another session's `additive_large` run and a container job; GPU 3 is free).
 - Methods 4.11 (mixer paragraph) and section 11, README flag table (`--dm`). Design and yardsticks: Scripts `widening`
   c0eee06, `widedeepgp-blocks/methods.md` item 20 and `classic-deepgp-comparator/methods.md` "Without covariates";
   launcher `chains/run_nocov.sh` → `runs/nocov/` (copy, log, frozen code `code_<commit>`), runs

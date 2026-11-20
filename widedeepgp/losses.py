@@ -27,13 +27,17 @@ def label_counts(train_labels):
 
 class WideLoss(nn.Module):
     def __init__(self, train_labels=None, gamma=0.5, w_max=20.0, sampler="rotation", correction=True, outputs="all",
-                 counts=None, case_share=0.5):
+                 counts=None, case_share=0.5, label_norm="none"):
         """Give the training label matrix or its ``counts`` (label_counts), which are all the loss
         needs and small enough to keep with a saved model. case_share: the share of a rotation
-        batch drawn from its target's cases (samplers.cases_per_batch)."""
+        batch drawn from its target's cases (samplers.cases_per_batch). label_norm "entropy": each
+        label's loss is divided by the entropy of its training prevalence, H(pi_j), so every label's
+        term starts near 1 whatever its prevalence."""
         super().__init__()
         if outputs not in ("all", "target"):
             raise ValueError("outputs must be 'all' or 'target'")
+        if label_norm not in ("none", "entropy"):
+            raise ValueError("label_norm must be 'none' or 'entropy'")
         if outputs == "target" and sampler != "rotation":
             raise ValueError("outputs='target' needs the rotation sampler, which names a target per batch")
         if counts is None:
@@ -53,6 +57,9 @@ class WideLoss(nn.Module):
         self.register_buffer("rate_case", t(rate_case))
         self.register_buffer("rate_ctrl", t(rate_ctrl))
         self.register_buffer("logit_shift", t(np.log(c1)))
+        entropy = -(pi * np.log(pi) + (1.0 - pi) * np.log(1.0 - pi))
+        self.register_buffer("norm", t(1.0 / entropy if label_norm == "entropy" else np.ones_like(pi)))
+        self.label_norm = label_norm
         self.n_labels = len(n1)
         self.case_share = s
         self.sampler, self.correction, self.outputs = sampler, bool(correction), outputs
@@ -77,9 +84,9 @@ class WideLoss(nn.Module):
             # the batch is a case-control sample for label t only: weight it back to the population
             back = torch.where(y0[:, t] > 0.5, 1.0 / self.rate_case[t], 1.0 / self.rate_ctrl[t])
             per_label = torch.zeros(self.n_labels, device=logits.device)
-            per_label[t] = (w[:, t] * back * bce[:, t]).sum() / (batch * self.z[t])
+            per_label[t] = (w[:, t] * back * bce[:, t]).sum() / (batch * self.z[t]) * self.norm[t]
             return per_label[t], per_label.detach()
         if self.sampler == "rotation" and self.correction:
             w = w / self.omega(y0, mask).clamp_min(1e-12).unsqueeze(1)
-        per_label = (w * bce).sum(dim=0) / (batch * self.z)
+        per_label = (w * bce).sum(dim=0) / (batch * self.z) * self.norm
         return per_label.mean(), per_label.detach()

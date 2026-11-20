@@ -120,7 +120,8 @@ def objective(trial, base, stage, init):
     import tune_optuna
     from . import train
     cfg = stage_cfg(base, stage, init)
-    tune_optuna.suggest(trial, cfg, "table" if getattr(base, "tune_space", "run") == "table" else "deep")
+    space = getattr(base, "tune_space", "run") or "run"
+    tune_optuna.suggest(trial, cfg, "deep" if space == "run" else space)
     resume_from = trial.user_attrs.get("resume_from")
     if resume_from:                                      # a trial a crash interrupted: carry on in its folder
         cfg.exp_name = os.path.relpath(resume_from, os.path.abspath(os.path.join(cfg.run_dir, cfg.experiment)))

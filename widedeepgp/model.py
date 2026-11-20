@@ -84,6 +84,24 @@ def prs_penalty(loss_fn, n_train, prs_var):
     return (curvature_ratios(loss_fn) / (2.0 * float(n_train) * float(prs_var))).float()
 
 
+class PerDiseaseHead(nn.Module):
+    """The output layer as one small two-layer head per disease on the shared hidden layer (--per_disease_head):
+    logit_j = w2_j . gelu(W1_j h + b1_j) + b2_j, every disease its own W1_j [d_in, width]."""
+
+    def __init__(self, d_in, width, n_labels):
+        super().__init__()
+        self.w1 = nn.Parameter(torch.empty(n_labels, d_in, width))
+        self.b1 = nn.Parameter(torch.zeros(n_labels, width))
+        self.w2 = nn.Parameter(torch.empty(n_labels, width))
+        self.b2 = nn.Parameter(torch.zeros(n_labels))
+        nn.init.uniform_(self.w1, -1.0 / d_in ** 0.5, 1.0 / d_in ** 0.5)       # nn.Linear's bounds
+        nn.init.uniform_(self.w2, -1.0 / width ** 0.5, 1.0 / width ** 0.5)
+
+    def forward(self, h):
+        z = nn.functional.gelu(torch.einsum("bh,lhk->blk", h, self.w1) + self.b1)
+        return (z * self.w2).sum(-1) + self.b2
+
+
 class WideDeepGP(pl.LightningModule):
     """hp: a plain dict, saved with every checkpoint (train.model_hparams). pos: one array of
     positions per input sequence. annot: optional standardised float arrays [L_i, A], one per sequence.
@@ -161,6 +179,17 @@ class WideDeepGP(pl.LightningModule):
                                    hidden_layers=int(hp["n_fcn"]))
                 if self.final_pool == "atten":          # one learned query per disease over the block tokens; uniform at the start
                     self.pool_query = nn.Parameter(torch.randn(self.n_labels, d) / d ** 0.5)
+                if int(hp.get("per_disease_head", 0) or 0):
+                    if self.final_pool != "mean":
+                        raise ValueError("--per_disease_head goes with the mean readout")
+                    self.combine.layers[-1] = PerDiseaseHead(int(hp.get("head_hidden", 256)), int(hp["per_disease_head"]), self.n_labels)
+            self.cov_skip = None
+            if (hp.get("cov_skip") or "off") != "off":   # the covariates straight to the logits beside the head
+                if not self.use_cov:
+                    raise ValueError("--cov_skip needs the covariates")
+                self.cov_skip = nn.Linear(int(hp["n_cov"]), self.n_labels)
+                nn.init.zeros_(self.cov_skip.weight)
+                nn.init.zeros_(self.cov_skip.bias)
             self.lr_table, self.table_decay, self.table_eps = (float(hp[k]) for k in ("lr_table", "table_decay", "table_eps"))
 
         # built in the published class's order, so one seed gives the same initial weights
@@ -245,7 +274,8 @@ class WideDeepGP(pl.LightningModule):
         # a model saved before case_share was recorded was trained on even batches: exactly half cases
         self.loss_fn = WideLoss(counts=counts, gamma=float(hp["gamma"]), w_max=float(hp["w_max"]),
                                 sampler=hp["sampler"], correction=bool(hp["sampling_correction"]),
-                                outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)))
+                                outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)),
+                                label_norm=hp.get("label_norm") or "none")
         self.lr, self.l2 = float(hp["lr"]), float(hp["l2"])
         self.lr_wide = float(hp.get("lr_wide") or 0.0)
         if self.wide != "off":
@@ -320,16 +350,20 @@ class WideDeepGP(pl.LightningModule):
             h = self.norm_f(h if residual is None else h + residual)
         h = h.float()                                     # the readout in float32, finer than bf16 resolves
         if self.final_pool == "flat":
-            return self.readout(h.reshape(h.shape[0], -1))
-        if self.final_pool == "atten":
+            logits = self.readout(h.reshape(h.shape[0], -1))
+        elif self.final_pool == "atten":
             tokens = h[:, :self.n_blocks]                 # the block tokens; the covariate token joins through cov
             att = torch.softmax(torch.einsum("bkd,ld->blk", tokens, self.pool_query) / tokens.shape[-1] ** 0.5, dim=-1)
             pooled = torch.einsum("blk,bkd->bld", att, tokens)                     # [B, diseases, d]
             if self.use_cov:
                 pooled = torch.cat([pooled, cov.float()[:, None].expand(-1, pooled.shape[1], -1)], dim=-1)
-            return self.combine(pooled).diagonal(dim1=1, dim2=2)                   # disease l's logit from its own pooled vector
-        mean = h.mean(dim=1)
-        return self.combine(torch.cat([mean, cov.float()], dim=1) if self.use_cov else mean)
+            logits = self.combine(pooled).diagonal(dim1=1, dim2=2)                 # disease l's logit from its own pooled vector
+        else:
+            mean = h.mean(dim=1)
+            logits = self.combine(torch.cat([mean, cov.float()], dim=1) if self.use_cov else mean)
+        if self.cov_skip is not None:
+            logits = logits + self.cov_skip(rest[0].float())
+        return logits
 
     def forward(self, x_all):
         """x_all: the input sequences, then the covariates. Returns logits [B, n_out]."""
@@ -354,8 +388,9 @@ class WideDeepGP(pl.LightningModule):
         return {"table": count(e.tables), "identity": count(e.block_emb, e.chrom_emb), "block_mlp": count(e.mlp),
                 "mixer": count(self.layers, self.norm_f),
                 "covariates": count(self.covariate_encoder, self.cov_norm) if self.use_cov else 0,
-                "head": count(self.readout) if self.final_pool == "flat" else
-                count(self.combine) + (self.pool_query.numel() if self.final_pool == "atten" else 0)}
+                "head": (count(self.readout) if self.final_pool == "flat" else
+                         count(self.combine) + (self.pool_query.numel() if self.final_pool == "atten" else 0))
+                + (count(self.cov_skip) if self.cov_skip is not None else 0)}
 
     def snapshot(self, step):
         """A weights-only snapshot that load_model reads; the table in bfloat16 (it is most of the weights)."""

@@ -98,6 +98,7 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
         "lr_schedule": cfg.lr_schedule, "total_optimizer_steps": int(sched["optimizer_steps"]) if sched else 0,
         "wide": getattr(cfg, "wide", "off") or "off", **wide_hparams(cfg, dm),
         "input_mode": getattr(cfg, "input_mode", "snps"), "input_mask": float(getattr(cfg, "input_mask", 0.0) or 0.0),
+        "label_norm": getattr(cfg, "label_norm", "none") or "none",
         **block_hparams(cfg, dm),
     }
 
@@ -115,7 +116,8 @@ def block_hparams(cfg, dm):
             "table_kappa": float(cfg.table_kappa), "table_decay": float(cfg.table_decay), "table_eps": float(cfg.table_eps),
             "lr_table": table_learning_rate(cfg.table_kappa, batch_eff, int(sum(dm.seq_len))),
             "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False)),
-            "n_folds": int(getattr(dm, "n_folds", 1)), "folds": getattr(cfg, "folds", None) or None}
+            "n_folds": int(getattr(dm, "n_folds", 1)), "folds": getattr(cfg, "folds", None) or None,
+            "per_disease_head": int(getattr(cfg, "per_disease_head", 0) or 0), "cov_skip": getattr(cfg, "cov_skip", "off") or "off"}
 
 
 def parse_grid(spec):
@@ -196,6 +198,64 @@ def cache_first_layer(model, dm, device):
                                       .float().cpu() for b in dm._loader(dm._dataset(sp), False)])
     model.train()
     model.cached = True
+
+
+def fit_cov_skip(model, dm):
+    """--cov_skip logistic: the skip starts as the covariates-only logistic model of the training rows (the floor that
+    score_snapshots.covariates_only reports) and the head's output map at zero, so the run begins at the floor and the
+    network learns what the covariates leave."""
+    from sklearn.linear_model import LogisticRegression
+    from .model import PerDiseaseHead
+    x, y = dm.splits["train"]["cov"], train_labels(dm)
+    w, b = np.zeros((y.shape[1], x.shape[1])), np.zeros(y.shape[1])
+    for j in range(y.shape[1]):
+        ok = ~np.isnan(y[:, j])
+        fit = LogisticRegression(max_iter=2000).fit(x[ok], y[ok, j])
+        w[j], b[j] = fit.coef_[0], fit.intercept_[0]
+    with torch.no_grad():
+        model.cov_skip.weight.copy_(torch.as_tensor(w, dtype=torch.float32))
+        model.cov_skip.bias.copy_(torch.as_tensor(b, dtype=torch.float32))
+        last = model.combine.layers[-1]
+        for p in ((last.w2, last.b2) if isinstance(last, PerDiseaseHead) else (last.weight, last.bias)):
+            p.zero_()
+
+
+def first_layer_cache_key(cfg, dm, model):
+    """What the pooled vectors depend on: the table file, the dataset's store and rows, the partition, the folds, the
+    SNP scaling and the device's arithmetic (bf16 on a GPU)."""
+    parts = [file_digest(cfg.init_encoder), os.path.realpath(dm.dir), os.path.realpath(dm.store_dir),
+             model.hp["partition_digest"], str(model.hp.get("n_folds", 1)), file_digest(cfg.folds) if getattr(cfg, "folds", None) else "",
+             str(getattr(cfg, "snp_stats", None)), str(model.hp["embed_dim"]), model.hp["snp_code"],
+             "cuda" if torch.cuda.is_available() else "cpu"]
+    for split in ("train", "val"):
+        parts.append(hashlib.sha256(np.ascontiguousarray(dm.splits[split]["rows"], dtype=np.int64).tobytes()).hexdigest())
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:24]
+
+
+def cached_first_layer(model, dm, device, folder, cfg):
+    """The pooled vectors kept on disk between runs (--first_layer_cache; participant-level, so owner-only under data/):
+    loaded when a file for this key exists, else computed (cache_first_layer) and written atomically; one process at a
+    time per key. Returns the file's path."""
+    import fcntl
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    path = os.path.join(folder, f"first_layer_{first_layer_cache_key(cfg, dm, model)}.pt")
+    with open(path + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if os.path.exists(path):
+                z = torch.load(path, map_location="cpu", weights_only=True)
+                for split in ("train", "val"):
+                    dm.splits[split]["pooled"] = z[split]
+                model.cached = True
+                return path
+            cache_first_layer(model, dm, device)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            torch.save({split: dm.splits[split]["pooled"] for split in ("train", "val")}, tmp)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            return path
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def file_digest(path):
@@ -408,6 +468,9 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         loaded = model.encoder.load_init(cfg.init_encoder, model.hp["partition_digest"], model.hp["snp_code"],
                                          freeze=bool(cfg.freeze_encoder))
         print(f"first layer from {cfg.init_encoder}{' (fixed)' if cfg.freeze_encoder else ''}: {loaded}", flush=True)
+    if model.blocks and model.hp.get("cov_skip") == "logistic":
+        fit_cov_skip(model, dm)
+        print("covariate skip started at the covariates-only logistic model; the head's output map at zero", flush=True)
 
     run_dir = os.path.join(cfg.run_dir, cfg.experiment, cfg.exp_name or "run")
     ckpt_dir = os.path.join(run_dir, "checkpoints")
@@ -417,16 +480,20 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         print(f"resuming from {resume}", flush=True)
         check_resume_tables(resume, model.hp, model.loss_fn)
         check_resume_args(os.path.join(run_dir, "config.json"), cfg)
-    cache_seconds = None
+    cache_seconds = cache_file = None
     if model.blocks and cfg.freeze_encoder and model.hp.get("init_encoder") and model.input_mask == 0:
         if resume:                                       # the cache is built from this table, so the run must have had it
             saved = torch.load(resume, map_location="cpu", weights_only=False)["state_dict"]
             if any(not torch.equal(saved[f"encoder.tables.{i}"], t.detach().cpu()) for i, t in enumerate(model.encoder.tables)):
                 raise ValueError(f"cannot resume from {resume}: its fixed table differs from {cfg.init_encoder}")
         t1 = time.time()
-        cache_first_layer(model, dm, "cuda" if torch.cuda.is_available() else "cpu")
+        if getattr(cfg, "first_layer_cache", None):
+            cache_file = cached_first_layer(model, dm, "cuda" if torch.cuda.is_available() else "cpu", cfg.first_layer_cache, cfg)
+        else:
+            cache_first_layer(model, dm, "cuda" if torch.cuda.is_available() else "cpu")
         cache_seconds = round(time.time() - t1, 1)
-        print(f"fixed first layer computed once for the training and tuning splits ({cache_seconds:.0f} s)", flush=True)
+        print(f"fixed first layer computed once for the training and tuning splits ({cache_seconds:.0f} s"
+              f"{'; ' + cache_file if cache_file else ''})", flush=True)
     n_snps = int(sum(dm.seq_len))
     n_params = sum(p.numel() for p in model.parameters())
     if model.blocks:                                     # the size axes: embedding parameters and Kaplan's N
@@ -445,6 +512,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
               **({"blocks": blocks} if model.blocks else {}),
               "dataset_dir": os.path.abspath(dm.dir), "store_dir": os.path.abspath(dm.store_dir),
               "covariates": dm.cov_names, "resumed": bool(resume), "first_layer_cache_seconds": cache_seconds,
+              "first_layer_cache_file": cache_file,
               "covariate_scaling": ({"mean": [float(v) for v in dm.cov_cm[0]], "sd": [float(v) for v in dm.cov_cs[0]]}
                                     if getattr(dm, "cov_cm", None) is not None else None),
               "snp_scaling": dm.snp_stats if dm.snp_mean is not None else "none",

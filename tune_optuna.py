@@ -30,21 +30,46 @@ from main_multilabel import parse_args        # which also lets torch.load read 
 from widedeepgp.train import run_training
 
 
+SPACES = ("deep", "table", "optim", "full", "paper", "optimizer")
+
+
 def suggest(trial, cfg, space):
     """Set the searched settings on cfg: space "table" (blocks mode) the table's pace and per-step decay only,
-    "deep" (a run's network stage) also the learning rate, weight decay and dropout, the others more."""
-    if space != "table":
+    "deep" (a run's network stage) also the learning rate, weight decay and dropout, the others more. "paper": the
+    published DeepGP paper's grid (Zhu et al. 2026, Table of hyper-parameters: batch {32, 64, 128}, mixer layers
+    {1, 2, 3}, width {16, 32, 64}, dropout [0.05, 0.3], learning rate [1e-5, 1e-3], heads {2, 4, 8}, head hidden layers
+    {1, 2, 4}, weight decay [1e-5, 1e-3]) plus the mixer kind; "optimizer": the optimiser alone (learning rate, weight
+    decay, dropout, schedule, warm-up) at the batch size given. A frozen table (--freeze_encoder) is not searched."""
+    if space not in SPACES:
+        raise ValueError(f"space must be one of {SPACES}")
+    if space == "paper":
+        cfg.lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+        cfg.l2 = trial.suggest_float("l2", 1e-5, 1e-3, log=True)
+        cfg.dropout = trial.suggest_float("dropout", 0.05, 0.3)
+        cfg.batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+        cfg.e_layers = trial.suggest_categorical("e_layers", [1, 2, 3])
+        cfg.d_model = trial.suggest_categorical("d_model", [16, 32, 64])
+        cfg.n_heads = trial.suggest_categorical("n_heads", [2, 4, 8])
+        cfg.n_fcn = trial.suggest_categorical("n_fcn", [1, 2, 4])
+        cfg.mixer = trial.suggest_categorical("mixer", ["transformer"] + (["bimamba1"] if torch.cuda.is_available() else []))
+    elif space == "optimizer":
+        cfg.lr = trial.suggest_float("lr", 3e-5, 3e-3, log=True)
+        cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
+        cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
+        cfg.lr_schedule = trial.suggest_categorical("lr_schedule", ["plateau", "cosine", "constant"])
+        cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])
+    elif space != "table":
         cfg.lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         cfg.l2 = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
         cfg.dropout = trial.suggest_float("dropout", 0.0, 0.4)
-    if getattr(cfg, "input_mode", "snps") == "blocks":
+    if getattr(cfg, "input_mode", "snps") == "blocks" and not getattr(cfg, "freeze_encoder", False):
         if getattr(cfg, "init_encoder", None):       # a loaded table: steps small against its entries, next to no decay
             cfg.table_kappa = trial.suggest_float("table_kappa", 3e-4, 1e-2, log=True)
             cfg.table_decay = trial.suggest_float("table_decay", 1e-3, 3e-2, log=True)
         else:                                        # from zero: the pace and decay measured for a table that starts empty
             cfg.table_kappa = trial.suggest_float("table_kappa", 0.01, 0.03, log=True)
             cfg.table_decay = trial.suggest_float("table_decay", 0.3, 3.0, log=True)
-    if space not in ("deep", "table"):
+    if space in ("optim", "full"):
         cfg.accumulate = trial.suggest_categorical("accumulate", [1, 2, 4])
         cfg.warmup_steps = trial.suggest_categorical("warmup_steps", [0, 200, 1000])
     if space == "full":

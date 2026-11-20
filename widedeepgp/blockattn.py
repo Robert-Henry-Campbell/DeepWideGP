@@ -7,6 +7,7 @@ added to the block's token before the mixer over blocks. The table rows stay fix
 maps and the identities learn. The selection is made once the table is loaded (``select_from``) and saved with the model."""
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from .blocks import make_block
 
@@ -32,6 +33,7 @@ class BlockAttention(nn.Module):
         self.layers = nn.ModuleList([make_block(d_attn, mixer, n_heads=n_heads, dropout=dropout) for _ in range(int(n_layers))])
         self.norm = nn.LayerNorm(d_attn)
         self.out = nn.Linear(d_attn, d_model)
+        self.ckpt = mixer == "bimamba1"               # the Mamba kernels keep large intermediates: recompute them piece by piece
 
     @torch.no_grad()
     def select_from(self, encoder):
@@ -66,8 +68,16 @@ class BlockAttention(nn.Module):
         rows = self.rows[0] if fold is None else self.rows[fold.long()]
         h = self.inp(torch.cat([sel * rows, sel], -1)) + self.snp_emb.weight.view(1, nb, k, -1)
         h = torch.cat([self.pool_inp(pooled.float())[:, :, None], h], 2).reshape(b * nb, k + 1, -1)
+        out = []
+        for piece in h.split(8192):              # the fused attention kernels refuse more than 65,535 sequences x heads at once
+            if self.ckpt and self.training and torch.is_grad_enabled():
+                out.append(checkpoint(self._piece, piece, use_reentrant=False))
+            else:
+                out.append(self._piece(piece))
+        return self.out(torch.cat(out)).view(b, nb, -1)
+
+    def _piece(self, piece):
         residual = None
         for layer in self.layers:
-            h, residual = layer(h, residual)
-        h = self.norm(h if residual is None else h + residual)
-        return self.out(h.mean(1)).view(b, nb, -1)
+            piece, residual = layer(piece, residual)
+        return self.norm(piece if residual is None else piece + residual).mean(1)

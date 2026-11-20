@@ -117,7 +117,10 @@ def block_hparams(cfg, dm):
             "lr_table": table_learning_rate(cfg.table_kappa, batch_eff, int(sum(dm.seq_len))),
             "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False)),
             "n_folds": int(getattr(dm, "n_folds", 1)), "folds": getattr(cfg, "folds", None) or None,
-            "per_disease_head": int(getattr(cfg, "per_disease_head", 0) or 0), "cov_skip": getattr(cfg, "cov_skip", "off") or "off"}
+            "per_disease_head": int(getattr(cfg, "per_disease_head", 0) or 0), "cov_skip": getattr(cfg, "cov_skip", "off") or "off",
+            "block_attn": int(getattr(cfg, "block_attn", 0) or 0), "block_attn_dim": int(getattr(cfg, "block_attn_dim", 32) or 32),
+            "block_attn_layers": int(getattr(cfg, "block_attn_layers", 1) or 1), "block_attn_heads": int(getattr(cfg, "block_attn_heads", 4) or 4),
+            "block_attn_mixer": getattr(cfg, "block_attn_mixer", "transformer") or "transformer"}
 
 
 def parse_grid(spec):
@@ -194,8 +197,15 @@ def cache_first_layer(model, dm, device):
         model.to(device).eval()
         for split in ("train", "val"):
             sp = dm.splits[split]
-            sp["pooled"] = torch.cat([model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])[0]
-                                      .float().cpu() for b in dm._loader(dm._dataset(sp), False)])
+            pooled, sel = [], []
+            for b in dm._loader(dm._dataset(sp), False):
+                p, s, _ = model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])
+                pooled.append(p.float().cpu())
+                if s is not None:
+                    sel.append(s.to(torch.bfloat16).cpu())
+            sp["pooled"] = torch.cat(pooled)
+            if sel:
+                sp["sel"] = torch.cat(sel)
     model.train()
     model.cached = True
 
@@ -226,7 +236,7 @@ def first_layer_cache_key(cfg, dm, model):
     parts = [file_digest(cfg.init_encoder), os.path.realpath(dm.dir), os.path.realpath(dm.store_dir),
              model.hp["partition_digest"], str(model.hp.get("n_folds", 1)), file_digest(cfg.folds) if getattr(cfg, "folds", None) else "",
              str(getattr(cfg, "snp_stats", None)), str(model.hp["embed_dim"]), model.hp["snp_code"],
-             "cuda" if torch.cuda.is_available() else "cpu"]
+             "cuda" if torch.cuda.is_available() else "cpu", f"block_attn={model.hp.get('block_attn', 0) or 0}"]
     for split in ("train", "val"):
         parts.append(hashlib.sha256(np.ascontiguousarray(dm.splits[split]["rows"], dtype=np.int64).tobytes()).hexdigest())
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:24]
@@ -246,11 +256,14 @@ def cached_first_layer(model, dm, device, folder, cfg):
                 z = torch.load(path, map_location="cpu", weights_only=True)
                 for split in ("train", "val"):
                     dm.splits[split]["pooled"] = z[split]
+                    if split + "_sel" in z:
+                        dm.splits[split]["sel"] = z[split + "_sel"]
                 model.cached = True
                 return path
             cache_first_layer(model, dm, device)
             tmp = f"{path}.{os.getpid()}.tmp"
-            torch.save({split: dm.splits[split]["pooled"] for split in ("train", "val")}, tmp)
+            torch.save({**{split: dm.splits[split]["pooled"] for split in ("train", "val")},
+                        **{split + "_sel": dm.splits[split]["sel"] for split in ("train", "val") if "sel" in dm.splits[split]}}, tmp)
             os.chmod(tmp, 0o600)
             os.replace(tmp, path)
             return path
@@ -468,6 +481,8 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         loaded = model.encoder.load_init(cfg.init_encoder, model.hp["partition_digest"], model.hp["snp_code"],
                                          freeze=bool(cfg.freeze_encoder))
         print(f"first layer from {cfg.init_encoder}{' (fixed)' if cfg.freeze_encoder else ''}: {loaded}", flush=True)
+        if model.blocks and model.block_attn is not None:
+            model.block_attn.select_from(model.encoder)
     if model.blocks and model.hp.get("cov_skip") == "logistic":
         fit_cov_skip(model, dm)
         print("covariate skip started at the covariates-only logistic model; the head's output map at zero", flush=True)
@@ -585,6 +600,7 @@ def run_training(cfg, trial=None, extra_callbacks=()):
         model.cached = False
         for sp in dm.splits.values():
             sp.pop("pooled", None)
+            sp.pop("sel", None)
         dm.setup("fit")
     out["model"], out["datamodule"] = model, dm
     return out

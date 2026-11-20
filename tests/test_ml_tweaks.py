@@ -225,3 +225,90 @@ def test_a_worker_of_a_paper_space_search_runs_a_trial(data_dir, tmp_path):
     trial_cfg = json.load(open(os.path.join(tmp_path, "t", "s", out["best_trial_dir"], "config.json")))["args"]
     assert trial_cfg["batch_size"] == out["best_params"]["batch_size"] and trial_cfg["d_model"] == out["best_params"]["d_model"]
     assert tune_optuna.load_study("deep", os.path.join(tmp_path, "t", "s")).trials[0].params["mixer"] == "transformer"   # the published block needs a GPU
+
+
+# ---- within-block attention over the strongest SNPs -----------------------------------------------
+def _one_copy_init(dm, path, de=4, seed=5):
+    g = torch.Generator().manual_seed(seed)
+    state = {f"tables.{i}": torch.randn((6, de), generator=g) for i in range(CHROMS)}
+    manifest = {"kind": "pgi", "partition_digest": dm.partition["digest"], "snp_code": "dosage", "embed_dim": de, "n_folds": 1}
+    torch.save({"manifest": manifest, "state": state}, path)
+    return state
+
+
+def test_block_attention_selects_the_largest_rows_in_genomic_order_and_adds_to_the_tokens(data_dir, tmp_path):
+    from widedeepgp.blockattn import BlockAttention
+    _, dm, model = _build(data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), freeze_encoder=True, block_attn=3,
+                          block_attn_dim=8, block_attn_heads=2)
+    state = _one_copy_init(dm, tmp_path / "i.pt")
+    model.encoder.load_init(str(tmp_path / "i.pt"), model.hp["partition_digest"], "dosage", freeze=True)
+    model.block_attn.select_from(model.encoder)
+    ba = model.block_attn
+    assert isinstance(ba, BlockAttention) and ba.rows.shape == (CHROMS, 3, 4) and ba.idx_4.shape == (1, 3)
+    for i in range(CHROMS):                                              # the three largest rows of each block, in order
+        norms = state[f"tables.{i}"].norm(dim=1)
+        want = torch.topk(norms, 3).indices.sort().values
+        assert torch.equal(getattr(ba, f"idx_{i}")[0], want) and torch.equal(ba.rows[i], state[f"tables.{i}"][want])
+    model.eval()
+    x_all, _ = _val_batch(dm)
+    snps = x_all[:-1]
+    sel = ba.select(snps)
+    assert sel.shape == (24, CHROMS, 3)
+    assert torch.equal(sel[:, 4], snps[4][:, ba.idx_4[0], 0].to(torch.bfloat16).float())
+    with torch.no_grad():
+        pooled, sel2, rest = model.first_layer(x_all)
+        assert torch.equal(sel, sel2) and len(rest) == 1
+        add = ba(sel, pooled)
+        assert add.shape == (24, CHROMS, 8)
+        out = model(x_all)
+        ba.out.weight.zero_(); ba.out.bias.zero_()                       # the module off: the plain model's logits
+        plain = model(x_all)
+    assert out.shape == (24, 6) and not torch.allclose(out, plain)
+    counts = model.parameter_counts()
+    assert counts["block_attn"] == sum(p.numel() for p in ba.parameters()) > 0
+    sd = model.snapshot(1)["state_dict"]
+    assert "block_attn.rows" in sd and "block_attn.idx_4" in sd            # the selection travels with the weights
+    with pytest.raises(ValueError, match="needs --init_encoder"):
+        _build(data_dir, partition="uniform:6", block_attn=3)
+    with pytest.raises(ValueError, match="smallest block"):
+        _build(data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), freeze_encoder=True, block_attn=7)
+    with pytest.raises(ValueError, match="one copy"):
+        folds = _folds_file(data_dir, tmp_path / "f.npz")
+        _build(data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), freeze_encoder=True, block_attn=3, folds=folds)
+
+
+def test_a_block_attention_run_is_cached_equals_the_streamed_run_and_scores(data_dir, tmp_path):
+    import main_multilabel
+    import score_snapshots
+    from widedeepgp import train
+    _, dm, _ = _build(data_dir, partition="uniform:6")
+    _one_copy_init(dm, tmp_path / "i.pt")
+    folder = tmp_path / "cache"
+
+    def args(name, **over):
+        kw = dict(data_dir=data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), input_mask=0, block_attn=3,
+                  block_attn_dim=8, block_attn_heads=2, first_layer_cache=str(folder), **{k: v for k, v in over.items() if k != "first_layer_cache"})
+        cache = over.get("first_layer_cache", str(folder))
+        if cache is None:
+            kw.pop("first_layer_cache")
+        else:
+            kw["first_layer_cache"] = cache
+        return _run_args(tmp_path, name, **kw) + ["--freeze_encoder"]
+
+    out = main_multilabel.main(args("c"))
+    config = json.load(open(os.path.join(out["run_dir"], "config.json")))
+    assert config["model"]["block_attn"] == 3 and config["blocks"]["n_parameters_by_module"]["block_attn"] > 0
+    z = torch.load(config["first_layer_cache_file"], map_location="cpu", weights_only=True)
+    assert z["train_sel"].shape == (len(dm.splits["train"]["y"]), CHROMS, 3) and z["train_sel"].dtype == torch.bfloat16
+    rows = score_snapshots.main(["--run", out["run_dir"], "--split", "val", "--snapshots", "best", "--device", "cpu"])
+    rescored = {r["label"]: r["value"] for r in rows if r["snapshot"] == "best" and r["metric"] == "auroc" and r["label"] != "MEAN"}
+    assert rescored == pytest.approx({k: v["auroc"] for k, v in out["val"].items()}, abs=1e-6)
+    orig = train.cache_first_layer
+    train.cache_first_layer = lambda model, dm, device: None               # the same run streamed
+    try:
+        streamed = main_multilabel.main(args("s", first_layer_cache=None))
+    finally:
+        train.cache_first_layer = orig
+    assert [h["val_auroc_mean"] for h in out["history"]] == pytest.approx([h["val_auroc_mean"] for h in streamed["history"]], abs=1e-6)
+    out2 = main_multilabel.main(args("c", max_epoch_equiv=2) + ["--resume"])
+    assert out2["samples_seen"] > out["samples_seen"]

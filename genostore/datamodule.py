@@ -112,12 +112,13 @@ def load_partition(spec, store, regions):
 class StoreBatchDataset(Dataset):
     """Indexing with a *list of sample indices* returns that whole batch, still encoded."""
 
-    def __init__(self, store_dir, regions, rows, cov, y, fold=None, pooled=None):
+    def __init__(self, store_dir, regions, rows, cov, y, fold=None, pooled=None, sel=None):
         self.store_dir, self.regions = store_dir, regions
         self.rows = np.asarray(rows, dtype=np.int64)
         self.cov = None if cov is None else np.ascontiguousarray(cov, dtype=np.float32)
         self.fold = None if fold is None else np.asarray(fold, dtype=np.int64)
         self.pooled = pooled                       # a frozen first layer's output [N, n_blocks, d_e], sent instead of genotypes
+        self.sel = sel                             # with it, the selected SNPs' dosages [N, n_blocks, K] (--block_attn)
         y = np.asarray(y, dtype=np.float32)
         self.y = y[:, None] if y.ndim < 2 else y
         self._gs = None
@@ -132,6 +133,8 @@ class StoreBatchDataset(Dataset):
         bi = np.asarray(batch_idx, dtype=np.int64).reshape(-1)
         if self.pooled is not None:
             out = {"pooled": self.pooled[torch.from_numpy(bi)]}
+            if self.sel is not None:
+                out["sel"] = self.sel[torch.from_numpy(bi)]
         else:
             if self._gs is None:                   # one reader per (worker) process
                 self._gs = GenoStore(self.store_dir)
@@ -382,7 +385,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         """Encoded batch (already on the target device) -> (x_all, y) exactly as the model expects."""
         y = batch["y"]
         if "pooled" in batch:                      # a cached first layer's output: nothing to decode
-            x_all = [batch["pooled"]]
+            x_all = [batch["pooled"]] + ([batch["sel"].float()] if "sel" in batch else [])
         else:
             dev = y.device
             if self.snp_mean is not None and dev not in self._dev:
@@ -426,7 +429,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         cov = sp["cov"] if self.data_mode == "snps_covs" else None
         pooled = sp.get("pooled")                  # set by train.cache_first_layer: the folds are already applied
         return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"],
-                                 None if pooled is not None else sp.get("fold"), pooled)
+                                 None if pooled is not None else sp.get("fold"), pooled, sp.get("sel"))
 
     def _workers(self, ds):
         return 0 if ds.pooled is not None else self.num_workers        # indexing a tensor in memory needs no workers

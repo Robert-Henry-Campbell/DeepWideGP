@@ -20,6 +20,7 @@ from layers.Transformer_EncDec import EncoderLayer
 from models.DeepGP import FCN, RMSNorm, layer_norm_fn
 
 from . import metrics as M
+from .blockattn import BlockAttention
 from .blockencoder import BlockEncoder
 from .blocks import make_block
 from .losses import WideLoss
@@ -183,6 +184,13 @@ class WideDeepGP(pl.LightningModule):
                     if self.final_pool != "mean":
                         raise ValueError("--per_disease_head goes with the mean readout")
                     self.combine.layers[-1] = PerDiseaseHead(int(hp.get("head_hidden", 256)), int(hp["per_disease_head"]), self.n_labels)
+            self.block_attn = None
+            if int(hp.get("block_attn", 0) or 0):        # within-block interactions over the strongest SNPs (blockattn.py)
+                if not (hp.get("init_encoder") and hp.get("freeze_encoder")) or self.input_mask > 0:
+                    raise ValueError("--block_attn reads a fixed table: it needs --init_encoder with --freeze_encoder and --input_mask 0")
+                self.block_attn = BlockAttention(self.encoder, int(hp["block_attn"]), int(hp.get("block_attn_dim", 32)), d,
+                                                 hp.get("block_attn_mixer", "transformer"), int(hp.get("block_attn_layers", 1)),
+                                                 int(hp.get("block_attn_heads", 4)), float(hp["dropout"]))
             self.cov_skip = None
             if (hp.get("cov_skip") or "off") != "off":   # the covariates straight to the logits beside the head
                 if not self.use_cov:
@@ -318,26 +326,32 @@ class WideDeepGP(pl.LightningModule):
         return self._encode(i, x) + 0.0 * anchor
 
     def first_layer(self, x_all):
-        """Blocks mode: a batch's inputs -> (its pooled block vectors [B, n_blocks, embed_dim], the inputs left: the
-        covariates). In a cached run (train.cache_first_layer) the batch carries the pooled vectors themselves."""
+        """Blocks mode: a batch's inputs -> (its pooled block vectors [B, n_blocks, embed_dim], the selected SNPs' dosages
+        [B, n_blocks, K] with --block_attn else None, the inputs left: the covariates). In a cached run
+        (train.cache_first_layer) the batch carries the pooled vectors (and the dosages) themselves."""
         if self.cached:
-            return x_all[0], x_all[1:]
+            if self.block_attn is not None:
+                return x_all[0], x_all[1], x_all[2:]
+            return x_all[0], None, x_all[1:]
         fold = None
         if self.encoder.k > 1:                            # fold-routed tables: the data module appends each participant's fold
             fold, x_all = x_all[-1].long(), x_all[:-1]
         snps, rest = (x_all[:-1], x_all[-1:]) if self.use_cov else (x_all, [])
+        sel = self.block_attn.select(snps) if self.block_attn is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and snps[0].is_cuda):
             if self.training and self.input_mask > 0:    # input masking: a share of SNPs missing, the rest rescaled
                 masks = [torch.rand(x.shape[:2], device=x.device) < self.input_mask for x in snps]
-                return self.encoder.pool(snps, masks, fold) / (1.0 - self.input_mask), rest
-            return self.encoder.pool(snps, fold=fold), rest
+                return self.encoder.pool(snps, masks, fold) / (1.0 - self.input_mask), sel, rest
+            return self.encoder.pool(snps, fold=fold), sel, rest
 
     def _block_logits(self, x_all):
         """Blocks mode: the block tokens and the covariate token through the mixer, their mean beside the
         covariate vector into the head."""
-        pooled, rest = self.first_layer(x_all)
+        pooled, sel, rest = self.first_layer(x_all)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and pooled.is_cuda):
             h = self.encoder.tokens(pooled)
+            if self.block_attn is not None:
+                h = h + self.block_attn(sel, pooled)
             if self.use_cov:
                 cov = self.cov_norm(self.covariate_encoder(rest[0]))
                 h = torch.cat([h, cov[:, None]], dim=1)
@@ -386,6 +400,7 @@ class WideDeepGP(pl.LightningModule):
         e = self.encoder
         count = lambda *mods: int(sum(p.numel() for m in mods for p in m.parameters()))
         return {"table": count(e.tables), "identity": count(e.block_emb, e.chrom_emb), "block_mlp": count(e.mlp),
+                "block_attn": count(self.block_attn) if self.block_attn is not None else 0,
                 "mixer": count(self.layers, self.norm_f),
                 "covariates": count(self.covariate_encoder, self.cov_norm) if self.use_cov else 0,
                 "head": (count(self.readout) if self.final_pool == "flat" else

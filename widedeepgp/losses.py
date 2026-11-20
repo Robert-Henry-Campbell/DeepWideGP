@@ -58,7 +58,8 @@ class WideLoss(nn.Module):
         self.register_buffer("rate_ctrl", t(rate_ctrl))
         self.register_buffer("logit_shift", t(np.log(c1)))
         entropy = -(pi * np.log(pi) + (1.0 - pi) * np.log(1.0 - pi))
-        self.register_buffer("norm", t(1.0 / entropy if label_norm == "entropy" else np.ones_like(pi)))
+        # derived from the counts, not saved: models saved before this buffer existed still load
+        self.register_buffer("norm", t(1.0 / entropy if label_norm == "entropy" else np.ones_like(pi)), persistent=False)
         self.label_norm = label_norm
         self.n_labels = len(n1)
         self.case_share = s

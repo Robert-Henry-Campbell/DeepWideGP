@@ -76,6 +76,8 @@ def test_entropy_normalisation_divides_each_labels_loss_by_its_null_entropy():
     h = -(pi * np.log(pi) + (1 - pi) * np.log(1 - pi))
     assert np.allclose(b.numpy(), a.numpy() / h, rtol=1e-5) and loss.item() == pytest.approx(float(b.mean()), rel=1e-6)
     assert torch.allclose(plain.norm, torch.ones(3)) and normed.label_norm == "entropy"
+    assert "norm" not in normed.state_dict()                              # derived, not saved: older checkpoints still load
+    normed.load_state_dict(plain.state_dict())
     with pytest.raises(ValueError, match="label_norm"):
         WideLoss(y_train, label_norm="prevalence")
     # the rotation variant with one target output is scaled the same way

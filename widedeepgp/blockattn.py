@@ -14,8 +14,7 @@ from .blocks import make_block
 class BlockAttention(nn.Module):
     def __init__(self, encoder, k, d_attn, d_model, mixer="transformer", n_layers=1, n_heads=4, dropout=0.0):
         super().__init__()
-        if encoder.k != 1:
-            raise ValueError("--block_attn needs a table with one copy (no --folds)")
+        self.copies = int(encoder.k)                        # fold-routed tables: one set of rows per copy
         if encoder.codes != 1:
             raise ValueError("--block_attn needs the dosage code")
         self.k, self.d_e = int(k), int(encoder.tables[0].shape[-1])
@@ -26,7 +25,7 @@ class BlockAttention(nn.Module):
         n_blocks = sum(len(seq) for seq in encoder.lengths)
         for i, seq in enumerate(encoder.lengths):            # filled by select_from; saved with the model
             self.register_buffer(f"idx_{i}", torch.zeros(len(seq), self.k, dtype=torch.long))
-        self.register_buffer("rows", torch.zeros(n_blocks, self.k, self.d_e))
+        self.register_buffer("rows", torch.zeros(self.copies, n_blocks, self.k, self.d_e))
         self.inp = nn.Linear(self.d_e + 1, d_attn)
         self.pool_inp = nn.Linear(self.d_e, d_attn)
         self.snp_emb = nn.Embedding(n_blocks * self.k, d_attn)
@@ -36,18 +35,20 @@ class BlockAttention(nn.Module):
 
     @torch.no_grad()
     def select_from(self, encoder):
-        """The K SNPs of each block with the largest table rows (L2 norm), in genomic order, and those rows."""
+        """The K SNPs of each block with the largest table rows (L2 norm; of the copies' mean for a fold-routed table), in
+        genomic order, and those rows of every copy."""
         rows = []
         for i, (table, lengths) in enumerate(zip(encoder.tables, encoder.lengths)):
             idx = getattr(self, f"idx_{i}")
+            copies = table.float() if table.dim() == 3 else table.float()[None]           # [copies, L_i, d_e]
             start = 0
             for b, n in enumerate(lengths):
-                norm = table[start:start + n].float().norm(dim=1)
+                norm = copies[:, start:start + n].mean(0).norm(dim=1)
                 top = torch.topk(norm, self.k).indices.sort().values + start
                 idx[b] = top
-                rows.append(table[top].float())
+                rows.append(copies[:, top])
                 start += n
-        self.rows.copy_(torch.stack(rows))
+        self.rows.copy_(torch.stack(rows, 1))
         return self
 
     def select(self, x_all):
@@ -57,11 +58,13 @@ class BlockAttention(nn.Module):
                for i, x in enumerate(x_all)]
         return torch.cat(out, 1).to(torch.bfloat16).float()
 
-    def forward(self, sel, pooled):
-        """sel [B, n_blocks, K] (select), pooled [B, n_blocks, d_e] -> what each block's token gains, [B, n_blocks, d_model]."""
+    def forward(self, sel, pooled, fold=None):
+        """sel [B, n_blocks, K] (select), pooled [B, n_blocks, d_e], fold [B] (each participant's copy; None: the one copy)
+        -> what each block's token gains, [B, n_blocks, d_model]."""
         b, nb, k = sel.shape
         sel = sel.float()[..., None]
-        h = self.inp(torch.cat([sel * self.rows, sel], -1)) + self.snp_emb.weight.view(1, nb, k, -1)
+        rows = self.rows[0] if fold is None else self.rows[fold.long()]
+        h = self.inp(torch.cat([sel * rows, sel], -1)) + self.snp_emb.weight.view(1, nb, k, -1)
         h = torch.cat([self.pool_inp(pooled.float())[:, :, None], h], 2).reshape(b * nb, k + 1, -1)
         residual = None
         for layer in self.layers:

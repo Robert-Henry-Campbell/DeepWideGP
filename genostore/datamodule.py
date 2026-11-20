@@ -427,9 +427,9 @@ class SNPStoreDataModule(pl.LightningDataModule):
 
     def _dataset(self, sp):
         cov = sp["cov"] if self.data_mode == "snps_covs" else None
-        pooled = sp.get("pooled")                  # set by train.cache_first_layer: the folds are already applied
-        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"],
-                                 None if pooled is not None else sp.get("fold"), pooled, sp.get("sel"))
+        pooled, sel = sp.get("pooled"), sp.get("sel")   # set by train.cache_first_layer: the folds are applied in the pooled vectors
+        fold = sp.get("fold") if pooled is None or sel is not None else None   # the within-block model still routes its rows by copy
+        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"], fold, pooled, sel)
 
     def _workers(self, ds):
         return 0 if ds.pooled is not None else self.num_workers        # indexing a tensor in memory needs no workers

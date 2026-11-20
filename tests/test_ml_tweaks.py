@@ -244,11 +244,11 @@ def test_block_attention_selects_the_largest_rows_in_genomic_order_and_adds_to_t
     model.encoder.load_init(str(tmp_path / "i.pt"), model.hp["partition_digest"], "dosage", freeze=True)
     model.block_attn.select_from(model.encoder)
     ba = model.block_attn
-    assert isinstance(ba, BlockAttention) and ba.rows.shape == (CHROMS, 3, 4) and ba.idx_4.shape == (1, 3)
+    assert isinstance(ba, BlockAttention) and ba.rows.shape == (1, CHROMS, 3, 4) and ba.idx_4.shape == (1, 3)
     for i in range(CHROMS):                                              # the three largest rows of each block, in order
         norms = state[f"tables.{i}"].norm(dim=1)
         want = torch.topk(norms, 3).indices.sort().values
-        assert torch.equal(getattr(ba, f"idx_{i}")[0], want) and torch.equal(ba.rows[i], state[f"tables.{i}"][want])
+        assert torch.equal(getattr(ba, f"idx_{i}")[0], want) and torch.equal(ba.rows[0, i], state[f"tables.{i}"][want])
     model.eval()
     x_all, _ = _val_batch(dm)
     snps = x_all[:-1]
@@ -256,8 +256,8 @@ def test_block_attention_selects_the_largest_rows_in_genomic_order_and_adds_to_t
     assert sel.shape == (24, CHROMS, 3)
     assert torch.equal(sel[:, 4], snps[4][:, ba.idx_4[0], 0].to(torch.bfloat16).float())
     with torch.no_grad():
-        pooled, sel2, rest = model.first_layer(x_all)
-        assert torch.equal(sel, sel2) and len(rest) == 1
+        pooled, sel2, fold, rest = model.first_layer(x_all)
+        assert torch.equal(sel, sel2) and fold is None and len(rest) == 1
         add = ba(sel, pooled)
         assert add.shape == (24, CHROMS, 8)
         out = model(x_all)
@@ -272,9 +272,47 @@ def test_block_attention_selects_the_largest_rows_in_genomic_order_and_adds_to_t
         _build(data_dir, partition="uniform:6", block_attn=3)
     with pytest.raises(ValueError, match="smallest block"):
         _build(data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), freeze_encoder=True, block_attn=7)
-    with pytest.raises(ValueError, match="one copy"):
-        folds = _folds_file(data_dir, tmp_path / "f.npz")
-        _build(data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), freeze_encoder=True, block_attn=3, folds=folds)
+
+
+def test_block_attention_on_a_fold_routed_table_uses_each_participants_copy_and_caches(data_dir, tmp_path):
+    import main_multilabel
+    from widedeepgp import train
+    folds = _folds_file(data_dir, tmp_path / "f.npz", k=2)
+    _, dm, model = _build(data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), freeze_encoder=True, block_attn=3,
+                          block_attn_dim=8, block_attn_heads=2, folds=folds)
+    g = torch.Generator().manual_seed(7)
+    state = {f"tables.{i}": torch.randn((2, 6, 4), generator=g) for i in range(CHROMS)}
+    torch.save({"manifest": {"kind": "ridge", "partition_digest": dm.partition["digest"], "snp_code": "dosage", "embed_dim": 4, "n_folds": 2},
+                "state": state}, tmp_path / "i.pt")
+    model.encoder.load_init(str(tmp_path / "i.pt"), model.hp["partition_digest"], "dosage", freeze=True)
+    ba = model.block_attn.select_from(model.encoder)
+    assert ba.rows.shape == (2, CHROMS, 3, 4)
+    want = torch.topk(state["tables.4"].mean(0).norm(dim=1), 3).indices.sort().values      # chosen on the copies' mean
+    assert torch.equal(ba.idx_4[0], want) and torch.equal(ba.rows[:, 4], state["tables.4"][:, want])
+    model.eval()
+    x_all, _ = _val_batch(dm)
+    with torch.no_grad():
+        pooled, sel, fold, rest = model.first_layer(x_all)
+        assert fold.shape == (24,) and set(fold.tolist()) <= {0, 1}
+        both = ba(sel, pooled, fold)
+        copy0 = ba(sel, pooled, torch.zeros_like(fold))
+        copy1 = ba(sel, pooled, torch.ones_like(fold))
+    assert torch.allclose(both[fold == 0], copy0[fold == 0]) and torch.allclose(both[fold == 1], copy1[fold == 1])
+    assert not torch.allclose(copy0, copy1)
+
+    def args(name, cache=True):
+        return _run_args(tmp_path, name, data_dir=data_dir, partition="uniform:6", init_encoder=str(tmp_path / "i.pt"), input_mask=0,
+                         block_attn=3, block_attn_dim=8, block_attn_heads=2, folds=folds,
+                         **({"first_layer_cache": str(tmp_path / "cache")} if cache else {})) + ["--freeze_encoder"]
+
+    out = main_multilabel.main(args("fc"))
+    orig = train.cache_first_layer
+    train.cache_first_layer = lambda model, dm, device: None
+    try:
+        streamed = main_multilabel.main(args("fs", cache=False))
+    finally:
+        train.cache_first_layer = orig
+    assert [h["val_auroc_mean"] for h in out["history"]] == pytest.approx([h["val_auroc_mean"] for h in streamed["history"]], abs=1e-6)
 
 
 def test_a_block_attention_run_is_cached_equals_the_streamed_run_and_scores(data_dir, tmp_path):

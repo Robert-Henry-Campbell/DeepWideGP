@@ -199,7 +199,7 @@ def cache_first_layer(model, dm, device):
             sp = dm.splits[split]
             pooled, sel = [], []
             for b in dm._loader(dm._dataset(sp), False):
-                p, s, _ = model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])
+                p, s, _, _ = model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])
                 pooled.append(p.float().cpu())
                 if s is not None:
                     sel.append(s.to(torch.bfloat16).cpu())

@@ -327,12 +327,14 @@ class WideDeepGP(pl.LightningModule):
 
     def first_layer(self, x_all):
         """Blocks mode: a batch's inputs -> (its pooled block vectors [B, n_blocks, embed_dim], the selected SNPs' dosages
-        [B, n_blocks, K] with --block_attn else None, the inputs left: the covariates). In a cached run
-        (train.cache_first_layer) the batch carries the pooled vectors (and the dosages) themselves."""
+        [B, n_blocks, K] and the participants' table copies with --block_attn (else None, None), the inputs left: the
+        covariates). In a cached run (train.cache_first_layer) the batch carries the pooled vectors (and the dosages)
+        themselves, and the copies when the table has several."""
         if self.cached:
-            if self.block_attn is not None:
-                return x_all[0], x_all[1], x_all[2:]
-            return x_all[0], None, x_all[1:]
+            if self.block_attn is None:
+                return x_all[0], None, None, x_all[1:]
+            fold = x_all[-1].long() if self.encoder.k > 1 else None
+            return x_all[0], x_all[1], fold, x_all[2:len(x_all) - (fold is not None)]
         fold = None
         if self.encoder.k > 1:                            # fold-routed tables: the data module appends each participant's fold
             fold, x_all = x_all[-1].long(), x_all[:-1]
@@ -341,17 +343,17 @@ class WideDeepGP(pl.LightningModule):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and snps[0].is_cuda):
             if self.training and self.input_mask > 0:    # input masking: a share of SNPs missing, the rest rescaled
                 masks = [torch.rand(x.shape[:2], device=x.device) < self.input_mask for x in snps]
-                return self.encoder.pool(snps, masks, fold) / (1.0 - self.input_mask), sel, rest
-            return self.encoder.pool(snps, fold=fold), sel, rest
+                return self.encoder.pool(snps, masks, fold) / (1.0 - self.input_mask), sel, fold, rest
+            return self.encoder.pool(snps, fold=fold), sel, fold, rest
 
     def _block_logits(self, x_all):
         """Blocks mode: the block tokens and the covariate token through the mixer, their mean beside the
         covariate vector into the head."""
-        pooled, sel, rest = self.first_layer(x_all)
+        pooled, sel, fold, rest = self.first_layer(x_all)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.bf16 and pooled.is_cuda):
             h = self.encoder.tokens(pooled)
             if self.block_attn is not None:
-                h = h + self.block_attn(sel, pooled)
+                h = h + self.block_attn(sel, pooled, fold)
             if self.use_cov:
                 cov = self.cov_norm(self.covariate_encoder(rest[0]))
                 h = torch.cat([h, cov[:, None]], dim=1)

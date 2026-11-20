@@ -1443,3 +1443,43 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   Speed: 0.030 s wall a step against 0.26 s, a validation 0.7 s against ~30 s, the cache 116 s to build (6.06 GiB), 257 s
   for the whole 1 epoch-equivalent run; GPU peaks 0.75 GiB training and 1.17 GiB validation (streamed 1.05 and 6.8).
   The check run's weights were deleted afterwards (5 GB; records kept). Methods 4.11 updated with these numbers.
+
+## 2026-11-20 (night, UTC) — Robert's overnight tweak queue at the top rung (DeepWideGP branch `tweaks`; Scripts `widedeepgp-tweaks/`)
+
+- Robert (19 Nov 23:55Z): try many tweaks of WideDeepGP overnight on all open GPUs, keep anything that improves even
+  slightly, leave a table of what helped; success = lift over the covariates and over the PGI a first layer is built from.
+  Later: queue everything behind the running jobs, queue the planned experiments that never ran, add own ideas; the
+  headline is always the model as proposed, even when it does badly ("overfitting on small data is a result to report").
+  Design, decisions and results: Scripts `scripts/widedeepgp-tweaks/methods.md` and `results.md`; runs under
+  `runs/tweaks/`, the queue in `runs/tweaks/queue/` (scheduler.py with GPU slots, dependencies and adoption of running
+  jobs; `queue.log` is the record; `summarise.py` builds `results_table.md`).
+- Code on the worktree branch **`tweaks`** off `widening` 5c47884 (`runs/tweaks/worktree`), not merged (the other agent,
+  "caching table runs", worked in the main tree). New, all blocks mode: `--tune_space paper | optimizer`; `--label_norm
+  entropy`; `--per_disease_head W`; `--cov_skip zero | logistic`; `--first_layer_cache DIR` (a frozen table's pooled
+  vectors on disk, owner-only under data/, keyed by table, rows, partition, folds, scaling and device; the test split
+  never; 6 to 26 GB a file, so delete each when its runs are done: the files reached 200 GB and /mnt/sdg hit 98% at
+  04:55Z); `--block_attn K` with `_dim/_layers/_heads/_mixer transformer|bimamba1` (widedeepgp/blockattn.py: in every
+  block the K SNPs with the largest table rows form a short sequence of tokens plus the block's pooled vector, a small
+  mixer shared by all blocks runs over it in pieces of 8,192 sequences, Mamba pieces recomputed in the backward pass, and
+  its mean is added to the block token; rows per fold copy; the selected dosages cached in bf16; cached = streamed). The
+  loss's normalisation buffer is not saved, so older checkpoints load. Tests `tests/test_ml_tweaks.py` (11, CPU; the
+  within-block Mamba checked on GPU 3 with the synthetic store); the touched CPU files pass (96). Scripts
+  `classic-deepgp-comparator/build_datasets.py --r2 --kb`.
+- **Headline (the proposed method):** the frozen 30-channel lassosum2 and LDpred2-auto tables of the full rung give
+  0.6451 and 0.6546 at the first validation and fall below the covariates alone from then on (0.010 to 0.011 below the
+  scores plus covariates by the PGI protocol); items 2 and 6 (within-block attention / Mamba over each block's 32
+  strongest rows) trace the same curves. The weights were fitted on the training rows and fit them far better than new
+  participants (PGI AUROC 0.887/0.898 on the training rows against 0.572/0.582 on the tuning set; a logistic fit of
+  [PGI, covariates] on the training rows scores 0.634/0.642 on the tuning set). The half-rung check (weights from the
+  107,743 rung for the other 108,129 participants) puts the frozen-table network at 0.6677/0.6697 against the plain
+  logistic combination 0.6737/0.6772; the within-block modules add nothing there and memorise on the ridge table.
+- **What helped on the fold-routed ridge table (base 0.6735):** the table 32 wide, 0.6753 (+0.0018, 27 of 30 diseases;
+  64 wide 0.6748; 4 wide 0.6729), with the batch-256 optimiser settings or the doubled budget 0.6755; the three-seed
+  ensemble 0.6746; the paper-grid search's settings (batch 32, transformer 32 x 2, lr 7.4e-5) with the doubled budget
+  0.6745; budgets 20/50 ee 0.6741/0.6740 (saturates by 15 ee); the searches 0.6741/0.6740; per-disease head 0.6739;
+  entropy loss 0.6737. No change: covariate skip, attention readout, cosine schedule, Mamba mixer (0.6736), S2 (0.6738).
+  Hurt: balanced batches (item 3) 0.6722, S1 0.6727, S5 0.6700 then overfitting, within-block modules on the ridge
+  table 0.664 to 0.666 then falling. Item 4: the classic E11 at the paper's clumping (47,341 SNPs) 0.6667 against the
+  covariates' 0.6697, overfitting after one epoch-equivalent, the same as at r2 0.1 (0.6659). The best network (0.6755)
+  still trails the ridge PRS plus covariates (0.6777) and every PGI. Seeds 2 and 3 of the chosen configuration: in
+  `results.md` once the confirmation jobs finish.

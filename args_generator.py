@@ -62,6 +62,7 @@ def args_initial(argv=None):
     parser.add_argument('--cont_pheno', action='store_true', default=False, help='whether the phenotype is continuous')
     # genotype-store datasets only (ignored by the pickle loader)
     parser.add_argument('--snp_stats', default='store', help="SNP scaling statistics: 'store' (computed over all samples at conversion) or 'train' (recomputed on the training split, as the pickle loader does)")
+    parser.add_argument('--balanced_batches', action='store_true', help='main_genome.py: half cases in every batch; an epoch shows every non-case once, the cases as often as that takes')
     parser.add_argument('--pos_mode', help="positions for the positional embedding: 'index' or 'pos' (default: what store.json says)")
 
     # ---- multi-disease training (widedeepgp / main_multilabel.py; main_genome.py ignores these) ----

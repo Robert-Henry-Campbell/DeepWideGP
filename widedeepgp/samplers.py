@@ -111,6 +111,33 @@ class RotationBatchSampler(_StepSampler):
                                   self.ctrls[t].take(rot * self.n_ctrl, self.n_ctrl)])
 
 
+class IndexBatches(Sampler):
+    """A batch sampler's index arrays without their target, for one-disease models that take (x, y)."""
+
+    def __init__(self, sampler):
+        self.sampler = sampler
+
+    def set_epoch(self, epoch):
+        self.sampler.set_epoch(epoch)
+
+    def __len__(self):
+        return len(self.sampler)
+
+    def __iter__(self):
+        return (idx for _, idx in self.sampler)
+
+
+def balanced_one_disease(y, batch_size, seed=0):
+    """Half cases in every batch for one 0/1 label; an epoch shows every non-case once, the cases as often as
+    that takes (they are recycled in reshuffled passes)."""
+    y = np.asarray(y, dtype=np.float32).reshape(len(y), -1)
+    if y.shape[1] != 1:
+        raise ValueError("one label column expected")
+    rot = RotationBatchSampler(y, batch_size, 1, seed)
+    rot.steps_per_epoch = -(-int((y[:, 0] == 0).sum()) // rot.n_ctrl)
+    return IndexBatches(rot)
+
+
 def make_sampler(kind, labels, batch_size, steps_per_epoch, seed=0):
     if kind == "rotation":
         return RotationBatchSampler(labels, batch_size, steps_per_epoch, seed)

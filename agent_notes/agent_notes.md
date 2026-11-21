@@ -1489,3 +1489,27 @@ tests are unchanged; the ladder's frozen copies are unaffected.
 - Robert stopped SBayesRC on the 7M imputed set: not working, CPUs needed, and the five rungs would
   have taken about four weeks on our hardware, twice the two-week limit (`PGI/methods.md` §5.6, §13).
 - `methods.md` (classic DeepGP consequences): "seven PGIs" is now "six", with a footnote.
+
+## 2026-11-21 (evening, UTC) — Classic DeepGP for the ladder: SNP lists with risk-allele signs, light `main_genome.py` edits (Robert)
+
+Robert's decisions after the DeepGP replication (`DeepWideGP-Scripts/scripts/deepgp-replication/`): run the published
+network on the five rungs x 30 diseases with risk-allele dosages, the paper's SNP rule (p <= 0.05, r2 0.7, 500 kb) from
+each rung's own GWAS, the paper's T2D settings for every run, one seed (1), 1:1 batches, streaming from the HapMap3+
+store (no per-disease stores), and `main_genome.py` lightly edited.
+- `genostore/datamodule.py`: optional store.json `"snps"` (an npz of sorted store indices `idx_<chrom>` and signs
+  `sign_<chrom>` per whole-chromosome sequence; the full rows are decoded, then the listed SNPs kept and multiplied by
+  their sign, -1 giving the other allele's standardised dosage) and `"stats_dir"` (where the training SNP statistics
+  are cached, so the 30 lists of a rung share one pass). Without these keys nothing changes.
+- `widedeepgp/samplers.py`: `IndexBatches` and `balanced_one_disease` (the rotation sampler for one label: 32 cases +
+  32 non-cases per batch of 64; an epoch shows every non-case once, cases recycled in reshuffled passes).
+- `main_genome.py`: `--seed` honoured (default 33 as published; the ladder passes 1); `--data_dir` honoured again (as
+  published); `--balanced_batches` (store datasets); validation every 300 batches counted across epochs
+  (`check_val_every_n_epoch=None`; the smallest rung has fewer than 300 batches per epoch, which crashed Lightning);
+  validation AUROC over the whole validation set (`val_auroc`, monitored for early stopping and checkpointing; the
+  code's per-batch mean breaks at population prevalence); progress bar off; the published test scoring commented out
+  (the test set stays locked), replaced by the best model's validation-set predictions and `results.json`.
+- `args_generator.py`: `--balanced_batches`.
+- Tests: `tests/test_classic_ladder_inputs.py` (15, CPU): lists keep exactly the listed SNPs of the full rows, signs
+  equal recoding to 2 - dosage, statistics from whole chromosomes and shared, malformed lists refused, the sampler's
+  epochs. The touched files' tests pass (31). Checked on real data: the E11 top-rung list equals the earlier
+  `classic_e11_r07_n215872` store (47,341 SNPs; IDs, labels, covariates and dosages of 400 people identical).

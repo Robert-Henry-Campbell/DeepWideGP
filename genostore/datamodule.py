@@ -6,6 +6,9 @@ batch (unpickled into RAM as float32, the full UKB imputed set would need ~10 TB
 A dataset directory <data_dir>/<label>/<rd_mode>/ holds store.json (keys in genostore/README.md; a
 "regions" segment [chrom, start, stop] excludes stop), samples_{train,test}.tsv, and when used
 samples_val.tsv (datasets with named labels) and samples_<ve>.tsv (external cohorts, --ve).
+Optional keys: "snps", an npz of the SNPs each whole-chromosome sequence keeps (idx_<chrom>, sorted store
+indices) and their signs (sign_<chrom>, +1 or -1: -1 turns a standardised dosage into that of the other
+allele), read from the full rows; "stats_dir", where the training SNP statistics are cached (default: here).
 """
 import hashlib
 import json
@@ -184,6 +187,10 @@ class SNPStoreDataModule(pl.LightningDataModule):
         regions = regions or getattr(configs, "geno_regions", None) or spec.get("regions") or default_regions(self.store)
         self.regions = [[[str(c), int(v0), int(v1)] for c, v0, v1 in seq] for seq in regions]
         self.pos_mode = getattr(configs, "pos_mode", None) or spec.get("pos_mode", "index")
+        self.select = self.sign = None
+        if spec.get("snps"):
+            self._load_snp_list(os.path.join(self.dir, spec["snps"]))
+        self.stats_dir = os.path.join(self.dir, spec.get("stats_dir", "."))
         # Named columns (multi-disease datasets). ``configs.labels`` may pick a subset, e.g. one
         # disease for a single-disease model trained on the same dataset.
         self.label_names = list(spec["labels"]) if spec.get("labels") else None
@@ -209,12 +216,19 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.train_sampler = None                 # set by the training code to balance batches
 
         # what main_genome.py reads off the data module
-        self.genes_chr = [LazyVariantIDs(store_dir, seq) for seq in self.regions]
+        if self.select is None:
+            self.genes_chr = [LazyVariantIDs(store_dir, seq) for seq in self.regions]
+            self.pos_chr = [self._positions(seq) for seq in self.regions]
+        else:
+            self.genes_chr = [np.asarray(self.store.variants(seq[0][0])["id"])[i] for seq, i in zip(self.regions, self.select)]
+            self.pos_chr = [self._positions(seq)[i] if self.pos_mode == "pos" else np.arange(len(i))
+                            for seq, i in zip(self.regions, self.select)]
         self.genes = range(sum(len(g) for g in self.genes_chr))
-        self.pos_chr = [self._positions(seq) for seq in self.regions]
         self.seq_len = [len(g) for g in self.genes_chr]
         self.partition = None
         if getattr(configs, "input_mode", "snps") == "blocks":
+            if self.select is not None:
+                raise ValueError('store.json "snps" is not supported with --input_mode blocks')
             if not getattr(configs, "partition", None):
                 raise ValueError("--input_mode blocks needs --partition (a partition.npz, its folder, or uniform:<k>)")
             self.partition = load_partition(configs.partition, self.store, self.regions)
@@ -245,7 +259,27 @@ class SNPStoreDataModule(pl.LightningDataModule):
         self.n_cov = int(self.splits["train"]["cov"].shape[1])
         self.n_labels = len(self.label_names) if self.multilabel else 1
         self._prepare_scaling()
-        self._dev = {}
+        self._dev, self._sel = {}, {}
+
+    def _load_snp_list(self, path):
+        """store.json "snps": per whole-chromosome sequence, the sorted store indices to keep and their signs."""
+        if any(len(seq) != 1 or seq[0][1] != 0 or seq[0][2] != self.store.n_variants(seq[0][0]) for seq in self.regions):
+            raise ValueError('store.json "snps" needs one whole chromosome per input sequence')
+        z = np.load(path)
+        self.select, self.sign = [], []
+        for ((c, _, n),) in self.regions:
+            if f"idx_{c}" not in z.files:
+                raise KeyError(f"{path}: no idx_{c}; every chromosome needs at least one SNP")
+            idx = np.asarray(z[f"idx_{c}"], dtype=np.int64)
+            if len(idx) == 0 or np.any(np.diff(idx) <= 0) or idx[0] < 0 or idx[-1] >= n:
+                raise ValueError(f"{path}: idx_{c} must be sorted, distinct indices of chromosome {c}'s {n} SNPs")
+            s = np.asarray(z[f"sign_{c}"], dtype=np.float32) if f"sign_{c}" in z.files else np.ones(len(idx), np.float32)
+            if s.shape != idx.shape or not np.all(np.abs(s) == 1):
+                raise ValueError(f"{path}: sign_{c} must be +1 or -1 for each SNP of idx_{c}")
+            self.select.append(idx)
+            self.sign.append(s)
+        if not self.scale_snps and any((s < 0).any() for s in self.sign):
+            raise ValueError("SNP signs need standardised dosages (--snp_embed cov)")
 
     def _positions(self, seq):
         if self.pos_mode == "index":
@@ -317,6 +351,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
                     ms = [self.store.stats(c) for c, _, _ in seq]
                     mean.append(np.concatenate([m[0][v0:v1] for m, (_, v0, v1) in zip(ms, seq)]))
                     std.append(np.concatenate([m[1][v0:v1] for m, (_, v0, v1) in zip(ms, seq)]))
+            if self.select is not None:
+                mean, std = [m[i] for m, i in zip(mean, self.select)], [s_[i] for s_, i in zip(std, self.select)]
             self.snp_mean = [np.asarray(m, dtype=np.float32) for m in mean]
             # a SNP with no variation carries no information: map it to 0 rather than inf/NaN
             self.snp_inv_std = [np.where(s > 0, 1.0 / np.where(s > 0, s, 1.0), 0.0).astype(np.float32) for s in std]
@@ -336,7 +372,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         sequences): a pass over the training genotypes takes minutes at biobank scale."""
         h = hashlib.sha256(np.ascontiguousarray(rows, dtype=np.int64).tobytes())
         h.update(json.dumps(self.regions).encode())
-        path = os.path.join(self.dir, f"snp_stats_train_{h.hexdigest()[:16]}.npz")
+        path = os.path.join(self.stats_dir, f"snp_stats_train_{h.hexdigest()[:16]}.npz")
         if os.path.exists(path):
             z = np.load(path)
             k = len(self.regions)
@@ -354,7 +390,8 @@ class SNPStoreDataModule(pl.LightningDataModule):
         """Per-SNP mean/std of the dosage over ``rows`` (what the legacy loader computes on train)."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ds = StoreBatchDataset(self.store_dir, self.regions, rows, None, np.zeros(len(rows)))
-        s0, s1, cnt = ([torch.zeros(n, dtype=torch.float64, device=device) for n in self.seq_len] for _ in range(3))
+        full = [sum(v1 - v0 for _, v0, v1 in seq) for seq in self.regions]       # whole sequences, also with a SNP list
+        s0, s1, cnt = ([torch.zeros(n, dtype=torch.float64, device=device) for n in full] for _ in range(3))
         for i in range(0, len(rows), chunk):
             geno = ds[np.arange(i, min(len(rows), i + chunk))]["geno"]
             for k, q in enumerate(self.decode_q(geno, device)):
@@ -389,8 +426,17 @@ class SNPStoreDataModule(pl.LightningDataModule):
                 self._dev[dev] = ([torch.from_numpy(m).to(dev) for m in self.snp_mean],
                                   [torch.from_numpy(s).to(dev) for s in self.snp_inv_std])
             mean, inv = self._dev.get(dev, (None, None))
+            qs = self.decode_q(batch["geno"])
+            if self.select is not None:
+                if dev not in self._sel:
+                    self._sel[dev] = ([torch.from_numpy(i).to(dev) for i in self.select],
+                                      [torch.from_numpy(s).to(dev)[:, None] for s in self.sign])
+                idx, sgn = self._sel[dev]
+                qs = [q.index_select(1, i) for q, i in zip(qs, idx)]
             x_all = [td.to_model_input(q, None if mean is None else mean[k], None if inv is None else inv[k])
-                     for k, q in enumerate(self.decode_q(batch["geno"]))]
+                     for k, q in enumerate(qs)]
+            if self.select is not None:
+                x_all = [x * s for x, s in zip(x_all, sgn)]
         if self.data_mode == "snps_covs":
             x_all.append(batch["cov"])
         if "fold" in batch:                       # last: the model's blocks mode pops it (fold-routed tables)

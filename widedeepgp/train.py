@@ -197,15 +197,21 @@ def cache_first_layer(model, dm, device):
         model.to(device).eval()
         for split in ("train", "val"):
             sp = dm.splits[split]
-            pooled, sel = [], []
+            n, i, pooled, sel = len(sp["y"]), 0, None, None
             for b in dm._loader(dm._dataset(sp), False):
                 p, s, _, _ = model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])
-                pooled.append(p.float().cpu())
+                if pooled is None:               # filled in place: a list and its concatenation would hold the cache twice
+                    pooled = torch.empty((n,) + tuple(p.shape[1:]), dtype=torch.float32)
+                    sel = None if s is None else torch.empty((n,) + tuple(s.shape[1:]), dtype=torch.bfloat16)
+                pooled[i:i + len(p)] = p.float().cpu()
                 if s is not None:
-                    sel.append(s.to(torch.bfloat16).cpu())
-            sp["pooled"] = torch.cat(pooled)
-            if sel:
-                sp["sel"] = torch.cat(sel)
+                    sel[i:i + len(s)] = s.to(torch.bfloat16).cpu()
+                i += len(p)
+            if i != n:
+                raise RuntimeError(f"the first-layer cache of the {split} split holds {i} rows, the split {n}")
+            sp["pooled"] = pooled
+            if sel is not None:
+                sp["sel"] = sel
     model.train()
     model.cached = True
 

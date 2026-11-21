@@ -1151,11 +1151,13 @@ original plan (E11, I25, I48, M17, K80) are dropped. At each size:
   model code (the same output to within 10⁻⁶ and the same initial weights from the same seed;
   section 12), with one disease, no class weights (γ = 0) and shuffled batches.
 
-Consequences: for I10 the comparison holds three kinds of model at every size (the seven PGIs,
+Consequences: for I10 the comparison holds three kinds of model at every size (the six PGIs[^sbrc7m],
 the classic DeepGP on GWAS-selected SNPs, and WideDeepGP on all HapMap3+ SNPs); the selection
 uses only training participants of that size, so no tuning or test label enters it; each size
 needs its own SNP set and genotype dataset; and with one disease it says nothing about the
 other 29. The runs follow each WideDeepGP size in the ladder's chain.
+
+[^sbrc7m]: SBayesRC on the 7M imputed set was dropped on 21 Nov 2026 for its compute cost (`PGI/methods.md` §5.6).
 
 **Model size** (Robert, 15 November 2026). Each ladder varies one factor and holds the others
 fixed. The training-size ladder above keeps the model at width 32 and one layer; model size is

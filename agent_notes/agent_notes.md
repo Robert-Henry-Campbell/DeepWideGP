@@ -1483,3 +1483,9 @@ tests are unchanged; the ladder's frozen copies are unaffected.
   covariates' 0.6697, overfitting after one epoch-equivalent, the same as at r2 0.1 (0.6659). The best network (0.6755)
   still trails the ridge PRS plus covariates (0.6777) and every PGI. Seeds 2 and 3 of the chosen configuration: in
   `results.md` once the confirmation jobs finish.
+
+## 2026-11-21 (17:45 UTC) — SBayesRC-7M dropped from the PGI arm (Robert)
+
+- Robert stopped SBayesRC on the 7M imputed set: not working, CPUs needed, and the five rungs would
+  have taken about four weeks on our hardware, twice the two-week limit (`PGI/methods.md` §5.6, §13).
+- `methods.md` (classic DeepGP consequences): "seven PGIs" is now "six", with a footnote.

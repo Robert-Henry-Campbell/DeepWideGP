@@ -876,8 +876,13 @@ results, 20–21 November 2026; all on the top rung's tuning set).
 - Each run's best checkpoint is re-scored streamed on the tuning set and must give back its
   record. Its per-person tuning scores are written under `data/`. Then only the best checkpoint
   is kept.
-- Each rung reports the mean of the three seeds with their spread. The test set is not touched
-  until it is scored once for all models (section 9).
+- Each rung reports the mean of the three seeds with their spread. **Three seeds for WideDeepGP
+  only** (Robert, 22 November 2026): they are there to show whether it beats the covariates alone,
+  with the seed spread as the measure of chance. The other models run one seed.
+- The test set is not touched until it is scored once for all models (section 9).
+- **Ladder record so far:** the third rung's seeds 2 and 3 were stopped at epochs 17.6 and 17.9
+  of 20 while the seeds were being decided, then resumed from their last checkpoints. Each
+  resumed run's best checkpoint is re-scored like every other.
 
 ## 5. Training objective
 

@@ -1541,3 +1541,7 @@ from `tweaks`; the overnight extras that lost or are unused (`--cov_skip`, `--bl
   4.5 GB at 256. The ladder therefore runs with `--eval_batch_size 256`.
 - Mistake: the first CPU test run left the GPUs visible, so Lightning trained the small synthetic test models on
   GPU 0 (another user's) for about three minutes. Run CPU tests with `CUDA_VISIBLE_DEVICES=`.
+- `score_snapshots.refuse_shared_place` (00:55 UTC): the project's umbrella repository (`/mnt/sdg/robert/deepwidegp/.git`,
+  which ignores `data/`) made every `--save_scores` refuse its default place under `data/`. A path inside a work tree
+  is now allowed when its innermost repository ignores it (`git check-ignore`); the run directory and trackable
+  paths are still refused. Test with a real repository and an ignore file.

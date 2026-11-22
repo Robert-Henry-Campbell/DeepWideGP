@@ -70,3 +70,18 @@ def test_per_person_scores_stay_out_of_repositories_and_run_directories(tmp_path
         with pytest.raises(SystemExit, match="per-person scores belong under data/"):
             refuse_shared_place(str(bad), str(run))
     refuse_shared_place(str(data / "scores" / "t" / "s"), str(run))
+
+
+def test_per_person_scores_may_go_where_the_enclosing_repository_ignores_them(tmp_path):
+    """The umbrella repository holds data/ and ignores it (22 Nov 2026): scores there are allowed, a tracked folder is not."""
+    import subprocess
+    from score_snapshots import refuse_shared_place
+    top, run = tmp_path / "project", tmp_path / "project" / "runs" / "r"
+    run.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(top)], check=True)
+    (top / ".gitignore").write_text("/*\n!/.gitignore\n!/code/\n")
+    refuse_shared_place(str(top / "data" / "scores" / "t" / "s"), str(run))          # ignored: allowed
+    with pytest.raises(SystemExit, match="inside the git repository"):
+        refuse_shared_place(str(top / "code" / "scores"), str(run))                  # trackable: refused
+    with pytest.raises(SystemExit, match="inside the run directory"):
+        refuse_shared_place(str(run / "scores"), str(run))                           # ignored, but the run's own folder

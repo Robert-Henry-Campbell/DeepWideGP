@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 import time
 from types import SimpleNamespace
 
@@ -88,15 +89,19 @@ def chosen_trial(run):
 
 
 def refuse_shared_place(path, run_dir):
-    """Per-person scores are participant-level: never in the run directory or a git work tree
-    (CLAUDE.md section 3)."""
+    """Per-person scores are participant-level: never in the run directory or where git could track them
+    (CLAUDE.md section 3). Inside a work tree only a path its repository ignores is allowed (the project's
+    umbrella repository holds data/ and ignores it)."""
     real, run = os.path.realpath(path), os.path.realpath(run_dir)
     if real == run or real.startswith(run + os.sep):
         raise SystemExit(f"--scores_dir {path} is inside the run directory; per-person scores belong under data/")
     p = real
     while p != os.path.dirname(p):
-        if os.path.exists(os.path.join(p, ".git")):
-            raise SystemExit(f"--scores_dir {path} is inside the git repository {p}; per-person scores belong under data/")
+        if os.path.exists(os.path.join(p, ".git")):     # the innermost repository is the one that could track it
+            ignored = subprocess.run(["git", "-C", p, "check-ignore", "-q", real], capture_output=True).returncode == 0
+            if not ignored:
+                raise SystemExit(f"--scores_dir {path} is inside the git repository {p}; per-person scores belong under data/")
+            return
         p = os.path.dirname(p)
 
 

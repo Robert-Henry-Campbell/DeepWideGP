@@ -86,6 +86,8 @@ def args_initial(argv=None):
     parser.add_argument('--w_max', type=float, default=20.0, help='cap on the class weight of a case')
     parser.add_argument('--no_sampling_correction', action='store_true', help="do not divide each person's loss by their sampling rate")
     parser.add_argument('--head_hidden', type=int, default=256, help='width of the shared hidden layer before the outputs')
+    parser.add_argument('--per_disease_head', type=int, default=0, help="blocks mode, mean readout: width of a small hidden layer of each disease's own (its logit from its own two-layer head on the shared hidden layer); 0: the shared output layer")
+    parser.add_argument('--label_norm', default='none', help="'none', or 'entropy': each disease's loss divided by the entropy of its training prevalence, so a rare disease weighs as much as a common one")
     parser.add_argument('--annot', action='store_true', help='use per-SNP annotation vectors (the dataset must provide them)')
     parser.add_argument('--precision', default='32', help="'32' or 'bf16' (bf16 autocast with pooling, head and loss in float32)")
     parser.add_argument('--grad_ckpt', action='store_true', help='activation checkpointing per input sequence')

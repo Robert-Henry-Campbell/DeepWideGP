@@ -143,6 +143,39 @@ def test_target_only_needs_a_target():
 
 
 # ---- metrics ------------------------------------------------------------------------------------
+def test_entropy_normalisation_divides_each_labels_loss_by_its_null_entropy():
+    y_train = (np.random.default_rng(0).random((5000, 3)) < np.array([0.3, 0.1, 0.02])).astype(np.float32)
+    plain = WideLoss(y_train, gamma=0.0, sampler="shuffled")
+    normed = WideLoss(y_train, gamma=0.0, sampler="shuffled", label_norm="entropy")
+    logits, y = torch.randn(64, 3), torch.as_tensor(y_train[:64])
+    _, a = plain(logits, y)
+    loss, b = normed(logits, y)
+    pi = y_train.mean(0)
+    h = -(pi * np.log(pi) + (1 - pi) * np.log(1 - pi))
+    assert np.allclose(b.numpy(), a.numpy() / h, rtol=1e-5) and loss.item() == pytest.approx(float(b.mean()), rel=1e-6)
+    assert torch.allclose(plain.norm, torch.ones(3)) and normed.label_norm == "entropy"
+    assert h[2] < h[1] < h[0] and float(b[2] / a[2]) > float(b[0] / a[0])     # the rarest label is scaled up most
+    assert "norm" not in normed.state_dict()                              # derived, not saved: older checkpoints still load
+    normed.load_state_dict(plain.state_dict())
+    with pytest.raises(ValueError, match="label_norm"):
+        WideLoss(y_train, label_norm="prevalence")
+    # the rotation variant with one target output is scaled the same way
+    rot = WideLoss(y_train, gamma=0.0, sampler="rotation", outputs="target", label_norm="entropy")
+    rot0 = WideLoss(y_train, gamma=0.0, sampler="rotation", outputs="target")
+    l1, _ = rot(logits, y, target=2)
+    l0, _ = rot0(logits, y, target=2)
+    assert l1.item() == pytest.approx(l0.item() / h[2], rel=1e-5)
+
+
+def test_entropy_normalisation_by_hand_for_one_label():
+    """Prevalence 0.2: H = -(0.2 ln 0.2 + 0.8 ln 0.8) = 0.500402; one case and one non-case at logit 0."""
+    counts = {"cases": [2.0], "non_cases": [8.0], "n": 10}
+    loss_fn = WideLoss(counts=counts, gamma=0.0, sampler="shuffled", label_norm="entropy")
+    loss, _ = loss_fn(torch.zeros(2, 1), torch.tensor([[1.0], [0.0]]))
+    assert float(loss_fn.norm[0]) == pytest.approx(1 / 0.5004024235, rel=1e-6)
+    assert loss.item() == pytest.approx(math.log(2) / 0.5004024235, rel=1e-6)   # mean BCE ln 2, z = 1 at gamma 0
+
+
 def test_metrics_match_sklearn_and_skip_masked_entries():
     rng = np.random.default_rng(3)
     y = random_labels(900, missing=2)

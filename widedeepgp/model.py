@@ -84,6 +84,24 @@ def prs_penalty(loss_fn, n_train, prs_var):
     return (curvature_ratios(loss_fn) / (2.0 * float(n_train) * float(prs_var))).float()
 
 
+class PerDiseaseHead(nn.Module):
+    """The output layer as one small two-layer head per disease on the shared hidden layer (--per_disease_head):
+    logit_j = w2_j . gelu(W1_j h + b1_j) + b2_j, every disease its own W1_j [d_in, width]."""
+
+    def __init__(self, d_in, width, n_labels):
+        super().__init__()
+        self.w1 = nn.Parameter(torch.empty(n_labels, d_in, width))
+        self.b1 = nn.Parameter(torch.zeros(n_labels, width))
+        self.w2 = nn.Parameter(torch.empty(n_labels, width))
+        self.b2 = nn.Parameter(torch.zeros(n_labels))
+        nn.init.uniform_(self.w1, -1.0 / d_in ** 0.5, 1.0 / d_in ** 0.5)       # nn.Linear's bounds
+        nn.init.uniform_(self.w2, -1.0 / width ** 0.5, 1.0 / width ** 0.5)
+
+    def forward(self, h):
+        z = nn.functional.gelu(torch.einsum("bh,lhk->blk", h, self.w1) + self.b1)
+        return (z * self.w2).sum(-1) + self.b2
+
+
 class WideDeepGP(pl.LightningModule):
     """hp: a plain dict, saved with every checkpoint (train.model_hparams). pos: one array of
     positions per input sequence. annot: optional standardised float arrays [L_i, A], one per sequence.
@@ -161,6 +179,10 @@ class WideDeepGP(pl.LightningModule):
                                    hidden_layers=int(hp["n_fcn"]))
                 if self.final_pool == "atten":          # one learned query per disease over the block tokens; uniform at the start
                     self.pool_query = nn.Parameter(torch.randn(self.n_labels, d) / d ** 0.5)
+                if int(hp.get("per_disease_head", 0) or 0):
+                    if self.final_pool != "mean":
+                        raise ValueError("--per_disease_head goes with the mean readout")
+                    self.combine.layers[-1] = PerDiseaseHead(int(hp.get("head_hidden", 256)), int(hp["per_disease_head"]), self.n_labels)
             self.lr_table, self.table_decay, self.table_eps = (float(hp[k]) for k in ("lr_table", "table_decay", "table_eps"))
 
         # built in the published class's order, so one seed gives the same initial weights
@@ -245,7 +267,8 @@ class WideDeepGP(pl.LightningModule):
         # a model saved before case_share was recorded was trained on even batches: exactly half cases
         self.loss_fn = WideLoss(counts=counts, gamma=float(hp["gamma"]), w_max=float(hp["w_max"]),
                                 sampler=hp["sampler"], correction=bool(hp["sampling_correction"]),
-                                outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)))
+                                outputs=hp["loss_outputs"], case_share=float(hp.get("case_share", 0.5)),
+                                label_norm=hp.get("label_norm") or "none")
         self.lr, self.l2 = float(hp["lr"]), float(hp["l2"])
         self.lr_wide = float(hp.get("lr_wide") or 0.0)
         if self.wide != "off":

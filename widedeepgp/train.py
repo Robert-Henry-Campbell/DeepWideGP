@@ -98,6 +98,7 @@ def model_hparams(cfg, dm, sched=None, annot_names=None, annot=None):
         "lr_schedule": cfg.lr_schedule, "total_optimizer_steps": int(sched["optimizer_steps"]) if sched else 0,
         "wide": getattr(cfg, "wide", "off") or "off", **wide_hparams(cfg, dm),
         "input_mode": getattr(cfg, "input_mode", "snps"), "input_mask": float(getattr(cfg, "input_mask", 0.0) or 0.0),
+        "label_norm": getattr(cfg, "label_norm", "none") or "none",
         **block_hparams(cfg, dm),
     }
 
@@ -115,7 +116,8 @@ def block_hparams(cfg, dm):
             "table_kappa": float(cfg.table_kappa), "table_decay": float(cfg.table_decay), "table_eps": float(cfg.table_eps),
             "lr_table": table_learning_rate(cfg.table_kappa, batch_eff, int(sum(dm.seq_len))),
             "init_encoder": getattr(cfg, "init_encoder", None) or None, "freeze_encoder": bool(getattr(cfg, "freeze_encoder", False)),
-            "n_folds": int(getattr(dm, "n_folds", 1)), "folds": getattr(cfg, "folds", None) or None}
+            "n_folds": int(getattr(dm, "n_folds", 1)), "folds": getattr(cfg, "folds", None) or None,
+            "per_disease_head": int(getattr(cfg, "per_disease_head", 0) or 0)}
 
 
 def parse_grid(spec):
@@ -192,8 +194,16 @@ def cache_first_layer(model, dm, device):
         model.to(device).eval()
         for split in ("train", "val"):
             sp = dm.splits[split]
-            sp["pooled"] = torch.cat([model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])[0]
-                                      .float().cpu() for b in dm._loader(dm._dataset(sp), False)])
+            n, i, pooled = len(sp["y"]), 0, None
+            for b in dm._loader(dm._dataset(sp), False):
+                p = model.first_layer(dm.on_after_batch_transfer(move_data_to_device(b, device), 0)[0])[0]
+                if pooled is None:               # filled in place: a list and its concatenation would hold the cache twice
+                    pooled = torch.empty((n,) + tuple(p.shape[1:]), dtype=torch.float32)
+                pooled[i:i + len(p)] = p.float().cpu()
+                i += len(p)
+            if i != n:
+                raise RuntimeError(f"the first-layer cache of the {split} split holds {i} rows, the split {n}")
+            sp["pooled"] = pooled
     model.train()
     model.cached = True
 

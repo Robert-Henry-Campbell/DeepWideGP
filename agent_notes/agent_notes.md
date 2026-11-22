@@ -1513,3 +1513,31 @@ store (no per-disease stores), and `main_genome.py` lightly edited.
   equal recoding to 2 - dosage, statistics from whole chromosomes and shared, malformed lists refused, the sampler's
   epochs. The touched files' tests pass (31). Checked on real data: the E11 top-rung list equals the earlier
   `classic_e11_r07_n215872` store (47,341 SNPs; IDs, labels, covariates and dosages of 400 people identical).
+
+## 2026-11-22 (00:40 UTC) — The final model's code on `widening` (Robert: "finest and final widedeepgp iteration")
+
+Robert declared the best 431-block model of the partition test (runs/partition_test/comb_prive431, trained from
+branch `tweaks` at a74b5e9) the final WideDeepGP, to be run on the five-rung ladder. Only what it uses is ported
+from `tweaks`; the overnight extras that lost or are unused (`--cov_skip`, `--block_attn*`, `--first_layer_cache`,
+`--tune_space paper|optimizer`) stay on `tweaks`.
+- `widedeepgp/losses.py`: `WideLoss(label_norm="none"|"entropy")`: with entropy each disease's term is divided by
+  H(pi_j); the factor is a non-persistent buffer derived from the counts, so older checkpoints load.
+- `widedeepgp/model.py`: `PerDiseaseHead` (one two-layer head per disease on the shared hidden layer, GELU, nn.Linear
+  bounds), wired in blocks mode with the mean readout when `hp["per_disease_head"]` > 0 (built right after the FCN,
+  as on `tweaks`, so one seed gives the same weights); `label_norm` passed to the loss.
+- `widedeepgp/train.py`: `label_norm` and `per_disease_head` recorded in the hyper-parameters; `cache_first_layer`
+  fills the cache in place (never held twice) and refuses a split it did not fill.
+- `args_generator.py`: `--per_disease_head`, `--label_norm`.
+- Tests: `tests/test_ml_loss.py` (entropy factor against the formula, by hand at prevalence 0.2, the rotation
+  variant, not saved, bad value refused); `tests/test_ml_blocks.py` (the per-disease head's logits by hand and its
+  independence across diseases, refused without the mean readout; the final recipe trains cached, records its
+  settings and re-scores to its record; a short cache refused). The touched files' CPU tests pass (93 passed, 19
+  GPU-only skipped); `test_ml_train.py::test_a_genotype_only_model_trains_without_covariate_parameters` fails on the
+  CPU on unchanged `widening` too (its Mamba kernel needs CUDA).
+- Reproduction (runs/widedeepgp_ladder/rescore_check, GPU 4): the ported code's streamed re-score of the final
+  model's best checkpoint gives its training record exactly (mean tuning AUROC 0.6748444481212457). At an evaluation
+  batch of 256 instead of 1,024 it gives 0.6748533 (bf16 rounding; per-disease differences up to 3e-5).
+- GPU memory of the streamed first layer (nvidia-smi, the whole process): 13.8 GB at an evaluation batch of 1,024,
+  4.5 GB at 256. The ladder therefore runs with `--eval_batch_size 256`.
+- Mistake: the first CPU test run left the GPUs visible, so Lightning trained the small synthetic test models on
+  GPU 0 (another user's) for about three minutes. Run CPU tests with `CUDA_VISIBLE_DEVICES=`.

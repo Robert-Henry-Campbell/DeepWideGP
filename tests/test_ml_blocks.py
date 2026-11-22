@@ -658,6 +658,67 @@ def test_a_frozen_unmasked_run_is_cached_trains_as_streamed_and_resumes_only_on_
         main_multilabel.main(args("c", max_epoch_equiv=3) + ["--resume"])
 
 
+def test_a_short_cache_is_refused(data_dir, tmp_path, monkeypatch):
+    from widedeepgp.train import cache_first_layer
+    folds = _folds_file(data_dir, tmp_path / "folds.npz", k=2)
+    _, dm, model = _build(data_dir, folds=folds, eval_batch_size=50)
+    _frozen_init(dm, tmp_path / "init.pt")
+    model.encoder.load_init(str(tmp_path / "init.pt"), dm.partition["digest"], "dosage", freeze=True)
+    loader = dm._loader
+    monkeypatch.setattr(dm, "_loader", lambda ds, shuffle: list(loader(ds, shuffle))[:-1])   # one batch lost
+    with pytest.raises(RuntimeError, match="holds .* rows, the split"):
+        cache_first_layer(model, dm, "cpu")
+
+
+# ---- the final model's head and loss (21 Nov 2026) ----------------------------------------------
+def test_the_per_disease_head_gives_each_disease_its_own_small_network(data_dir):
+    from widedeepgp.model import PerDiseaseHead
+    _, dm, model = _build(data_dir, per_disease_head=5, head_hidden=12)
+    model.eval()
+    head = model.combine.layers[-1]
+    assert isinstance(head, PerDiseaseHead) and head.w1.shape == (6, 12, 5) and head.w2.shape == (6, 5)
+    assert model.parameter_counts()["head"] == sum(p.numel() for p in model.combine.parameters())
+    x_all, _ = _val_batch(dm)
+    with torch.no_grad():
+        out = model(x_all)
+        caught = {}
+        hook = model.combine.layers[-2].register_forward_hook(lambda m, i, o: caught.__setitem__("h", o))
+        model(x_all)
+        hook.remove()
+        h = caught["h"]
+        want = torch.stack([(torch.nn.functional.gelu(h @ head.w1[j] + head.b1[j]) * head.w2[j]).sum(-1) + head.b2[j]
+                            for j in range(6)], 1)
+    assert out.shape == (24, 6) and torch.allclose(out, want, atol=1e-6)
+    with torch.no_grad():                                                # disease 2's head moves disease 2's logit alone
+        head.w2[2] += 1.0
+        moved = model(x_all)
+    assert torch.equal(moved[:, [0, 1, 3, 4, 5]], out[:, [0, 1, 3, 4, 5]]) and not torch.equal(moved[:, 2], out[:, 2])
+    with pytest.raises(ValueError, match="mean readout"):
+        _build(data_dir, per_disease_head=5, final_pool="atten")
+
+
+def test_the_final_recipe_trains_cached_records_its_settings_and_rescores(data_dir, tmp_path):
+    """The final model's flags on a frozen fold-routed table: per-disease heads, entropy loss, shuffled batches,
+    gamma 0, a cosine schedule; the cached run's best checkpoint re-scored streamed gives back its record."""
+    import main_multilabel
+    import score_snapshots
+    folds = _folds_file(data_dir, tmp_path / "folds.npz", k=2)
+    _, dm, _ = _build(data_dir, folds=folds)
+    _frozen_init(dm, tmp_path / "init.pt")
+    out = main_multilabel.main(_run_args(tmp_path, "f", data_dir=data_dir, folds=folds, init_encoder=str(tmp_path / "init.pt"),
+                                         input_mask=0, per_disease_head=4, label_norm="entropy", sampler="shuffled", gamma=0,
+                                         lr_schedule="cosine", warmup_steps=2, head_hidden=16) + ["--freeze_encoder"])
+    config = json.load(open(os.path.join(out["run_dir"], "config.json")))
+    assert config["model"]["per_disease_head"] == 4 and config["model"]["label_norm"] == "entropy"
+    assert config["first_layer_cache_seconds"] is not None
+    assert not torch.allclose(out["model"].loss_fn.norm.cpu(), torch.ones(6))
+    ck = torch.load(out["best_checkpoint"], map_location="cpu", weights_only=False)["state_dict"]
+    assert "combine.layers.3.w1" in ck and "loss_fn.norm" not in ck
+    rows = score_snapshots.main(["--run", out["run_dir"], "--split", "val", "--snapshots", "best", "--device", "cpu"])
+    rescored = {r["label"]: r["value"] for r in rows if r["snapshot"] == "best" and r["metric"] == "auroc" and r["label"] != "MEAN"}
+    assert rescored == pytest.approx({k: v["auroc"] for k, v in out["val"].items()}, abs=1e-6)
+
+
 # ---- readouts -----------------------------------------------------------------------------------
 def _hooked(model, x_all):
     """The model's logits with the mixer's normalised tokens and the covariate vector caught on the way."""

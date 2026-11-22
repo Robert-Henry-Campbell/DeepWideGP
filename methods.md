@@ -1450,7 +1450,9 @@ published conversion is right, refuses the linear PRS path, and trains (on a GPU
 default embedding is still the published one. `tests/test_genostore_identifiers.py` checks that
 no participant ID or value reaches an error, chained exceptions included (unknown participants
 are counted, a non-number cell is not quoted, other label values are counted), and that
-per-person scores are refused in a git work tree or a run directory. In `tests/test_ml_train.py`,
+per-person scores are refused in a run directory and wherever a git repository could track them
+(a path its repository ignores, such as `data/` in the project's umbrella repository, is allowed;
+22 November 2026). In `tests/test_ml_train.py`,
 on the CPU, a resumed run scores only what it lacks: the pass it repeats once, an earlier best
 step once more, with a grid as its validation passes did, and results.json matches metrics.csv
 in each case.

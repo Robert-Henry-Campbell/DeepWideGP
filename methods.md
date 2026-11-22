@@ -852,11 +852,12 @@ results, 20–21 November 2026; all on the top rung's tuning set).
   ridge refitted for each partition:
   - 431 blocks: 0.6748, best at 15.5 of 20 epoch-equivalents (stopped early at 19.5);
   - 2,000 blocks: 0.6734, best at 17.8 of 20;
-  - 5,000 blocks: 0.6728 after 19 epoch-equivalents, when it was stopped.
+  - 5,000 blocks: 0.6730 at 19.8, still rising when it was stopped at 20.0.
 
   The finer partitions started learning later (after about 1, 4 and 6 epoch-equivalents), so the
-  cosine schedule may have cut them short. Robert stopped their extensions to 40 epoch-equivalents
-  and kept the 431-block model.
+  cosine schedule may have cut them short. Robert had both extended to 40 epoch-equivalents. The
+  2,000-block run then reached 0.6737 at 28.3, still below the 431-block model. He stopped both
+  extensions (at 31.3 and 20.0) and kept the 431-block model.
 - **Caveat.** Because the top rung's tuning set chose these settings, its result is optimistic. At
   the lower rungs the same settings are fixed in advance, with no search per rung.
 

@@ -1545,3 +1545,17 @@ from `tweaks`; the overnight extras that lost or are unused (`--cov_skip`, `--bl
   which ignores `data/`) made every `--save_scores` refuse its default place under `data/`. A path inside a work tree
   is now allowed when its innermost repository ignores it (`git check-ignore`); the run directory and trackable
   paths are still refused. Test with a real repository and an ignore file.
+- `methods.md` (01:00 UTC): new section 4.12, the final model: what it is for one participant, what it is not (not end
+  to end; the table is a fixed cross-fitted block ridge), its size, training, how the settings were chosen, its
+  top-rung result and the ladder. The status note at the top is rewritten around it. Statements that had become wrong
+  are corrected:
+  - "one network trained end to end";
+  - the 16-wide table and the Sigurdsson recipe as the model's settings (they are now marked as the parser's defaults
+    and the history);
+  - "the frozen cross-fitted first layer is not implemented";
+  - the section 10 row claiming a linear readout beside the head (removed on 17 Nov);
+  - the section 12 claim that the defaults are the cosine recipe (they are the plateau recipe).
+
+  Also added: the entropy normalisation (section 5.2), the ladder's single setting and no search (section 8), the
+  best-checkpoint-only rule (section 7), the cache's memory at d_e 32 and its GPU memory by batch (section 4.11), and
+  `CUDA_VISIBLE_DEVICES=` for CPU tests (section 13).

@@ -1585,3 +1585,38 @@ tables of all 22 chromosomes are byte-identical). The analysis that uses this is
   reading, identifiers, labels, classic-ladder inputs, blocks, entry points, training pieces and training: 160
   passed, 10 skipped, 1 failed: `test_ml_train.py::test_a_genotype_only_model_trains_without_covariate_parameters`
   (Mamba kernel needs CUDA; fails on unchanged widening too).
+
+## 2026-11-22 (04:10 UTC) — Classic DeepGP scored on its tuning set and the held-out groups (`score_genome.py`; not committed)
+
+For the held-out analysis above, the classic ladder's runs get per-person scores in the shared layout. Robert's rule
+(22 Nov): classic DeepGP's code may be edited to train and test it on our data, never its architecture.
+- `main_genome.py`, behaviour unchanged (`git diff -w` shows the real change): the script part is now `main()`, run
+  only as `__main__`, so the file can be imported; `build(configs)` makes the data module, the balanced sampler and
+  the untrained model in the script's order; `results_folder(configs)` names the results folder.
+- `score_genome.py`: per cell, the settings are rebuilt as the scheduler launched the run (its `ARGS`, read from
+  `schedule.py` without running it). They must equal every setting saved in the best checkpoint, SNP positions
+  included; the two options added to the parser since (`label_norm`, `per_disease_head`) are not in the checkpoints
+  and are ignored. The weights load strictly. The tuning set is scored first, through the loader the groups use
+  (`eval_dataloder`). Its AUROC (of the probabilities and of the logits) must be within 1e-5 of results.json
+  `val_auroc`, and each person's probability within 1e-5 of preds_val.pkl; otherwise nothing is written and the
+  call exits 1. Then `asian` and `black` are scored, with `dm.held_out_dir` set to `ard30/hm3plus_asian_black`; no
+  metric is computed on them. Outputs: `ard30/<rung>/scores/classic_deepgp/ladder/<disease>/{val,asian,black}.npz`
+  with iid, labels, y, and logits (the input of the final sigmoid, read by a forward hook on `combine`). Folders are
+  0700 and files 0600, written under a temporary name and renamed. Outputs that exist are kept unless `--force`;
+  `--all` takes every cell in the scheduler's `results/`; `--check_only` writes nothing.
+- Why 1e-5: the runs and the scorer are float32 on one GPU model (RTX 6000 Ada) with the same batches, so the
+  numbers should repeat exactly (a run's two passes already agree to the float32 rounding of the logged value,
+  3e-8). A wrong checkpoint, statistic, sign, scaling or person moves them far more.
+- Checked on the CPU on real data (nothing written, no genotypes read): for all 11 finished cells of the first rung,
+  the rebuilt settings equal the checkpoint's and the weights load strictly. The GPU check of one cell is prepared
+  in `runs/heldout_ancestry/checks/run_classic_check.sh`, not yet run.
+- Tests: `tests/test_score_genome.py` (17 CPU, 1 GPU). The CPU tests use a stub with the network's `combine` and
+  `opt`. They cover: settings from a scheduler file that cannot run, and `differing`; the real scheduler's
+  published settings; a reproduced cell's files (keys, types, shapes, modes 0700/0600, loader order, logit = the
+  sigmoid's input, a held-out copy scored bitwise like the tuning set, found only through `--held_out_dir`). They
+  also cover seven tamperings refused with nothing written and no held-out person read (AUROC, probabilities,
+  labels, people, a shifted bias that keeps the AUROC, a setting, a position), differences within the tolerance,
+  `--check_only`, resumption and `--force`, refusals inside the run or a git work tree, `--all`, and
+  `main_genome.build` against the script's former inline sequence (same weights from one seed). The GPU test
+  trains a small classic model with `main_genome.py` and re-scores it to its record. CPU: 17 passed, 1 skipped;
+  with the classic-ladder inputs, held-out and datamodule tests, 42 passed, 1 skipped.

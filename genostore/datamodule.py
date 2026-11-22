@@ -9,10 +9,16 @@ samples_val.tsv (datasets with named labels) and samples_<ve>.tsv (external coho
 Optional keys: "snps", an npz of the SNPs each whole-chromosome sequence keeps (idx_<chrom>, sorted store
 indices) and their signs (sign_<chrom>, +1 or -1: -1 turns a standardised dosage into that of the other
 allele), read from the full rows; "stats_dir", where the training SNP statistics are cached (default: here).
+
+A split whose table this dataset lacks (e.g. "asian", "black") is a held-out group of the sibling dataset
+``held_out_dir`` (HELD_OUT beside this one), read from that dataset's own store, which must hold the same
+variants in the same order; it is prepared with this dataset's training statistics, and every read is logged
+in the held-out dataset's access.log.
 """
 import hashlib
 import json
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -44,6 +50,24 @@ def _numbers(df, cols, dtype, split):
 
 def default_regions(store):
     return [[[c, 0, store.n_variants(c)]] for c in store.chroms]
+
+
+HELD_OUT = "hm3plus_asian_black"    # sibling dataset of the held-out groups (DeepWideGP-Scripts ridge_common.HELD_OUT)
+_SAME_VARIANTS = set()              # (store, other store) pairs already checked in this process
+
+
+def check_same_variants(store, other_dir):
+    """Refuse a second store whose variants (position, ID, alleles, order) or block width differ from ``store``'s."""
+    key = (os.path.realpath(store.dir), os.path.realpath(other_dir))
+    if key in _SAME_VARIANTS:
+        return
+    other = GenoStore(other_dir)
+    same = other.w == store.w and list(other.chroms) == list(store.chroms) and all(
+        np.array_equal(a[f], b[f]) for c in store.chroms for a, b in [(other.variants(c), store.variants(c))]
+        for f in ("pos", "id", "ref", "alt"))
+    if not same:
+        raise ValueError(f"the store {other_dir} holds other variants than {store.dir}")
+    _SAME_VARIANTS.add(key)
 
 
 class LazyVariantIDs:
@@ -175,6 +199,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
         if getattr(configs, "non_add", False) or len(getattr(configs, "use_sim", "")) > 0:
             raise NotImplementedError("--non_add / --use_sim are only implemented for the legacy pickle loader")
         self.dir = dataset_dir(configs)
+        self.held_out_dir = os.path.join(os.path.dirname(self.dir), HELD_OUT)   # a scorer may point it elsewhere
         spec = {}
         if os.path.exists(os.path.join(self.dir, "store.json")):
             with open(os.path.join(self.dir, "store.json")) as f:
@@ -288,16 +313,40 @@ class SNPStoreDataModule(pl.LightningDataModule):
             return np.concatenate([self.store.positions(c)[v0:v1] for c, v0, v1 in seq])
         raise ValueError("pos_mode must be 'index' or 'pos'")
 
-    def _read_table(self, split, row_of):
-        df = pd.read_csv(os.path.join(self.dir, f"samples_{split}.tsv"), sep="\t", dtype={"IID": str})
+    def _table_dir(self, split):
+        """(directory of samples_<split>.tsv, store directory or None for this dataset's own): a split this dataset
+        lacks is a held-out group of held_out_dir, in that dataset's store; such a read is logged there."""
+        if os.path.exists(os.path.join(self.dir, f"samples_{split}.tsv")):
+            return self.dir, None
+        d = self.held_out_dir
+        if not os.path.exists(os.path.join(d, f"samples_{split}.tsv")):
+            raise FileNotFoundError(f"samples_{split}.tsv is neither in {self.dir} nor in the held-out dataset {d}")
+        with open(os.path.join(d, "store.json")) as f:
+            store_dir = json.load(f)["store"]
+        store_dir = store_dir if os.path.isabs(store_dir) else os.path.join(d, store_dir)
+        check_same_variants(self.store, store_dir)
+        with open(os.path.join(d, "access.log"), "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\tsplit={split}\tdataset={self.dir}"
+                    f"\tpid={os.getpid()}\n")
+        return d, store_dir
+
+    def _read_table(self, split, row_of=None):
+        d, store_dir = self._table_dir(split)
+        if store_dir is not None:
+            row_of = {s: i for i, s in enumerate(GenoStore(store_dir).samples)}
+        row_of = self._row_of if row_of is None else row_of
+        df = pd.read_csv(os.path.join(d, f"samples_{split}.tsv"), sep="\t", dtype={"IID": str})
         missing = [s for s in df["IID"] if s not in row_of]
         if missing:                 # a count only: participant IDs never go into messages or logs
             raise KeyError(f"samples_{split}.tsv: {len(missing)} of {len(df)} IDs are not in the store")
         rows = np.array([row_of[s] for s in df["IID"]], dtype=np.int64)
-        fold = {} if self.folds is None else {"fold": self._fold_of(split, df["IID"].to_numpy(str))}
+        iid = df["IID"].to_numpy(str)
+        extra = {"iid": iid} if self.folds is None else {"iid": iid, "fold": self._fold_of(split, iid)}
+        if store_dir is not None:
+            extra["store_dir"] = store_dir      # never on train/test: the single-label split below slices every key
         if not self.multilabel:
             covs = [c for c in df.columns if c not in ("IID", "label")]
-            return {"rows": rows, "y": df["label"].to_numpy(), "cov": _numbers(df, covs, np.float64, split), **fold}
+            return {"rows": rows, "y": df["label"].to_numpy(), "cov": _numbers(df, covs, np.float64, split), **extra}
         absent = [c for c in self.label_names + self.cov_names if c not in df.columns]
         if absent:
             raise KeyError(f"samples_{split}.tsv lacks the columns {absent} named in store.json")
@@ -309,7 +358,11 @@ class SNPStoreDataModule(pl.LightningDataModule):
         cov = _numbers(df, self.cov_names, np.float64, split)
         if np.isnan(cov).any():
             raise ValueError(f"samples_{split}.tsv: covariates {self.cov_names} contain missing values")
-        return {"rows": rows, "y": y, "cov": cov, **fold}
+        return {"rows": rows, "y": y, "cov": cov, **extra}
+
+    def iids(self, split):
+        """The participants of a split (a held-out group too), in the order the loader returns them."""
+        return self.splits[split]["iid"] if split in self.splits else self._read_table(split)["iid"]
 
     def _fold_of(self, split, iids):
         """Each participant's table copy: the fold of --folds for a split it lists (every training participant must be
@@ -471,7 +524,7 @@ class SNPStoreDataModule(pl.LightningDataModule):
     def _dataset(self, sp):
         cov = sp["cov"] if self.data_mode == "snps_covs" else None
         pooled = sp.get("pooled")                  # set by train.cache_first_layer: the folds are already applied
-        return StoreBatchDataset(self.store_dir, self.regions, sp["rows"], cov, sp["y"],
+        return StoreBatchDataset(sp.get("store_dir", self.store_dir), self.regions, sp["rows"], cov, sp["y"],
                                  None if pooled is not None else sp.get("fold"), pooled)
 
     def _workers(self, ds):

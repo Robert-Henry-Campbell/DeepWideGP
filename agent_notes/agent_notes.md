@@ -1559,3 +1559,29 @@ from `tweaks`; the overnight extras that lost or are unused (`--cov_skip`, `--bl
   Also added: the entropy normalisation (section 5.2), the ladder's single setting and no search (section 8), the
   best-checkpoint-only rule (section 7), the cache's memory at d_e 32 and its GPU memory by batch (section 4.11), and
   `CUDA_VISIBLE_DEVICES=` for CPU tests (section 13).
+
+## 2026-11-22 (03:15 UTC) — Held-out groups through the store data module (Robert: test every model on the Asian and Black subsets)
+
+The held-out Asian (9,408) and Black (7,631) participants live in the sibling dataset `ard30/hm3plus_asian_black`
+with their own store (`genostore/hm3plus_asian_black`, the same 1,258,200 variants in the same order: the variant
+tables of all 22 chromosomes are byte-identical). The analysis that uses this is DeepWideGP-Scripts
+`scripts/heldout-ancestry/` (methods.md there).
+- `genostore/datamodule.py`: a split whose `samples_<split>.tsv` the dataset lacks is read from `held_out_dir`
+  (default: the sibling folder `HELD_OUT = "hm3plus_asian_black"`, the blocks pipeline's convention in
+  ridge_common.py; a scorer may set the attribute, as classic DeepGP must) in that dataset's own store, after
+  `check_same_variants` (position, ID, alleles, order and block width; refused otherwise). It is prepared with the
+  reading dataset's training statistics (SNP standardisation, covariate scaling, SNP list and signs, pseudo-folds),
+  so a model scores it exactly as it scores its tuning set. Every such read appends a line to the held-out
+  dataset's `access.log`. Splits now carry their participants (`"iid"`) and `dm.iids(split)` returns them in loader
+  order (a held-out group's too); a held-out split carries its `"store_dir"`, which `_dataset` reads from. Nothing
+  changes for a dataset's own splits.
+- `score_snapshots.py`: per-person IDs from `dm.iids(split)` (before, an extra table's IDs were taken from the
+  main store's sample list by row number, which would mislabel people of another store).
+- Tests: `tests/test_genostore_heldout.py` (8, CPU): a copy of the store under new IDs holding the tuning people
+  gives bitwise the tuning set's decoded batches through the held-out path (SNP statistics from training and from
+  the store); the copy's own genotypes are read, not the dataset's; other variants (one swapped allele) refused and
+  not logged; the dataset's own table wins and is not logged; missing tables and unknown people refused; another
+  held-out folder by attribute; held-out people get the pseudo-fold. Around them (CPU, 22 Nov): datamodule,
+  reading, identifiers, labels, classic-ladder inputs, blocks, entry points, training pieces and training: 160
+  passed, 10 skipped, 1 failed: `test_ml_train.py::test_a_genotype_only_model_trains_without_covariate_parameters`
+  (Mamba kernel needs CUDA; fails on unchanged widening too).

@@ -153,8 +153,7 @@ def main(argv=None):
         print(f"{tag}: mean AUROC {m['auroc_mean']:.4f}, mean cross-entropy {m['bce_mean']:.4f}", flush=True)
         if scores_dir:
             os.makedirs(scores_dir, mode=0o700, exist_ok=True)
-            sp = dm.splits[a.split] if a.split in dm.splits else dm._read_table(a.split, dm._row_of)
-            iid = np.asarray(dm.store.samples)[sp["rows"]].astype(str)   # text, so the file loads without pickle
+            iid = np.asarray(dm.iids(a.split)).astype(str)   # text, so the file loads without pickle
             path = os.path.join(scores_dir, f"{a.split}_{tag}.npz")
             np.savez(path, iid=iid, labels=np.array(names),
                      logit_population=(logits - shift).astype(np.float32), y=y.astype(np.float32))

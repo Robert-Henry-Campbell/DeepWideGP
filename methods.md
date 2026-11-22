@@ -880,7 +880,13 @@ results, 20–21 November 2026; all on the top rung's tuning set).
   only** (Robert, 22 November 2026): they are there to show whether it beats the covariates alone,
   with the seed spread as the measure of chance. The other models run one seed.
 - The test set is not touched until it is scored once for all models (section 9).
-- **Ladder record so far:** the third rung's seeds 2 and 3 were stopped at epochs 17.6 and 17.9
+- **Results** (finished 06:05 UTC, 22 November 2026; DeepWideGP-Scripts
+  `scripts/widedeepgp-final-ladder/results.md`), as mean tuning AUROC over the three seeds:
+  - it beats the covariates alone from 53,498 training participants up: +0.0028, +0.0063 and +0.0116 at the top rung,
+    against a seed SD of 0.0003 to 0.0006;
+  - it is 0.001 below them at the two smallest rungs;
+  - it stays 0.002 to 0.003 below the cross-fitted ridge PRS with the covariates at every rung.
+- **Ladder record:** the third rung's seeds 2 and 3 were stopped at epochs 17.6 and 17.9
   of 20 while the seeds were being decided, then resumed from their last checkpoints. Each
   resumed run's best checkpoint is re-scored like every other.
 

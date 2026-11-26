@@ -1620,3 +1620,45 @@ For the held-out analysis above, the classic ladder's runs get per-person scores
   `main_genome.build` against the script's former inline sequence (same weights from one seed). The GPU test
   trains a small classic model with `main_genome.py` and re-scores it to its record. CPU: 17 passed, 1 skipped;
   with the classic-ladder inputs, held-out and datamodule tests, 42 passed, 1 skipped.
+
+## 2026-11-26 (17:30 UTC) — The published encoders on the 431 LD blocks (`--input_mode snps --partition`; Robert)
+
+Robert asked for WideDeepGP to run classic DeepGP's within-sequence encoders over the 431 LD blocks instead of the
+22 chromosomes, with the published bidirectional Mamba or a transformer in its place, trained end to end with no ridge
+and nothing frozen. The only intended differences from classic DeepGP are the 30 outputs and the 431 blocks. Plan:
+`~/.claude/plans/widedeepgp-ld-block-encoders.md` (his five decisions: own weights per block, a head over all 432
+vectors, the published settings in bf16 with no search, no SNP nametag yet, share our own GPUs). His instruction:
+change WideDeepGP's code and keep the DeepGP code clean, so `models/`, `layers/`, `main_genome.py` and `genostore/`
+are untouched.
+- `widedeepgp/train.py`: `build_data` returns `LDBlockData` for SNP mode with `--partition`. It is a subclass of
+  `SNPStoreDataModule` that reads, decodes and standardises by the dataset's own sequences as before. `block_lengths`
+  gives each sequence's blocks from `load_partition`, and `decode_batch` cuts every batch into them (views).
+  `pos_chr` and `seq_len` are the blocks' (index positions restart in each block; base-pair positions are cut). A
+  store.json "snps" list is refused before any table is read. The model needed no change: SNP mode already builds one
+  embedding, encoder and norm per input sequence, the attention across them and a head of matching width.
+- First version, replaced the same hour: one data-module region per block (`ld_block_regions`). Decoding then took
+  3.3 s a batch of 16 on GPU 0 shared with two scPRS workers, against 0.38 s by chromosome. `torch_decode.decode_packed`
+  syncs once per piece (`int(exc.sum())`), and 431 pieces on a busy card wait long.
+- `args_generator.py`: help of `--input_mode` and `--partition` (the WideDeepGP section of the parser).
+  `widedeepgp/blocks.py`: the TransformerBlock docstring (it now also runs in SNP mode).
+- Sizes at width 32, one layer, 30 outputs, 12 covariates: Mamba 8,370,814, transformer 9,101,790 (the 22-chromosome
+  layout 465,662). Measured at the top rung's shape, bf16, batch 16, on GPU 0 beside two scPRS workers: Mamba 3.1 s a
+  step and 1.26 GiB a person (checkpointed 4.6 s, 0.07 GiB); transformer 5.5 s and 1.87 GiB (checkpointed 7.6 s,
+  0.05 GiB). The published batch of 64 therefore needs `--accumulate 4` at batch 16, or `--grad_ckpt`.
+- Tests: `tests/test_ml_ldseq.py` (10, CPU) and `tests/test_ml_ldseq_gpu.py` (9 with the slow timing). The helpers
+  `prive_block_lengths` and `ld_top_rung_model` are in `tests/ml_helpers.py`. Also fixed a stale test:
+  `test_ml_model_pieces.py::test_the_loss_constants_and_refusals` did not know the loss's `norm` buffer from 451e0dc
+  (`--label_norm`); it now also checks that the buffer is not saved.
+- Test runs: logs in `runs/ldseq_tests/`.
+  - First pass, on the per-block-region version: the new CPU tests 10 passed. On GPU 0, the new GPU tests had 7
+    passed and 2 failed, both mistakes in the test (no `--data_dir`; the scorer's covariates-only rows). Fixed, the
+    two passed.
+  - The SNP-mode GPU tests `test_ml_model.py` and `test_ml_train.py` (not slow): 33 passed.
+  - The CPU suite: 297 passed, 3 failed. One was the stale test above. Two were known before this change: the
+    genotype-only test needs CUDA (passes on the GPU), and the timing test `test_free_workers_take_the_next_trial`
+    fails under load.
+  - Final pass on the code committed (`runs/ldseq_tests/final_tests.log`, 17:43Z): the new GPU tests 9 passed on
+    GPU 1, beside scPRS; the timings repeated (Mamba 3.08 s, transformer 5.20 s). The whole CPU suite: 298 passed,
+    and 2 failed, the two known failures above.
+- Not run: no training on real or simulated labels. Robert, 26 Nov: no more DeepGP or WideDeepGP runs on
+  minor-allele dosages. His next changes: risk-allele dosages everywhere, learnable SNP IDs, then a SNP selection step.

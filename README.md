@@ -175,7 +175,10 @@ the model of the pilot and of the classic single-disease comparator, not the rep
 WideDeepGP. Read methods.md section 4.9 before using it on unselected SNPs: in the pilot on real
 data (DeepWideGP-Scripts, branch `widening`, `scripts/widedeepgp-pilot/`; written results in git
 history at 784009f) it ended slightly below a logistic model on the covariates and learned
-nothing detectable from them.
+nothing detectable from them. With `--partition` it takes one sequence per LD block instead of per
+chromosome (431 with `prive431`), each with the published embedding, encoder and normalisation of
+its own, trained end to end with no ridge and nothing frozen (methods.md section 4.13; 26 November
+2026). `--mixer transformer` puts a pre-norm transformer layer in place of each Mamba layer.
 
 **The linear PRS path** (`--wide on` or `only`, SNP mode only; methods.md section 4.10) gives
 every SNP and disease a weight with a ridge penalty beside, or instead of, the network, and a run
@@ -202,6 +205,10 @@ python main_multilabel.py ... --init_encoder <dataset dir>/blocks/pretrained_pri
 # the SNP-token mode (the published network, constant learning rate), with the linear PRS path beside it
 python main_multilabel.py ... --input_mode snps --lr_schedule constant --warmup_steps 0 \
     --final_pool atten --d_model 32 --e_layers 1 --n_heads 4 --batch_size 16 [--wide on]
+# the same published encoders on the 431 LD blocks instead of the 22 chromosomes (methods.md 4.13)
+python main_multilabel.py ... --input_mode snps --partition <data>/reference/partitions/prive431 \
+    --mixer bimamba1 --lr_schedule constant --warmup_steps 0 --final_pool atten --d_model 32 --e_layers 1 \
+    --n_heads 4 --precision bf16 --tune_trials 0   # --mixer transformer: a transformer layer in each block
 tensorboard --logdir runs/
 
 # three-minute check of the SNP-token mode on six synthetic traits (generated on first use)
@@ -210,9 +217,9 @@ CUDA_VISIBLE_DEVICES=<gpu> bash scripts/multilabel_synthetic.sh
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--input_mode` | `blocks`: a per-SNP table pooled by LD block, then one mixer over the block tokens and the covariate token; `snps`: the published per-chromosome SNP encoders | `blocks` |
+| `--input_mode` | `blocks`: a per-SNP table pooled by LD block, then one mixer over the block tokens and the covariate token; `snps`: the published SNP encoders, one per chromosome, or one per LD block with `--partition` | `blocks` |
 | `--dm` | `snps_covs`: genotypes and the covariates (the covariate token and vector); `snps`: the genotype-only model, with no covariate parameters | `snps_covs` |
-| `--partition` | blocks mode: a `partition.npz` or its folder (`data/reference/partitions/prive431`, `ldsplit2000`, `ldsplit5000`), checked against the store's chromosomes, variant counts and variant IDs; `uniform:<k>` (k SNPs per block) for tests | none (required in blocks mode) |
+| `--partition` | a `partition.npz` or its folder (`data/reference/partitions/prive431`, `ldsplit2000`, `ldsplit5000`), checked against the store's chromosomes, variant counts and variant IDs; `uniform:<k>` (k SNPs per block) for tests. Blocks mode: the blocks the table is pooled by. SNP mode: one input sequence per LD block instead of per chromosome (methods.md 4.13; not with a store.json `"snps"` list) | none (required in blocks mode) |
 | `--mixer` | `bimamba1` (the published block), `transformer` (a pre-norm `nn.TransformerEncoderLayer`, feed-forward width 4d, GELU) or `mamba3` (needs `scripts/setup_mamba3_env.sh`) | `bimamba1` |
 | `--snp_code` | blocks mode: `dosage` (one vector per SNP times its standardised dosage) or `genotype` (three vectors per SNP, for 0, 1 and 2 copies, interpolated; reads raw dosages) | `dosage` |
 | `--embed_dim` | blocks mode: width of the per-SNP table (d_e) | 16 |

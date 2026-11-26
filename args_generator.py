@@ -69,8 +69,8 @@ def args_initial(argv=None):
     parser.add_argument('--labels', help="comma-separated subset of the dataset's label columns (default: all of them)")
     parser.add_argument('--mixer', default='bimamba1', help="sequence block: 'bimamba1' (the published block), 'mamba3', or 'transformer' (a pre-norm encoder layer)")
     # LD-block mode (DeepWideGP-Scripts scripts/widedeepgp-blocks/methods.md): a per-SNP table pooled by LD block, then one mixer over the blocks
-    parser.add_argument('--input_mode', default='snps', help="'snps' (the published per-chromosome SNP encoders) or 'blocks' (a per-SNP table pooled by LD block, then one mixer over the block tokens)")
-    parser.add_argument('--partition', help="blocks mode: a partition.npz (or its folder) under data/reference/partitions/, or 'uniform:<k>' (k SNPs per block, tests)")
+    parser.add_argument('--input_mode', default='snps', help="'snps' (the published SNP encoders, one per input sequence: per chromosome, or per LD block with --partition) or 'blocks' (a per-SNP table pooled by LD block, then one mixer over the block tokens)")
+    parser.add_argument('--partition', help="a partition.npz (or its folder) under data/reference/partitions/, or 'uniform:<k>' (k SNPs per block, tests); blocks mode: the blocks the table is pooled by; SNP mode of main_multilabel.py: one input sequence per LD block instead of per chromosome")
     parser.add_argument('--snp_code', default='dosage', help="blocks mode: 'dosage' (one vector per SNP times its standardised dosage) or 'genotype' (three vectors per SNP, for 0, 1 and 2 copies, interpolated between)")
     parser.add_argument('--embed_dim', type=int, default=16, help='blocks mode: width of the per-SNP table')
     parser.add_argument('--table_kappa', type=float, default=0.03, help="blocks mode: the table's learning rate is kappa * sqrt(batch) / sqrt(SNPs)")

@@ -22,7 +22,7 @@ import torch
 from lightning_fabric.utilities.apply_func import move_data_to_device
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from genostore.datamodule import SNPStoreDataModule, dataset_dir, is_store_dataset
+from genostore.datamodule import SNPStoreDataModule, dataset_dir, is_store_dataset, load_partition
 
 from . import metrics as M
 from .blockencoder import table_learning_rate
@@ -38,7 +38,37 @@ def build_data(cfg):
     if not is_store_dataset(cfg):
         raise FileNotFoundError(f"{dataset_dir(cfg)}/store.json not found: the multi-disease model reads "
                                 "disk-backed datasets only (genostore/README.md)")
+    if getattr(cfg, "input_mode", "snps") == "snps" and getattr(cfg, "partition", None):
+        return LDBlockData(cfg)
     return SNPStoreDataModule(cfg)
+
+
+def block_lengths(partition):
+    """Per input sequence, the SNP counts of its LD blocks in order (load_partition's blocks are contiguous runs)."""
+    return [np.unique(a, return_counts=True)[1].tolist() for a in partition["ids"]]
+
+
+class LDBlockData(SNPStoreDataModule):
+    """SNP mode with --partition: the published per-sequence encoders on one sequence per LD block instead of per
+    chromosome (methods.md 4.13). Genotypes are read, decoded and standardised by the dataset's own sequences as
+    always (decoding block by block was 9 times slower on a shared GPU), and every batch is then cut into its blocks."""
+
+    def __init__(self, cfg):
+        with open(os.path.join(dataset_dir(cfg), "store.json")) as f:     # refused before any table is read
+            if json.load(f).get("snps"):
+                raise ValueError('--partition in SNP mode (one sequence per LD block) does not take a store.json "snps" list')
+        super().__init__(cfg)
+        self.cuts = block_lengths(load_partition(cfg.partition, self.store, self.regions))
+        self.seq_len = [n for c in self.cuts for n in c]
+        if self.pos_mode == "pos":                       # base-pair positions, cut by block
+            self.pos_chr = [b for p, c in zip(self.pos_chr, self.cuts) for b in np.split(p, np.cumsum(c)[:-1])]
+        else:                                            # the index along each sequence, as published: here the block
+            self.pos_chr = [np.arange(n) for n in self.seq_len]
+
+    def decode_batch(self, batch):
+        x_all, *rest = super().decode_batch(batch)
+        k = len(self.cuts)
+        return ([b for x, c in zip(x_all[:k], self.cuts) for b in torch.split(x, c, dim=1)] + x_all[k:], *rest)
 
 
 def train_labels(dm):

@@ -263,9 +263,10 @@ covers 1,250,863 of the 1,258,200 SNPs (99.4%); the others get zeros and a 97th 
 
 The network maps a participant's genotypes and covariates to one logit per disease. Sections
 4.1 to 4.10 describe the SNP-token mode (`--input_mode snps`), the published network widened,
-section 4.11 the LD-block mode that is the default since 17 November 2026, and section 4.12 the
-final model, one configuration of that mode (22 November 2026). Sections 4.2, 4.7, 4.10, 4.11 and
-4.12 differ in kind from published DeepGP; section 10 lists every difference.
+section 4.11 the LD-block mode that is the default since 17 November 2026, section 4.12 the
+final model, one configuration of that mode (22 November 2026), and section 4.13 the SNP-token
+mode with one input sequence per LD block instead of per chromosome (26 November 2026). Sections
+4.2, 4.7, 4.10, 4.11 and 4.12 differ in kind from published DeepGP; section 10 lists every difference.
 
 ![Figure 1. WideDeepGP](figures/widedeepgp_architecture.png)
 
@@ -889,6 +890,120 @@ results, 20–21 November 2026; all on the top rung's tuning set).
 - **Ladder record:** the third rung's seeds 2 and 3 were stopped at epochs 17.6 and 17.9
   of 20 while the seeds were being decided, then resumed from their last checkpoints. Each
   resumed run's best checkpoint is re-scored like every other.
+
+### 4.13 The published encoders on LD blocks (26 November 2026)
+
+*An option of the SNP-token mode (`--input_mode snps` with `--partition`), built at Robert's request on
+26 November 2026. It has not been trained on real or simulated labels yet.*
+
+**What it is.** The network of sections 4.1 to 4.7 with one input sequence per LD block instead of one per
+chromosome. With Privé's partition (`prive431`) that is 431 sequences of 119 to 15,194 SNPs (median 1,636),
+together all 1,258,200 HapMap3+ SNPs. Every block is treated as published DeepGP treats a chromosome:
+- it has its own token embedding: the three-SNP convolution and the fixed sinusoidal code of the SNP's index,
+  now its index within the block (section 4.1);
+- it has its own encoder of `--e_layers` layers. Either the published bidirectional Mamba block (`--mixer
+  bimamba1`, section 4.3), or a pre-norm transformer encoder layer in its place (`--mixer transformer`:
+  self-attention over all the block's SNPs with `--n_heads` heads, a feed-forward layer of width 4*d*, GELU,
+  dropout `--dropout`);
+- it has its own final root-mean-square normalisation, then the mean over its SNPs (section 4.4).
+
+The covariate encoder (4.5) is unchanged. The attention layer (4.6) now runs across 432 vectors (431 blocks
+and the covariates), and the head (4.7) reads the 432 vectors concatenated. The network is trained end to end
+from the dosages. There is no ridge and no per-SNP table, and nothing is frozen.
+
+**Why.** Robert asked for the published architecture with two changes only: the 30 disease outputs, and 431
+LD blocks in place of 22 chromosomes, with the Mamba block or a transformer in its place. Three more
+differences are forced by the study design:
+- all HapMap3+ SNPs rather than GWAS-selected ones (the SNP set shared with the PGI arm, section 3);
+- batches shuffled at natural prevalence (section 5), since the published 1:1 batches serve one disease;
+- the allele the store counts, since one risk-allele flip cannot serve 30 diseases.
+bf16 (`--precision bf16`) is the setting for both mixers: the transformer needs it for the fast attention
+kernels on blocks of up to 15,194 SNPs, and the pilot found that bf16 does not change the AUROC (section 6).
+
+**How it is built.** `widedeepgp/train.py` (`build_data`, `LDBlockData`, `block_lengths`). With `--partition` in
+SNP mode, the trainer's data module is a subclass of the store's that reads, decodes and standardises the
+genotypes by the dataset's own sequences, as always, and then cuts every batch into its LD blocks (views, no
+copy). Its positions and sequence lengths are the blocks'.
+- The partition is the one blocks mode uses, with the same checks against the store (section 4.11). It is
+  clipped to the dataset's own sequences, and a block may span two segments of one sequence.
+- The model is unchanged: it already builds one embedding, encoder and normalisation per input sequence, the
+  attention across all of them and a head of matching width.
+- The split is made in WideDeepGP's trainer, not in the shared data module, so `main_genome.py` and the
+  published network never see it. The authors' code (`models/`, `layers/`, `main_genome.py`) is untouched.
+- The SNP statistics are the chromosomes' own, so a dataset's cached statistics serve both layouts.
+- Decoding block by block was tried first. With one region per block, it took 3.3 s a batch of 16 on a GPU
+  shared with another job, nine times the 0.38 s of decoding by chromosome, because the decoder waits for the
+  GPU once per piece.
+- A store.json `"snps"` list is refused with it, before any table is read.
+- A checkpoint records the sequences' lengths and the digest of their positions, so a model trained on the
+  blocks is refused on the chromosome sequences and the other way round.
+
+**Size.** Counted from the constructed networks, with 30 outputs, 12 covariates, width 32 and one layer:
+
+| Part | Mamba | Transformer | Published layout (22 chromosomes) |
+|---|---|---|---|
+| One sequence (layer, embedding, final normalisation) | 11,008 + 96 + 32 | 12,704 + 96 + 32 | 11,008 + 96 + 32 |
+| All sequences | 4,799,616 (431) | 5,530,592 (431) | 244,992 (22) |
+| Covariate encoder | 11,584 | 11,584 | 11,584 |
+| Attention across the sequences | 12,704 | 12,704 | 12,704 |
+| Head | 3,546,910 (432 × 32 inputs) | 3,546,910 | 196,382 (23 × 32) |
+| **Total** | **8,370,814** | **9,101,790** | **465,662** |
+
+**Compute.** Measured on 26 November 2026 at the top rung's shape (431 blocks of the real lengths, 30 outputs, 12
+covariates, random standardised dosages), bf16, batch 16, on an RTX 6000 Ada shared with two scPRS workers. An idle
+card would be faster; sharing roughly halved per-job speed in the 22 November check.
+
+| Mixer | Seconds a step | Peak memory | Per person |
+|---|---|---|---|
+| Mamba | 3.1 | 20.1 GiB | 1.26 GiB |
+| Mamba, checkpointed per block (`--grad_ckpt`) | 4.6 | 1.2 GiB | 0.07 GiB |
+| Transformer | 5.2–5.5 | 30.0 GiB | 1.87 GiB |
+| Transformer, checkpointed per block | 7.6 | 0.8 GiB | 0.05 GiB |
+
+- **Time per pass.** The table's speeds were measured twice, and the two runs agree within 6%. At these speeds one
+  pass over the 215,872 training participants (13,492 steps) takes about 12 hours with Mamba and 20 hours with the
+  transformer. Decoding adds 0.38 s a batch, and the four validations
+  per pass add more.
+- **Against the published layout.** On an idle card, the 22-chromosome layout on all HapMap3+ SNPs ran at 16.7
+  participants a second in bf16 (12 November 2026), against 5.1 here. Sharing and the 431 sequences' extra kernel
+  launches cannot be told apart from this.
+- **Batch.** The published batch of 64 does not fit without checkpointing (1.26 GiB a person). A run takes
+  `--batch_size 16 --accumulate 4`, the same optimiser steps (no layer depends on the batch), or `--grad_ckpt` at
+  about 1.5 times the time.
+
+**What to expect.** No SNP has a weight of its own (section 4.9). Within a block every SNP passes through
+the same filter and is told apart only by the position code. The 431 blocks give 18 times the weights and
+sequences 35 times shorter (median 1,636 SNPs against about 57,000 per chromosome), which may help. But on
+unselected SNPs the published layout stayed at chance on simulated traits (0.51). Robert's next changes
+(26 November 2026), not built yet:
+- risk-allele dosages for every DeepGP and WideDeepGP model;
+- a learned identity for every SNP;
+- a step that selects SNPs from the 1.26 million.
+
+**Tests.** `tests/test_ml_ldseq.py` (10, CPU) checks:
+- one sequence per block, from a uniform partition and from a partition file;
+- blocks clipped to the dataset's own sequences, one of them spanning two segments of a sequence;
+- positions restarting in every block, or the store's base-pair positions cut by block;
+- that the block sequences carry exactly the chromosomes' standardised dosages, with the store's and with the
+  training statistics;
+- one published encoder per block and a head over all of them, with the difference in parameters from the
+  22-chromosome model given by formula;
+- that a checkpoint refuses the chromosome sequences;
+- the real Privé partition: 431 blocks, 119 to 15,194 SNPs, median 1,636, all 1,258,200 SNPs;
+- the top-rung sizes above;
+- that a store.json SNP list is refused, and that blocks mode and the shared data module (what `main_genome.py`
+  builds) are unchanged.
+
+`tests/test_ml_ldseq_gpu.py` (9, GPU) checks:
+- that both mixers train a step in bf16, with a gradient in every block's encoder;
+- that a run with the published settings re-scores its best checkpoint to its record (within 10⁻⁴), resumes, and
+  refuses to resume on the chromosome sequences;
+- that the transformer runs the largest block (15,194 SNPs, four people) through the fast attention kernels in under
+  1 GiB, where the plain kernel would need 7.4 GiB for the scores alone;
+- the memory and step times above (marked slow).
+
+On the committed code (26 November 2026) the 9 GPU tests passed. The whole CPU suite had 298 passed and 2 failed,
+both failing before this change: a test that needs the GPU (it passes there) and a timing test that fails under load.
 
 ## 5. Training objective
 

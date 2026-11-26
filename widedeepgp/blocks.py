@@ -6,8 +6,9 @@
                --bi_direct, gives the backward direction weights of its own)
     mamba3     upstream Mamba-3, one direction only, as a pair reading forwards and backwards
                (BiDirectional); it needs its own environment (the fork and upstream share a name)
-    transformer  a pre-norm transformer encoder layer (torch.nn), for the block tokens; it keeps no
-               residual stream outside the layer, so it returns (hidden_states, None)
+    transformer  a pre-norm transformer encoder layer (torch.nn), for the block tokens, or in SNP mode for the
+               SNPs of each input sequence; it keeps no residual stream outside the layer, so it returns
+               (hidden_states, None)
 """
 from functools import partial
 

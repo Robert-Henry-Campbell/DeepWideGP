@@ -341,7 +341,8 @@ def test_the_loss_constants_and_refusals():
     with pytest.raises(ValueError, match="outputs must be"):
         WideLoss(y, outputs="some")
     loss = WideLoss(y, case_share=0.4)
-    assert [name for name, _ in loss.named_buffers()] == ["pi", "c1", "z", "rate_case", "rate_ctrl", "logit_shift"]
+    assert [name for name, _ in loss.named_buffers()] == ["pi", "c1", "z", "rate_case", "rate_ctrl", "logit_shift", "norm"]
+    assert "norm" not in loss.state_dict()                              # --label_norm's factor (451e0dc) is not saved
     n1, n0 = np.nansum(y, axis=0), np.nansum(1 - y, axis=0)
     pi = n1 / (n1 + n0)
     c = np.minimum(np.sqrt((1 - pi) / pi), 20.0)

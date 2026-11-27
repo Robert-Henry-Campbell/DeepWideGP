@@ -1662,3 +1662,9 @@ are untouched.
     and 2 failed, the two known failures above.
 - Not run: no training on real or simulated labels. Robert, 26 Nov: no more DeepGP or WideDeepGP runs on
   minor-allele dosages. His next changes: risk-allele dosages everywhere, learnable SNP IDs, then a SNP selection step.
+
+## 2026-11-27 (16:00 UTC) — Write-up and figure rules added to `CLAUDE.md` (Robert)
+
+- `CLAUDE.md` gains Robert's "Write-ups and figures" section: a short, scientific `methods.md` and `results.md` per
+  analysis, and every figure as a `.png`, `.data.csv` and `.legend.txt` of one name, in Nature size and style. The
+  project-wide `/mnt/sdg/robert/deepwidegp/CLAUDE.md` carries the same text as its section 10. No code changed.
